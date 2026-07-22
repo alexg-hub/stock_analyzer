@@ -1,0 +1,27 @@
+{
+    "discord": {
+        "webhook_url": "PASTE_YOUR_DISCORD_WEBHOOK_URL_HERE",
+        "send_message_when_no_breakouts": true,
+        "username": "Breakout Scanner",
+        "request_timeout_seconds": 15
+    },
+    "data": {
+        "sp500_source_url": "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
+        "download_period": "1y",
+        "download_interval": "1d"
+    },
+    "strategy": {
+        "consolidation_window_days": 126,
+        "max_consolidation_range_pct": 0.20,
+        "volume_sma_days": 30,
+        "volume_surge_multiplier": 1.5
+    },
+    "fundamentals": {
+        "enabled": true,
+        "fields": {
+            "trailingPE": "P/E",
+            "trailingPegRatio": "PEG",
+            "debtToEquity": "Total Debt/Equity"
+        }
+    }
+}
