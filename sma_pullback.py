@@ -27,7 +27,7 @@ All parameters live in the `pullback_strategy` section of config.json.
 import pandas as pd
 
 import charts
-from scanner_common import ScanResult, fund_suffix, fmt_value, single_ticker_panel
+from scanner_common import ScanResult, fmt_value, fundamentals_lines, single_ticker_panel
 
 # Config section this screen reads (run_scanners.py registry contract).
 CONFIG_KEY = "pullback_strategy"
@@ -155,8 +155,9 @@ def scan(data: pd.DataFrame, strategy: dict) -> ScanResult:
     )
 
 
-def format_section(result: ScanResult, fund_labels: list[str] = ()) -> str:
+def format_section(result: ScanResult, fund_cfg: dict = None) -> str:
     """This screen's block of the combined Discord message."""
+    fund_cfg = fund_cfg or {}
     strategy = result.strategy
     sma_days = strategy["sma_days"]
     lookback = strategy["trend_lookback_days"]
@@ -173,8 +174,8 @@ def format_section(result: ScanResult, fund_labels: list[str] = ()) -> str:
             f"above SMA {row['Above %']:.0f}% of last {lookback}d, "
             f"SMA {row['SMA Slope %']:+.1f}% over "
             f"{strategy['sma_slope_lookback_days']}d"
-            + fund_suffix(row, fund_labels)
         )
+        lines += [f"  {l}" for l in fundamentals_lines(row, fund_cfg)]
     return "\n".join(lines)
 
 

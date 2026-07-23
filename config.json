@@ -22,10 +22,10 @@
     "pullback_strategy": {
         "enabled": true,
         "sma_days": 150,
-        "touch_band_pct": 0.02,
+        "touch_band_pct": 0.04,
         "trend_lookback_days": 252,
         "sma_slope_lookback_days": 63,
-        "min_days_above_sma_pct": 0.9,
+        "min_days_above_sma_pct": 0.8,
         "alert_only_on_band_entry": true
     },
     "charts": {
@@ -39,8 +39,21 @@
             "trailingPE": "P/E",
             "trailingPegRatio": "PEG",
             "debtToEquity": "Total Debt/Equity",
-            "revenueGrowth": "Rev YoY %"
+            "revenueGrowth": "Rev YoY %",
+            "dividendYield": "Div Yield %",
+            "payoutRatio": "Payout %"
         },
-        "percent_fields": ["revenueGrowth"]
+        "percent_fields": ["revenueGrowth", "payoutRatio"],
+        "statements": {
+            "enabled": true,
+            "years": 2,
+            "metrics": {
+                "fcf": "FCF",
+                "operating_margin": "OpM",
+                "profit_margin": "PM",
+                "roe": "ROE",
+                "roic": "ROIC"
+            }
+        }
     }
 }

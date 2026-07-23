@@ -59,7 +59,6 @@ def main() -> int:
 
     # -- one fundamentals pass for every hit/near ticker of every screen --
     fund_cfg = cfg["fundamentals"]
-    fund_labels = list(fund_cfg["fields"].values()) if fund_cfg["enabled"] else []
     wanted = []
     for _, result in results:
         for ticker in list(result.hits.index) + list(result.near.index):
@@ -67,9 +66,7 @@ def main() -> int:
                 wanted.append(ticker)
     if fund_cfg["enabled"] and wanted:
         print("Fetching fundamentals for hit + near-miss tickers...")
-        fundamentals = fetch_fundamentals(
-            wanted, fund_cfg["fields"], fund_cfg.get("percent_fields", [])
-        )
+        fundamentals = fetch_fundamentals(wanted, fund_cfg)
         for _, result in results:
             result.hits = result.hits.join(fundamentals)
             if not result.near.empty:
@@ -87,7 +84,7 @@ def main() -> int:
         return 0
 
     # -- compose one message from each screen's section --
-    sections = [module.format_section(result, fund_labels)
+    sections = [module.format_section(result, fund_cfg)
                 for module, result in results]
     message = "\n\n".join([f"**S&P 500 Scan -- {scan_date}**"] + sections)
 

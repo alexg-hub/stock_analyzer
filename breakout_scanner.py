@@ -21,7 +21,7 @@ All parameters live in the `strategy` section of config.json.
 import pandas as pd
 
 import charts
-from scanner_common import ScanResult, fund_suffix, fmt_value, single_ticker_panel
+from scanner_common import ScanResult, fmt_value, fundamentals_lines, single_ticker_panel
 
 # Config section this screen reads (run_scanners.py registry contract).
 CONFIG_KEY = "strategy"
@@ -173,8 +173,9 @@ def scan(data: pd.DataFrame, strategy: dict) -> ScanResult:
     )
 
 
-def format_section(result: ScanResult, fund_labels: list[str] = ()) -> str:
+def format_section(result: ScanResult, fund_cfg: dict = None) -> str:
     """This screen's block of the combined Discord message."""
+    fund_cfg = fund_cfg or {}
     lines = [f"__{result.title}__"]
     if result.hits.empty and result.near.empty:
         lines.append("No breakouts and no near-miss candidates today.")
@@ -189,13 +190,14 @@ def format_section(result: ScanResult, fund_labels: list[str] = ()) -> str:
                 f"**{ticker}** | Close {fmt_value(row['Close'])} broke range high "
                 f"{fmt_value(row['Range High'])} (range {fmt_value(row['Range %'])}%, "
                 f"vol {fmt_value(row['Vol Ratio'])}x avg)"
-                + fund_suffix(row, fund_labels)
             )
+            lines += [f"  {l}" for l in fundamentals_lines(row, fund_cfg)]
 
     if not result.near.empty:
         lines.append(f"{len(result.near)} near-miss candidate(s) (failed one condition):")
         for ticker, row in result.near.iterrows():
-            lines.append(f"**{ticker}** | {row['Reason']}{fund_suffix(row, fund_labels)}")
+            lines.append(f"**{ticker}** | {row['Reason']}")
+            lines += [f"  {l}" for l in fundamentals_lines(row, fund_cfg)]
     return "\n".join(lines)
 
 

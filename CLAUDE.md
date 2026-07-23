@@ -76,13 +76,22 @@ real send.
   backtest log intentionally shows all 2-of-3 days). The pullback screen has
   no production near-miss list; its backtest logs touch days that failed and
   why.
+- **Fundamentals are two config-driven layers** (`scanner_common.py`):
+  `fields` = snapshot values from Yahoo `info` (`percent_fields` lists keys
+  Yahoo returns as fractions, ×100 before display — but `dividendYield` is
+  already a percentage, keep it OUT of `percent_fields`); `statements` =
+  per-year metrics computed from `Ticker.income_stmt`/`cash_flow`/
+  `balance_sheet` (FCF, OpM, PM per fiscal year; ROE with `info` fallback;
+  ROIC = EBIT×(1−tax rate)/Invested Capital). Multi-year values are stored
+  as `[(fiscal_year, value)]` lists in the joined DataFrame;
+  `fundamentals_lines()` renders the indented alert block. Missing statement
+  rows (banks lack Operating Income; a bank's hugely negative FCF is
+  genuine) render as `n/a` — same tolerance rule as `info` fields.
 - **Everything tunable lives in `config.json`** (per-screen strategy
   sections, charts, Discord, fundamentals fields) and all user-facing text
   (alert lines, backtest STEP logs, chart labels) is built from those values
   at runtime — never hardcode a threshold or a literal like "150d SMA".
-  `fundamentals.fields` maps Yahoo `info` keys → display labels;
-  `percent_fields` lists keys Yahoo returns as fractions (×100 before
-  display). Adding a metric to alerts is a config-only change.
+  Adding a metric to alerts is a config-only change.
 
 ## Constraints and gotchas
 

@@ -66,9 +66,26 @@ Unlike the breakout screen's prior-window (shift-by-one) convention, the SMA
 here includes the current day — that is the charting-standard SMA a "touch of
 the 150-day line" refers to.
 
-Hits of both screens are enriched with fundamentals from Yahoo Finance
-(currently P/E, PEG, Total Debt/Equity, and latest-quarter YoY revenue
-growth — the list is config-driven).
+## Fundamentals
+
+Every hit and near-miss ticker gets a fundamentals block under its alert
+line, from two config-driven layers (`fundamentals` in `config.json`):
+
+- **Snapshot fields** from Yahoo `info` (`fields` map): currently P/E, PEG,
+  Total Debt/Equity, latest-quarter YoY revenue growth, dividend yield,
+  payout ratio.
+- **Statement metrics** computed from the last `statements.years` annual
+  reports (income statement / cash flow / balance sheet):
+  - FCF per year (cash-flow "Free Cash Flow")
+  - Operating margin and profit margin per year
+  - ROE = Net Income / Stockholders Equity (falls back to Yahoo's `info`
+    value when statement rows are missing)
+  - ROIC = EBIT × (1 − tax rate) / Invested Capital
+
+Metrics Yahoo doesn't provide for a company (banks have no operating income,
+negative-equity companies no D/E, ...) show as `n/a`. A bank's FCF can be a
+large negative number — that is Yahoo's genuine figure (deposit/loan flows
+dominate bank cash-flow statements), not a bug.
 
 ## Usage
 
@@ -116,8 +133,11 @@ python backtest_pullback.py --ticker MSFT --start 2024-01-01 --end 2025-06-30
 | `charts.lookback_days` | `250` | Trading days shown in alert charts |
 | `charts.dpi` | `120` | Alert-chart resolution |
 | `fundamentals.enabled` | `true` | Fetch fundamentals for hits and near-misses |
-| `fundamentals.fields` | 4 fields | Yahoo `info` key → display label; add/remove entries to change what the alert shows |
-| `fundamentals.percent_fields` | `revenueGrowth` | Fields Yahoo returns as fractions, converted to % |
+| `fundamentals.fields` | 6 fields | Yahoo `info` key → display label; add/remove entries to change what the alert shows |
+| `fundamentals.percent_fields` | `revenueGrowth`, `payoutRatio` | Fields Yahoo returns as fractions, converted to % (note: `dividendYield` is *not* here — Yahoo already returns it as a %) |
+| `fundamentals.statements.enabled` | `true` | Compute per-year metrics from the annual statements |
+| `fundamentals.statements.years` | `2` | How many recent fiscal years to show |
+| `fundamentals.statements.metrics` | 5 metrics | Metric → display label; remove an entry to drop it from the alert |
 
 ## Nightly schedule (Windows Task Scheduler)
 

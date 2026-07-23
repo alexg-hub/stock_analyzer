@@ -147,19 +147,117 @@ def single_ticker_panel(data: pd.DataFrame, ticker: str) -> pd.DataFrame:
 # Fundamentals for the hits
 # --------------------------------------------------------------------------
 
-def fetch_fundamentals(tickers: list[str], fields: dict[str, str],
-                       percent_fields: list[str] = ()) -> pd.DataFrame:
+def _stmt_value(df: pd.DataFrame, row_name: str, column) -> float | None:
+    """One cell of an annual statement, or None when the row is missing
+    (banks have no Operating Income, negative-equity companies etc.)."""
+    if df.empty or row_name not in df.index or column not in df.columns:
+        return None
+    value = df.loc[row_name, column]
+    return float(value) if pd.notna(value) else None
+
+
+def _yearly_series(values: list[tuple[int, float | None]]) -> list[tuple[int, float]]:
+    """Drop missing years; keep (fiscal_year, value) oldest -> newest."""
+    return [(year, value) for year, value in values if value is not None]
+
+
+def _statement_metrics(tk: "yf.Ticker", stmt_cfg: dict, info: dict) -> dict:
+    """Compute the statement-based metrics for one ticker.
+
+    Multi-year metrics (FCF, margins) are stored as [(fiscal_year, value)]
+    lists oldest -> newest; ROE/ROIC as scalar percents. Anything Yahoo
+    doesn't provide for this company simply stays None -> 'n/a'.
+    """
+    years = stmt_cfg.get("years", 2)
+    metrics = stmt_cfg.get("metrics", {})
+
+    def statement(name: str) -> pd.DataFrame:
+        try:
+            df = getattr(tk, name)
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                return df
+        except Exception as exc:  # noqa: BLE001 - missing statements must not kill the alert
+            print(f"  {name} failed for {tk.ticker}: {exc}")
+        return pd.DataFrame()
+
+    income = statement("income_stmt")
+    cashflow = statement("cash_flow")
+    balance = statement("balance_sheet")
+
+    # The `years` most recent annual columns, oldest -> newest.
+    inc_cols = sorted(income.columns)[-years:] if not income.empty else []
+    cf_cols = sorted(cashflow.columns)[-years:] if not cashflow.empty else []
+
+    row = {}
+    if "fcf" in metrics:
+        row[metrics["fcf"]] = _yearly_series(
+            [(c.year, _stmt_value(cashflow, "Free Cash Flow", c)) for c in cf_cols]
+        )
+    if "operating_margin" in metrics or "profit_margin" in metrics:
+        def margin(numerator_row):
+            series = []
+            for c in inc_cols:
+                num = _stmt_value(income, numerator_row, c)
+                rev = _stmt_value(income, "Total Revenue", c)
+                series.append((c.year, 100 * num / rev if num is not None and rev else None))
+            return _yearly_series(series)
+
+        if "operating_margin" in metrics:
+            row[metrics["operating_margin"]] = margin("Operating Income")
+        if "profit_margin" in metrics:
+            row[metrics["profit_margin"]] = margin("Net Income")
+
+    if "roe" in metrics:
+        roe = None
+        for c in reversed(inc_cols):  # latest year with both rows present
+            net = _stmt_value(income, "Net Income", c)
+            equity = _stmt_value(balance, "Stockholders Equity", c)
+            if net is not None and equity:
+                roe = 100 * net / equity
+                break
+        if roe is None and isinstance(info.get("returnOnEquity"), (int, float)):
+            roe = 100 * info["returnOnEquity"]
+        row[metrics["roe"]] = roe
+
+    if "roic" in metrics:
+        roic = None
+        for c in reversed(inc_cols):
+            ebit = _stmt_value(income, "EBIT", c)
+            tax = _stmt_value(income, "Tax Provision", c)
+            pretax = _stmt_value(income, "Pretax Income", c)
+            invested = _stmt_value(balance, "Invested Capital", c)
+            if None in (ebit, tax, pretax) or not invested or pretax <= 0:
+                continue
+            nopat = ebit * (1 - tax / pretax)
+            roic = 100 * nopat / invested
+            break
+        row[metrics["roic"]] = roic
+
+    return row
+
+
+def fetch_fundamentals(tickers: list[str], fund_cfg: dict) -> pd.DataFrame:
     """Pull the configured fundamentals from Yahoo for each ticker.
 
-    Fields listed in `percent_fields` come from Yahoo as fractions
-    (e.g. revenueGrowth 0.058 = +5.8% latest quarter vs a year ago) and
-    are converted to percentages. Only runs on the (small) list of
-    hit/near-miss tickers, so a plain loop is fine here.
+    Two layers, both config-driven (`fundamentals` section):
+      * `fields`  -- snapshot values from `info` (fields listed in
+        `percent_fields` come from Yahoo as fractions and are x100;
+        note dividendYield is already a percentage);
+      * `statements` -- per-year metrics computed from the annual income
+        statement / cash flow / balance sheet (FCF, margins, ROE, ROIC).
+
+    Only runs on the (small) list of hit/near-miss tickers, so a plain
+    loop is fine here.
     """
+    fields = fund_cfg["fields"]
+    percent_fields = fund_cfg.get("percent_fields", [])
+    stmt_cfg = fund_cfg.get("statements", {})
+
     rows = {}
     for ticker in tickers:
+        tk = yf.Ticker(ticker)
         try:
-            info = yf.Ticker(ticker).info
+            info = tk.info
         except Exception as exc:  # noqa: BLE001 - a bad ticker must not kill the alert
             print(f"  fundamentals failed for {ticker}: {exc}")
             info = {}
@@ -169,6 +267,8 @@ def fetch_fundamentals(tickers: list[str], fields: dict[str, str],
             if key in percent_fields and isinstance(value, (int, float)):
                 value *= 100
             row[label] = value
+        if stmt_cfg.get("enabled"):
+            row.update(_statement_metrics(tk, stmt_cfg, info))
         rows[ticker] = row
     return pd.DataFrame.from_dict(rows, orient="index").rename_axis("Ticker")
 
@@ -178,9 +278,67 @@ def fmt_value(value) -> str:
     return f"{value:.2f}" if isinstance(value, (int, float)) and pd.notna(value) else "n/a"
 
 
-def fund_suffix(row, fund_labels: list[str]) -> str:
-    """' | P/E 29.69 | PEG 4.14 | ...' suffix for one alert line."""
-    return "".join(f" | {label} {fmt_value(row.get(label))}" for label in fund_labels)
+def fmt_compact(value) -> str:
+    """19.3B / 850M style formatting for large currency amounts."""
+    if not isinstance(value, (int, float)) or pd.isna(value):
+        return "n/a"
+    for divisor, suffix in ((1e12, "T"), (1e9, "B"), (1e6, "M")):
+        if abs(value) >= divisor:
+            return f"{value / divisor:.1f}{suffix}"
+    return f"{value:,.0f}"
+
+
+def _fmt_pct(value) -> str:
+    return f"{value:.1f}%" if isinstance(value, (int, float)) and pd.notna(value) else "n/a"
+
+
+def _fmt_yearly(series, fmt) -> str:
+    """'18.1B->19.3B' for a [(fiscal_year, value)] list, oldest -> newest."""
+    if not isinstance(series, list) or not series:
+        return "n/a"
+    return "->".join(fmt(value) for _, value in series)
+
+
+def _year_span(series) -> str:
+    """'FY24->FY25' label for a [(fiscal_year, value)] list."""
+    if not isinstance(series, list) or not series:
+        return ""
+    years = [f"FY{year % 100:02d}" for year, _ in series]
+    return f" ({years[0]}->{years[-1]})" if len(years) > 1 else f" ({years[0]})"
+
+
+def fundamentals_lines(row, fund_cfg: dict) -> list[str]:
+    """The per-ticker fundamentals block shown under each alert line:
+
+      P/E 30.04 | PEG 4.14 | ... | Div Yield % 2.10 | Payout % 60.79
+      ROE 32.9% | ROIC 21.4% | OpM 23.9%->27.2% | PM 15.9%->28.4%
+      FCF (FY24->FY25) 18.1B->19.3B
+    """
+    if not fund_cfg.get("enabled"):
+        return []
+    lines = [" | ".join(f"{label} {fmt_value(row.get(label))}"
+                        for label in fund_cfg["fields"].values())]
+
+    stmt_cfg = fund_cfg.get("statements", {})
+    metrics = stmt_cfg.get("metrics", {})
+    if not stmt_cfg.get("enabled") or not metrics:
+        return lines
+
+    ratios = []
+    for key in ("roe", "roic"):
+        if key in metrics:
+            ratios.append(f"{metrics[key]} {_fmt_pct(row.get(metrics[key]))}")
+    for key in ("operating_margin", "profit_margin"):
+        if key in metrics:
+            ratios.append(f"{metrics[key]} {_fmt_yearly(row.get(metrics[key]), _fmt_pct)}")
+    if ratios:
+        lines.append(" | ".join(ratios))
+
+    if "fcf" in metrics:
+        series = row.get(metrics["fcf"])
+        lines.append(f"{metrics['fcf']}{_year_span(series)} "
+                     f"{_fmt_yearly(series, fmt_compact)}")
+    return lines
 
 
 # --------------------------------------------------------------------------
