@@ -1,8 +1,10 @@
 # S&P 500 Scanners
 
 Nightly scans of all S&P 500 stocks (via Windows Task Scheduler) with results
-sent to Discord via a webhook — one combined alert with a text section per
-screen and a chart image attached for every hit.
+sent to Discord via a webhook — a short summary line per screen, then one
+**embed card per ticker**: colored side-bar (orange = breakout, blue =
+pullback, gray = near-miss), the signal description, a fundamentals field
+grid, and — for hits — the ticker's chart rendered inside the card.
 
 Current screens:
 
@@ -68,8 +70,8 @@ the 150-day line" refers to.
 
 ## Fundamentals
 
-Every hit and near-miss ticker gets a fundamentals block under its alert
-line, from two config-driven layers (`fundamentals` in `config.json`):
+Every hit and near-miss ticker gets a fundamentals field grid on its embed
+card, from two config-driven layers (`fundamentals` in `config.json`):
 
 - **Snapshot fields** from Yahoo `info` (`fields` map): currently P/E, PEG,
   Total Debt/Equity, latest-quarter YoY revenue growth, dividend yield,
@@ -176,8 +178,9 @@ Notes:
 - Both screens are fully vectorized: one bulk `yf.download` for all ~503
   tickers, then rolling-window math across the whole universe at once. A full
   scan takes about a minute.
-- Discord allows at most 10 attachments per webhook message; chart images are
-  sent in batches automatically if more hits fire.
+- Discord allows at most 10 embeds / 10 attachments / ~6000 embed characters
+  per webhook message; the alert is split into multiple messages
+  automatically if more tickers fire.
 - Occasional per-ticker download failures (delistings, transient Yahoo errors)
   are tolerated — those tickers simply drop out of the scan.
 - Yahoo legitimately lacks some fundamentals for some companies (e.g. no P/E

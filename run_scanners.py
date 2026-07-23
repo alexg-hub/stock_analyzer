@@ -23,6 +23,7 @@ from pathlib import Path
 import breakout_scanner
 import sma_pullback
 from scanner_common import (
+    build_embeds,
     download_price_data,
     fetch_fundamentals,
     get_sp500_tickers,
@@ -83,26 +84,38 @@ def main() -> int:
         print("Nothing found by any screen and empty alerts are disabled -- done.")
         return 0
 
-    # -- compose one message from each screen's section --
-    sections = [module.format_section(result, fund_cfg)
-                for module, result in results]
-    message = "\n\n".join([f"**S&P 500 Scan -- {scan_date}**"] + sections)
-
-    # -- one chart per hit, attached to the alert --
-    image_paths = []
+    # -- one chart per hit, rendered first so its embed can reference it --
     chart_cfg = cfg.get("charts", {})
+    chart_files = {}  # module CONFIG_KEY -> {ticker: Path}
     if chart_cfg.get("enabled", True):
         chart_dir = Path(tempfile.mkdtemp(prefix="scanner_charts_"))
         for module, result in results:
+            per_screen = {}
             for ticker in result.hits.index:
                 out_path = chart_dir / f"{module.CONFIG_KEY}_{ticker}.png"
                 try:
                     module.plot_hit(data, ticker, result.strategy, chart_cfg, out_path)
-                    image_paths.append(out_path)
+                    per_screen[ticker] = out_path
                 except Exception as exc:  # noqa: BLE001 - a chart must not kill the alert
                     print(f"  chart failed for {ticker}: {exc}")
+            chart_files[module.CONFIG_KEY] = per_screen
 
-    send_discord_alert(message, cfg["discord"], image_paths)
+    # -- header/summary text + one embed card per ticker --
+    summary = [f"**S&P 500 Scan -- {scan_date}**"]
+    embeds, image_paths = [], []
+    for module, result in results:
+        if result.hits.empty and result.near.empty:
+            summary.append(f"{result.title}: nothing today.")
+            continue
+        counts = [f"{len(result.hits)} hit(s)"]
+        if not result.near.empty:
+            counts.append(f"{len(result.near)} near-miss(es)")
+        summary.append(f"{result.title}: " + ", ".join(counts))
+        per_screen = chart_files.get(module.CONFIG_KEY, {})
+        embeds += build_embeds(module, result, fund_cfg, per_screen)
+        image_paths += per_screen.values()
+
+    send_discord_alert("\n".join(summary), cfg["discord"], embeds, image_paths)
     return 0
 
 

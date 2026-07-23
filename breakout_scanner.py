@@ -21,10 +21,12 @@ All parameters live in the `strategy` section of config.json.
 import pandas as pd
 
 import charts
-from scanner_common import ScanResult, fmt_value, fundamentals_lines, single_ticker_panel
+from scanner_common import ScanResult, fmt_value, single_ticker_panel
 
 # Config section this screen reads (run_scanners.py registry contract).
 CONFIG_KEY = "strategy"
+# Side-bar color of this screen's Discord embed cards (palette orange).
+EMBED_COLOR = 0xEB6834
 
 
 # --------------------------------------------------------------------------
@@ -173,32 +175,11 @@ def scan(data: pd.DataFrame, strategy: dict) -> ScanResult:
     )
 
 
-def format_section(result: ScanResult, fund_cfg: dict = None) -> str:
-    """This screen's block of the combined Discord message."""
-    fund_cfg = fund_cfg or {}
-    lines = [f"__{result.title}__"]
-    if result.hits.empty and result.near.empty:
-        lines.append("No breakouts and no near-miss candidates today.")
-        return "\n".join(lines)
-
-    if result.hits.empty:
-        lines.append("No confirmed breakouts today.")
-    else:
-        lines.append(f"{len(result.hits)} breakout(s):")
-        for ticker, row in result.hits.iterrows():
-            lines.append(
-                f"**{ticker}** | Close {fmt_value(row['Close'])} broke range high "
-                f"{fmt_value(row['Range High'])} (range {fmt_value(row['Range %'])}%, "
-                f"vol {fmt_value(row['Vol Ratio'])}x avg)"
-            )
-            lines += [f"  {l}" for l in fundamentals_lines(row, fund_cfg)]
-
-    if not result.near.empty:
-        lines.append(f"{len(result.near)} near-miss candidate(s) (failed one condition):")
-        for ticker, row in result.near.iterrows():
-            lines.append(f"**{ticker}** | {row['Reason']}")
-            lines += [f"  {l}" for l in fundamentals_lines(row, fund_cfg)]
-    return "\n".join(lines)
+def describe_hit(row, strategy: dict) -> str:
+    """Embed-card description of one confirmed breakout."""
+    return (f"Close {fmt_value(row['Close'])} broke range high "
+            f"{fmt_value(row['Range High'])} (range {fmt_value(row['Range %'])}%, "
+            f"vol {fmt_value(row['Vol Ratio'])}x avg)")
 
 
 def build_calc_table(data: pd.DataFrame, signals: dict, ticker: str) -> pd.DataFrame:

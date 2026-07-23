@@ -22,10 +22,10 @@
     "pullback_strategy": {
         "enabled": true,
         "sma_days": 150,
-        "touch_band_pct": 0.04,
+        "touch_band_pct": 0.02,
         "trend_lookback_days": 252,
         "sma_slope_lookback_days": 63,
-        "min_days_above_sma_pct": 0.8,
+        "min_days_above_sma_pct": 0.85,
         "alert_only_on_band_entry": true
     },
     "charts": {

@@ -42,7 +42,10 @@ real send.
     `enabled` flag skips the screen.
   - `scan(data, strategy) -> ScanResult` (dataclass in `scanner_common.py`:
     title, ticker-indexed `hits`/`near` DataFrames, the strategy dict).
-  - `format_section(result, fund_labels)` — its block of the Discord message.
+  - `EMBED_COLOR` + `describe_hit(row, strategy)` — the screen-specific parts
+    of its Discord embed cards (`scanner_common.build_embeds` assembles the
+    cards: one per hit/near-miss, fundamentals as inline fields, the hit's
+    chart bound in via `attachment://<filename>`).
   - `plot_hit(data, ticker, strategy, chart_cfg, out_path)` — per-hit alert
     chart (delegates to `charts.py`).
   Adding a scanner = new module + one entry in `SCANNERS` + a config section.
@@ -55,8 +58,9 @@ real send.
   day for one ticker and import the compute functions — never reimplement the
   condition math there.
 - **Shared infra lives in `scanner_common.py`** (config, Wikipedia tickers,
-  bulk/single downloads, fundamentals, Discord send with chart attachments —
-  max 10 files per webhook message, batched automatically) and **`charts.py`**
+  bulk/single downloads, fundamentals, Discord send — content text + embed
+  cards, batched automatically under Discord's 10-embed / 10-file / ~6000
+  embed-char per-message limits) and **`charts.py`**
   (validated palette + the per-screen chart builders used by both the alert
   and the backtests).
 - **Data layout contract**: `yf.download(..., group_by="column",
@@ -84,7 +88,7 @@ real send.
   `balance_sheet` (FCF, OpM, PM per fiscal year; ROE with `info` fallback;
   ROIC = EBIT×(1−tax rate)/Invested Capital). Multi-year values are stored
   as `[(fiscal_year, value)]` lists in the joined DataFrame;
-  `fundamentals_lines()` renders the indented alert block. Missing statement
+  `fundamentals_fields()` renders them as embed fields. Missing statement
   rows (banks lack Operating Income; a bank's hugely negative FCF is
   genuine) render as `n/a` — same tolerance rule as `info` fields.
 - **Everything tunable lives in `config.json`** (per-screen strategy

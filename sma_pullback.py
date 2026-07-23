@@ -27,10 +27,12 @@ All parameters live in the `pullback_strategy` section of config.json.
 import pandas as pd
 
 import charts
-from scanner_common import ScanResult, fmt_value, fundamentals_lines, single_ticker_panel
+from scanner_common import ScanResult, fmt_value, single_ticker_panel
 
 # Config section this screen reads (run_scanners.py registry contract).
 CONFIG_KEY = "pullback_strategy"
+# Side-bar color of this screen's Discord embed cards (palette blue).
+EMBED_COLOR = 0x2A78D6
 
 
 # --------------------------------------------------------------------------
@@ -155,28 +157,14 @@ def scan(data: pd.DataFrame, strategy: dict) -> ScanResult:
     )
 
 
-def format_section(result: ScanResult, fund_cfg: dict = None) -> str:
-    """This screen's block of the combined Discord message."""
-    fund_cfg = fund_cfg or {}
-    strategy = result.strategy
-    sma_days = strategy["sma_days"]
-    lookback = strategy["trend_lookback_days"]
-    lines = [f"__{result.title}__"]
-    if result.hits.empty:
-        lines.append("No pullback setups today.")
-        return "\n".join(lines)
-
-    lines.append(f"{len(result.hits)} pullback setup(s):")
-    for ticker, row in result.hits.iterrows():
-        lines.append(
-            f"**{ticker}** | Close {fmt_value(row['Close'])} touched the "
-            f"{sma_days}d SMA {fmt_value(row['SMA'])} ({row['Dist %']:+.1f}%), "
-            f"above SMA {row['Above %']:.0f}% of last {lookback}d, "
+def describe_hit(row, strategy: dict) -> str:
+    """Embed-card description of one confirmed pullback setup."""
+    return (f"Close {fmt_value(row['Close'])} touched the "
+            f"{strategy['sma_days']}d SMA {fmt_value(row['SMA'])} "
+            f"({row['Dist %']:+.1f}%), above SMA {row['Above %']:.0f}% of last "
+            f"{strategy['trend_lookback_days']}d, "
             f"SMA {row['SMA Slope %']:+.1f}% over "
-            f"{strategy['sma_slope_lookback_days']}d"
-        )
-        lines += [f"  {l}" for l in fundamentals_lines(row, fund_cfg)]
-    return "\n".join(lines)
+            f"{strategy['sma_slope_lookback_days']}d")
 
 
 def build_calc_table(data: pd.DataFrame, signals: dict, ticker: str) -> pd.DataFrame:

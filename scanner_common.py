@@ -23,8 +23,13 @@ CONFIG_PATH = Path(__file__).with_name("config.json")
 # Discord hard limit is 2000 chars per message; stay under it so long
 # hit lists get split across several messages instead of being rejected.
 DISCORD_CHAR_LIMIT = 1900
-# Discord allows at most 10 attachments per webhook message.
-DISCORD_MAX_FILES = 10
+# Discord allows at most 10 embeds and 10 attachments per webhook message,
+# and at most 6000 chars across all embeds of one message.
+DISCORD_MAX_EMBEDS = 10
+DISCORD_EMBED_CHAR_BUDGET = 5500
+
+# Embed side-bar color for near-miss cards (screens define their own).
+NEAR_MISS_COLOR = 0x898781
 
 
 # --------------------------------------------------------------------------
@@ -307,94 +312,132 @@ def _year_span(series) -> str:
     return f" ({years[0]}->{years[-1]})" if len(years) > 1 else f" ({years[0]})"
 
 
-def fundamentals_lines(row, fund_cfg: dict) -> list[str]:
-    """The per-ticker fundamentals block shown under each alert line:
-
-      P/E 30.04 | PEG 4.14 | ... | Div Yield % 2.10 | Payout % 60.79
-      ROE 32.9% | ROIC 21.4% | OpM 23.9%->27.2% | PM 15.9%->28.4%
-      FCF (FY24->FY25) 18.1B->19.3B
-    """
+def fundamentals_fields(row, fund_cfg: dict) -> list[dict]:
+    """The per-ticker fundamentals as Discord embed fields (inline, so the
+    client lays them out as a 3-per-row grid -- the 'table')."""
     if not fund_cfg.get("enabled"):
         return []
-    lines = [" | ".join(f"{label} {fmt_value(row.get(label))}"
-                        for label in fund_cfg["fields"].values())]
+
+    def field(name, value):
+        return {"name": name, "value": value, "inline": True}
+
+    fields = [field(label, fmt_value(row.get(label)))
+              for label in fund_cfg["fields"].values()]
 
     stmt_cfg = fund_cfg.get("statements", {})
     metrics = stmt_cfg.get("metrics", {})
     if not stmt_cfg.get("enabled") or not metrics:
-        return lines
+        return fields
 
-    ratios = []
     for key in ("roe", "roic"):
         if key in metrics:
-            ratios.append(f"{metrics[key]} {_fmt_pct(row.get(metrics[key]))}")
+            fields.append(field(metrics[key], _fmt_pct(row.get(metrics[key]))))
     for key in ("operating_margin", "profit_margin"):
         if key in metrics:
-            ratios.append(f"{metrics[key]} {_fmt_yearly(row.get(metrics[key]), _fmt_pct)}")
-    if ratios:
-        lines.append(" | ".join(ratios))
-
+            series = row.get(metrics[key])
+            fields.append(field(metrics[key] + _year_span(series),
+                                _fmt_yearly(series, _fmt_pct)))
     if "fcf" in metrics:
         series = row.get(metrics["fcf"])
-        lines.append(f"{metrics['fcf']}{_year_span(series)} "
-                     f"{_fmt_yearly(series, fmt_compact)}")
-    return lines
+        fields.append(field(metrics["fcf"] + _year_span(series),
+                            _fmt_yearly(series, fmt_compact)))
+    return fields
+
+
+def build_embeds(module, result: ScanResult, fund_cfg: dict,
+                 chart_files: dict[str, Path] = {}) -> list[dict]:
+    """One embed card per hit (chart image bound in) and per near-miss.
+
+    `module` supplies the screen-specific pieces of the registry contract:
+    `EMBED_COLOR` and `describe_hit(row, strategy)`.
+    """
+    embeds = []
+    for ticker, row in result.hits.iterrows():
+        embed = {
+            "title": f"{ticker} -- {result.title}",
+            "description": module.describe_hit(row, result.strategy),
+            "color": module.EMBED_COLOR,
+            "fields": fundamentals_fields(row, fund_cfg),
+        }
+        if ticker in chart_files:
+            embed["image"] = {"url": f"attachment://{chart_files[ticker].name}"}
+        embeds.append(embed)
+    for ticker, row in result.near.iterrows():
+        embeds.append({
+            "title": f"{ticker} -- near miss ({result.title})",
+            "description": row["Reason"],
+            "color": NEAR_MISS_COLOR,
+            "fields": fundamentals_fields(row, fund_cfg),
+        })
+    return embeds
+
+
+def _embed_size(embed: dict) -> int:
+    return (len(embed.get("title", "")) + len(embed.get("description", ""))
+            + sum(len(f["name"]) + len(str(f["value"]))
+                  for f in embed.get("fields", [])))
 
 
 # --------------------------------------------------------------------------
 # Alerting
 # --------------------------------------------------------------------------
 
-def send_discord_alert(message: str, discord_cfg: dict,
+def send_discord_alert(content: str, discord_cfg: dict, embeds: list[dict] = (),
                        image_paths: list[Path] = ()) -> None:
     """POST the alert to a Discord webhook (free tier -- no bot needed).
 
-    Splits the text on line boundaries to respect Discord's 2000-char limit,
-    then attaches chart images (rendered inline by Discord) in batches of at
-    most DISCORD_MAX_FILES per follow-up message.
+    `content` is the short header/summary text; `embeds` are the per-ticker
+    cards (built by build_embeds), batched to respect Discord's limits of 10
+    embeds / 10 attachments / ~6000 embed chars per message. Chart files in
+    `image_paths` are attached with the batch whose embed references them
+    (via attachment://<filename>), so each chart renders inside its card.
     """
     url = discord_cfg["webhook_url"]
     username = discord_cfg.get("username", "Breakout Scanner")
     timeout = discord_cfg.get("request_timeout_seconds", 15)
+    paths = {Path(p).name: Path(p) for p in image_paths}
+
     if not url or "PASTE_YOUR" in url:
         print("\nDiscord webhook URL not configured -- printing message instead:\n")
-        print(message)
-        if image_paths:
-            print(f"({len(image_paths)} chart(s) rendered but not sent: "
-                  + ", ".join(str(p) for p in image_paths) + ")")
+        print(content)
+        for embed in embeds:
+            print(f"\n[{embed['title']}]")
+            print(embed.get("description", ""))
+            print(" | ".join(f"{f['name']} {f['value']}"
+                             for f in embed.get("fields", [])))
         return
 
-    chunks, current = [], ""
-    for line in message.split("\n"):
-        if len(current) + len(line) + 1 > DISCORD_CHAR_LIMIT:
-            chunks.append(current)
-            current = line
+    batches, current, size = [], [], 0
+    for embed in embeds:
+        embed_size = _embed_size(embed)
+        if current and (len(current) >= DISCORD_MAX_EMBEDS
+                        or size + embed_size > DISCORD_EMBED_CHAR_BUDGET):
+            batches.append(current)
+            current, size = [], 0
+        current.append(embed)
+        size += embed_size
+    if current or not batches:
+        batches.append(current)  # a content-only message when no embeds
+
+    for i, batch in enumerate(batches):
+        payload = {"username": username}
+        if i == 0:
+            payload["content"] = content[:DISCORD_CHAR_LIMIT]
+        if batch:
+            payload["embeds"] = batch
+
+        files = {}
+        for embed in batch:
+            image_url = embed.get("image", {}).get("url", "")
+            name = image_url.removeprefix("attachment://")
+            if name != image_url and name in paths:
+                files[f"files[{len(files)}]"] = (name, paths[name].read_bytes(),
+                                                 "image/png")
+        if files:
+            resp = requests.post(url, data={"payload_json": json.dumps(payload)},
+                                 files=files, timeout=timeout)
         else:
-            current = f"{current}\n{line}" if current else line
-    chunks.append(current)
-
-    for chunk in chunks:
-        resp = requests.post(
-            url,
-            json={"content": chunk, "username": username},
-            timeout=timeout,
-        )
+            resp = requests.post(url, json=payload, timeout=timeout)
         resp.raise_for_status()
-    print(f"Discord alert sent ({len(chunks)} message(s)).")
-
-    image_paths = [Path(p) for p in image_paths]
-    for start in range(0, len(image_paths), DISCORD_MAX_FILES):
-        batch = image_paths[start:start + DISCORD_MAX_FILES]
-        files = {
-            f"files[{i}]": (path.name, path.read_bytes(), "image/png")
-            for i, path in enumerate(batch)
-        }
-        resp = requests.post(
-            url,
-            data={"payload_json": json.dumps({"username": username})},
-            files=files,
-            timeout=timeout,
-        )
-        resp.raise_for_status()
-    if image_paths:
-        print(f"Discord charts sent ({len(image_paths)} image(s)).")
+    print(f"Discord alert sent ({len(batches)} message(s), "
+          f"{len(embeds)} card(s), {len(paths)} chart(s)).")
