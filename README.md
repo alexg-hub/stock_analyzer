@@ -200,6 +200,7 @@ python backtest_reclaim.py  --ticker META --start 2023-01-01 --end 2023-12-31
 | `reclaim_strategy.min_sma_slope_pct` | `null` | Optional slope floor (e.g. `-0.02`); `null` = off |
 | `reclaim_strategy.alert_only_on_cross` | `true` | Alert only on the day the close first crosses the level |
 | `charts.enabled` | `true` | Attach a chart image per hit to the Discord alert |
+| `charts.near_miss_charts` | `true` | Also attach a chart to near-miss cards (set `false` for hits-only charts) |
 | `charts.lookback_days` | `250` | Trading days shown in alert charts |
 | `charts.dpi` | `120` | Alert-chart resolution |
 | `fundamentals.enabled` | `true` | Fetch fundamentals for hits and near-misses |

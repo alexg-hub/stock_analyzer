@@ -85,15 +85,18 @@ def main() -> int:
         print("Nothing found by any screen and empty alerts are disabled -- done.")
         return 0
 
-    # -- one chart per hit and near-miss, rendered first so its embed can
-    #    reference it --
+    # -- one chart per hit (and per near-miss unless disabled), rendered
+    #    first so its embed can reference it --
     chart_cfg = cfg.get("charts", {})
     chart_files = {}  # module CONFIG_KEY -> {ticker: Path}
     if chart_cfg.get("enabled", True):
         chart_dir = Path(tempfile.mkdtemp(prefix="scanner_charts_"))
         for module, result in results:
             per_screen = {}
-            for ticker in list(result.hits.index) + list(result.near.index):
+            tickers = list(result.hits.index)
+            if chart_cfg.get("near_miss_charts", True):
+                tickers += list(result.near.index)
+            for ticker in tickers:
                 out_path = chart_dir / f"{module.CONFIG_KEY}_{ticker}.png"
                 try:
                     module.plot_hit(data, ticker, result.strategy, chart_cfg, out_path)
