@@ -89,6 +89,28 @@ negative-equity companies no D/E, ...) show as `n/a`. A bank's FCF can be a
 large negative number — that is Yahoo's genuine figure (deposit/loan flows
 dominate bank cash-flow statements), not a bug.
 
+### Quality badge
+
+A hit whose fundamentals pass **every** rule in `fundamentals.quality.rules`
+gets the configured badge (default ⭐) in front of its card title. This is
+computed in the shared embed builder, so it applies to the hits of every
+screen — current and future — automatically.
+
+Rules are keyed by the same keys as the display config (Yahoo `info` keys
+for snapshot fields, metric keys for statement metrics) and support:
+
+- `min` / `max` — strict compare against the value (the **latest fiscal
+  year** for multi-year metrics like FCF and margins);
+- `increasing: true` — the latest fiscal year must be above the previous
+  one (requires ≥ 2 years of data).
+
+A missing value fails its rule — unverifiable quality doesn't earn the
+badge (so banks, with no operating income, can never carry it). The default
+rule set is deliberately strict (P/E < 35, PEG < 2, D/E < 75, revenue
+growth > 10%, a dividend, payout < 50%, ROE > 15%, ROIC > 15%, OpM > 20%
+and rising, PM > 15% and rising, positive and rising FCF) — most S&P 500
+names fail at least one rule; edit `config.json` to loosen it.
+
 ## Usage
 
 ```
@@ -140,6 +162,9 @@ python backtest_pullback.py --ticker MSFT --start 2024-01-01 --end 2025-06-30
 | `fundamentals.statements.enabled` | `true` | Compute per-year metrics from the annual statements |
 | `fundamentals.statements.years` | `2` | How many recent fiscal years to show |
 | `fundamentals.statements.metrics` | 5 metrics | Metric → display label; remove an entry to drop it from the alert |
+| `fundamentals.quality.enabled` | `true` | Evaluate the quality rules and badge passing hits |
+| `fundamentals.quality.badge` | `⭐` | Prefix added to a passing hit's card title |
+| `fundamentals.quality.rules` | 11 rules | Per-metric `min`/`max`/`increasing` thresholds; a hit must pass **all** of them to get the badge |
 
 ## Nightly schedule (Windows Task Scheduler)
 

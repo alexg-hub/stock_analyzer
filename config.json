@@ -54,6 +54,23 @@
                 "roe": "ROE",
                 "roic": "ROIC"
             }
+        },
+        "quality": {
+            "enabled": true,
+            "badge": "⭐",
+            "rules": {
+                "trailingPE": {"max": 35},
+                "trailingPegRatio": {"max": 2},
+                "debtToEquity": {"max": 75},
+                "revenueGrowth": {"min": 10},
+                "dividendYield": {"min": 0},
+                "payoutRatio": {"max": 50},
+                "roe": {"min": 15},
+                "roic": {"min": 15},
+                "operating_margin": {"min": 20, "increasing": true},
+                "profit_margin": {"min": 15, "increasing": true},
+                "fcf": {"min": 0, "increasing": true}
+            }
         }
     }
 }

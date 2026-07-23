@@ -91,6 +91,14 @@ real send.
   `fundamentals_fields()` renders them as embed fields. Missing statement
   rows (banks lack Operating Income; a bank's hugely negative FCF is
   genuine) render as `n/a` — same tolerance rule as `info` fields.
+- **Quality badge** (`fundamentals.quality` in config): `quality_check(row,
+  fund_cfg)` in `scanner_common.py` evaluates `rules` — keyed by the same
+  `info`/metric keys as the display config, each `{min, max, increasing}`;
+  strict compares, latest fiscal year for multi-year metrics, missing value
+  = rule fails (banks can never pass). `build_embeds` prefixes the
+  configured `badge` to a passing **hit** card's title (hits only, every
+  screen automatically; near-misses never get it). The default rule set is
+  intentionally strict — most tickers fail at least one rule.
 - **Everything tunable lives in `config.json`** (per-screen strategy
   sections, charts, Discord, fundamentals fields) and all user-facing text
   (alert lines, backtest STEP logs, chart labels) is built from those values

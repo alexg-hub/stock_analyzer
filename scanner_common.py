@@ -344,6 +344,55 @@ def fundamentals_fields(row, fund_cfg: dict) -> list[dict]:
     return fields
 
 
+def _rule_value(row, key: str, fund_cfg: dict):
+    """Resolve a quality-rule key to the row's value.
+
+    Rule keys are the same keys used elsewhere in the fundamentals config:
+    Yahoo `info` keys for snapshot fields (trailingPE, ...) and metric keys
+    for statement metrics (roe, fcf, ...), so renaming a display label
+    never breaks a rule.
+    """
+    if key in fund_cfg.get("fields", {}):
+        return row.get(fund_cfg["fields"][key])
+    metrics = fund_cfg.get("statements", {}).get("metrics", {})
+    if key in metrics:
+        return row.get(metrics[key])
+    return None
+
+
+def quality_failures(row, fund_cfg: dict) -> list[str]:
+    """Which quality rules (fundamentals.quality.rules) this ticker fails.
+
+    Rule semantics: `min`/`max` are strict compares against the value
+    (latest fiscal year for multi-year metrics); `increasing` requires the
+    latest year above the previous one. A missing value fails its rule --
+    unverifiable quality doesn't earn the badge.
+    """
+    failed = []
+    for key, rule in fund_cfg.get("quality", {}).get("rules", {}).items():
+        value = _rule_value(row, key, fund_cfg)
+        series = value if isinstance(value, list) else None
+        if series is not None:
+            value = series[-1][1] if series else None
+        ok = isinstance(value, (int, float)) and pd.notna(value)
+        if ok and "min" in rule:
+            ok = value > rule["min"]
+        if ok and "max" in rule:
+            ok = value < rule["max"]
+        if ok and rule.get("increasing"):
+            ok = series is not None and len(series) >= 2 and series[-1][1] > series[-2][1]
+        if not ok:
+            failed.append(key)
+    return failed
+
+
+def quality_check(row, fund_cfg: dict) -> bool:
+    """True when the ticker passes every configured quality rule."""
+    if not (fund_cfg.get("enabled") and fund_cfg.get("quality", {}).get("enabled")):
+        return False
+    return not quality_failures(row, fund_cfg)
+
+
 def build_embeds(module, result: ScanResult, fund_cfg: dict,
                  chart_files: dict[str, Path] = {}) -> list[dict]:
     """One embed card per hit (chart image bound in) and per near-miss.
@@ -351,10 +400,12 @@ def build_embeds(module, result: ScanResult, fund_cfg: dict,
     `module` supplies the screen-specific pieces of the registry contract:
     `EMBED_COLOR` and `describe_hit(row, strategy)`.
     """
+    badge = fund_cfg.get("quality", {}).get("badge", "")
     embeds = []
     for ticker, row in result.hits.iterrows():
+        prefix = f"{badge} " if badge and quality_check(row, fund_cfg) else ""
         embed = {
-            "title": f"{ticker} -- {result.title}",
+            "title": f"{prefix}{ticker} -- {result.title}",
             "description": module.describe_hit(row, result.strategy),
             "color": module.EMBED_COLOR,
             "fields": fundamentals_fields(row, fund_cfg),
