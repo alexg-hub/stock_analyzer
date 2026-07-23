@@ -239,11 +239,14 @@ def find_breakouts(data: pd.DataFrame, strategy: dict) -> tuple[pd.DataFrame, pd
 # Fundamentals for the hits
 # --------------------------------------------------------------------------
 
-def fetch_fundamentals(tickers: list[str], fields: dict[str, str]) -> pd.DataFrame:
-    """Pull P/E, PEG and Total Debt/Equity from Yahoo for each hit.
+def fetch_fundamentals(tickers: list[str], fields: dict[str, str],
+                       percent_fields: list[str] = ()) -> pd.DataFrame:
+    """Pull the configured fundamentals from Yahoo for each ticker.
 
-    Only runs on the (small) list of breakout tickers, so a plain loop
-    is fine here.
+    Fields listed in `percent_fields` come from Yahoo as fractions
+    (e.g. revenueGrowth 0.058 = +5.8% latest quarter vs a year ago) and
+    are converted to percentages. Only runs on the (small) list of
+    breakout/near-miss tickers, so a plain loop is fine here.
     """
     rows = {}
     for ticker in tickers:
@@ -252,7 +255,13 @@ def fetch_fundamentals(tickers: list[str], fields: dict[str, str]) -> pd.DataFra
         except Exception as exc:  # noqa: BLE001 - a bad ticker must not kill the alert
             print(f"  fundamentals failed for {ticker}: {exc}")
             info = {}
-        rows[ticker] = {label: info.get(key) for key, label in fields.items()}
+        row = {}
+        for key, label in fields.items():
+            value = info.get(key)
+            if key in percent_fields and isinstance(value, (int, float)):
+                value *= 100
+            row[label] = value
+        rows[ticker] = row
     return pd.DataFrame.from_dict(rows, orient="index").rename_axis("Ticker")
 
 
@@ -260,9 +269,13 @@ def fetch_fundamentals(tickers: list[str], fields: dict[str, str]) -> pd.DataFra
 # Alerting
 # --------------------------------------------------------------------------
 
-def format_message(results: pd.DataFrame, near: pd.DataFrame, scan_date) -> str:
+def format_message(results: pd.DataFrame, near: pd.DataFrame, scan_date,
+                  fund_labels: list[str] = ()) -> str:
     def fmt(value):
         return f"{value:.2f}" if isinstance(value, (int, float)) and pd.notna(value) else "n/a"
+
+    def fund_suffix(row) -> str:
+        return "".join(f" | {label} {fmt(row.get(label))}" for label in fund_labels)
 
     header = f"**S&P 500 Breakout Scan -- {scan_date}**\n"
     if results.empty and near.empty:
@@ -276,15 +289,14 @@ def format_message(results: pd.DataFrame, near: pd.DataFrame, scan_date) -> str:
         for ticker, row in results.iterrows():
             lines.append(
                 f"**{ticker}** | Close {fmt(row['Close'])} broke range high {fmt(row['Range High'])} "
-                f"(range {fmt(row['Range %'])}%, vol {fmt(row['Vol Ratio'])}x avg) | "
-                f"P/E {fmt(row.get('P/E'))} | PEG {fmt(row.get('PEG'))} | "
-                f"Debt/Eq {fmt(row.get('Total Debt/Equity'))}"
+                f"(range {fmt(row['Range %'])}%, vol {fmt(row['Vol Ratio'])}x avg)"
+                + fund_suffix(row)
             )
 
     if not near.empty:
         lines.append(f"\n{len(near)} near-miss candidate(s) (failed one condition):")
         for ticker, row in near.iterrows():
-            lines.append(f"**{ticker}** | {row['Reason']}")
+            lines.append(f"**{ticker}** | {row['Reason']}{fund_suffix(row)}")
     return "\n".join(lines)
 
 
@@ -335,12 +347,17 @@ def main() -> int:
     results, near = find_breakouts(data, cfg["strategy"])
     scan_date = data.index[-1].date()
 
-    if not results.empty and cfg["fundamentals"]["enabled"]:
-        print("Fetching fundamentals for breakout tickers...")
+    fund_cfg = cfg["fundamentals"]
+    fund_labels = list(fund_cfg["fields"].values()) if fund_cfg["enabled"] else []
+    wanted = results.index.tolist() + near.index.tolist()
+    if fund_cfg["enabled"] and wanted:
+        print("Fetching fundamentals for breakout + near-miss tickers...")
         fundamentals = fetch_fundamentals(
-            results.index.tolist(), cfg["fundamentals"]["fields"]
+            wanted, fund_cfg["fields"], fund_cfg.get("percent_fields", [])
         )
         results = results.join(fundamentals)
+        near = near.join(fundamentals)
+    if not results.empty:
         print(results.to_string())
     if not near.empty:
         print(near.to_string())
@@ -349,7 +366,7 @@ def main() -> int:
         print("No breakouts, no near-misses, and no-breakout alerts are disabled -- done.")
         return 0
 
-    send_discord_alert(format_message(results, near, scan_date), cfg["discord"])
+    send_discord_alert(format_message(results, near, scan_date, fund_labels), cfg["discord"])
     return 0
 
 

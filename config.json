@@ -7,15 +7,15 @@
     },
     "data": {
         "sp500_source_url": "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
-        "download_period": "1y",
+        "download_period": "2y",
         "download_interval": "1d"
     },
     "strategy": {
-        "consolidation_window_days": 50,
-        "max_consolidation_range_pct": 0.20,
-        "breakout_multiplier": 1.005,
+        "consolidation_window_days": 312,
+        "max_consolidation_range_pct": 0.38,
+        "breakout_multiplier": 1.01,
         "volume_sma_days": 30,
-        "volume_surge_multiplier": 1.1,
+        "volume_surge_multiplier": 1.2,
         "near_miss_max_gap_pct": 0.05
     },
     "fundamentals": {
@@ -23,7 +23,9 @@
         "fields": {
             "trailingPE": "P/E",
             "trailingPegRatio": "PEG",
-            "debtToEquity": "Total Debt/Equity"
-        }
+            "debtToEquity": "Total Debt/Equity",
+            "revenueGrowth": "Rev YoY %"
+        },
+        "percent_fields": ["revenueGrowth"]
     }
 }
