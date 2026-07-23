@@ -28,6 +28,18 @@
         "min_days_above_sma_pct": 0.85,
         "alert_only_on_band_entry": true
     },
+    "reclaim_strategy": {
+        "enabled": true,
+        "sma_days": 200,
+        "below_lookback_days": 200,
+        "min_days_below_pct": 0.8,
+        "cross_margin_pct": 0.01,
+        "volume_sma_days": 30,
+        "volume_surge_multiplier": 1.2,
+        "sma_slope_lookback_days": 63,
+        "min_sma_slope_pct": null,
+        "alert_only_on_cross": true
+    },
     "charts": {
         "enabled": true,
         "lookback_days": 250,

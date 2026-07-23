@@ -3,14 +3,18 @@
 Nightly scans of all S&P 500 stocks (via Windows Task Scheduler) with results
 sent to Discord via a webhook — a short summary line per screen, then one
 **embed card per ticker**: colored side-bar (orange = breakout, blue =
-pullback, gray = near-miss), the signal description, a fundamentals field
-grid, and — for hits — the ticker's chart rendered inside the card.
+pullback, green = reclaim, gray = near-miss), the signal description, a
+fundamentals field grid, and — for hits — the ticker's chart rendered
+inside the card.
 
 Current screens:
 
 1. **Breakout from consolidation** — upward breakout from a horizontal range.
 2. **SMA pullback** — a stock in a year-long uptrend pulling back to its
    rising 150-day SMA.
+3. **SMA reclaim** — a stock that spent most of the last year *below* its
+   200-day SMA crossing back above it on volume (trend-reversal /
+   Weinstein "Stage 2" entry).
 
 ## Code layout
 
@@ -19,13 +23,14 @@ Current screens:
 | `run_scanners.py` | Entry point: one bulk download → every enabled screen → one Discord alert |
 | `breakout_scanner.py` | Breakout screen module (condition math, alert section, hit chart) |
 | `sma_pullback.py` | SMA-pullback screen module (same shape) |
+| `sma_reclaim.py` | SMA-reclaim screen module (same shape) |
 | `scanner_common.py` | Shared infra: config, tickers, downloads, fundamentals, Discord |
 | `charts.py` | Shared chart rendering (palette + per-screen chart builders) |
-| `backtest_breakout.py` / `backtest_pullback.py` | Single-ticker historical validators |
+| `backtest_breakout.py` / `backtest_pullback.py` / `backtest_reclaim.py` | Single-ticker historical validators |
 
 Adding a new scanner = new module exposing `CONFIG_KEY`, `scan()`,
-`format_section()`, `plot_hit()` + one entry in `run_scanners.SCANNERS` + a
-config section with an `enabled` flag.
+`EMBED_COLOR` + `describe_hit()`, `plot_hit()` + one entry in
+`run_scanners.SCANNERS` + a config section with an `enabled` flag.
 
 ## Screen 1: breakout from consolidation
 
@@ -67,6 +72,35 @@ refer to the `pullback_strategy` section):
 Unlike the breakout screen's prior-window (shift-by-one) convention, the SMA
 here includes the current day — that is the charting-standard SMA a "touch of
 the 150-day line" refers to.
+
+## Screen 3: reclaim of a long-term SMA after a downtrend
+
+The mirror image of screen 2 — instead of a dip in an uptrend, it catches
+the *birth* of a new uptrend: a stock that lived below its 200-day SMA for
+most of a year crossing back above it. All conditions must be true on the
+most recent trading day (parameter names refer to the `reclaim_strategy`
+section):
+
+1. **Above the cross level** — today's Close is above `(1 +
+   cross_margin_pct) ×` the `sma_days` SMA, so a marginal poke over the
+   line doesn't count.
+2. **Long prior downtrend** — the Close was below the SMA on at least
+   `min_days_below_pct` of the previous `below_lookback_days` trading days,
+   so the reclaim is an event, not chop around a flat SMA.
+3. **Volume confirmation** — today's Volume ≥ `volume_surge_multiplier ×`
+   the average of the previous `volume_sma_days` days (a reclaim on dead
+   volume usually fails).
+4. **SMA slope floor** (optional, off by default) — when
+   `min_sma_slope_pct` is set (not `null`), the SMA's change over
+   `sma_slope_lookback_days` must be at least that fraction; filters
+   knife-catching in stocks still in freefall, at the cost of later entry.
+5. **Fresh cross** (optional, `alert_only_on_cross`) — yesterday's close
+   was not yet above the level, so a stock that stays above it doesn't
+   re-alert every night.
+
+First crosses of a long-term SMA are whipsaw-prone by nature — expect some
+signals to fail back below the line; this is a watchlist alert, not an
+entry system.
 
 ## Fundamentals
 
@@ -118,6 +152,7 @@ pip install -r requirements.txt
 python run_scanners.py            # full S&P 500 scan + Discord alert
 python backtest_breakout.py       # historical validation, breakout screen
 python backtest_pullback.py       # historical validation, pullback screen
+python backtest_reclaim.py        # historical validation, reclaim screen
 ```
 
 ### Backtests
@@ -130,6 +165,7 @@ calculation table (CSV), and a chart (PNG):
 ```
 python backtest_breakout.py --ticker JNJ  --start 2025-01-01 --end 2025-10-31
 python backtest_pullback.py --ticker MSFT --start 2024-01-01 --end 2025-06-30
+python backtest_reclaim.py  --ticker META --start 2023-01-01 --end 2023-12-31
 ```
 
 ## Configuration (`config.json`)
@@ -153,6 +189,16 @@ python backtest_pullback.py --ticker MSFT --start 2024-01-01 --end 2025-06-30
 | `pullback_strategy.sma_slope_lookback_days` | `63` | SMA must be higher than this many days ago |
 | `pullback_strategy.min_days_above_sma_pct` | `0.9` | Min fraction of the lookback the close spent above the SMA |
 | `pullback_strategy.alert_only_on_band_entry` | `true` | Alert only on the day the close enters the band from above |
+| `reclaim_strategy.enabled` | `true` | Run the SMA-reclaim screen |
+| `reclaim_strategy.sma_days` | `200` | SMA length (trading days) |
+| `reclaim_strategy.below_lookback_days` | `200` | Downtrend-persistence lookback |
+| `reclaim_strategy.min_days_below_pct` | `0.8` | Min fraction of the lookback the close spent below the SMA |
+| `reclaim_strategy.cross_margin_pct` | `0.01` | Close must exceed the SMA by this fraction (1.01 × SMA) |
+| `reclaim_strategy.volume_sma_days` | `30` | Lookback for the average-volume baseline |
+| `reclaim_strategy.volume_surge_multiplier` | `1.2` | Required volume vs. that baseline |
+| `reclaim_strategy.sma_slope_lookback_days` | `63` | Lookback for the optional SMA-slope floor |
+| `reclaim_strategy.min_sma_slope_pct` | `null` | Optional slope floor (e.g. `-0.02`); `null` = off |
+| `reclaim_strategy.alert_only_on_cross` | `true` | Alert only on the day the close first crosses the level |
 | `charts.enabled` | `true` | Attach a chart image per hit to the Discord alert |
 | `charts.lookback_days` | `250` | Trading days shown in alert charts |
 | `charts.dpi` | `120` | Alert-chart resolution |

@@ -8,7 +8,8 @@ A set of S&P 500 screens that run nightly on this Windows machine via Task
 Scheduler and push one combined alert (text + per-hit chart images) to a
 Discord channel, plus single-ticker historical backtesters for validating
 each screen. No test suite; validation is done by running the backtests
-against known cases (JNJ 2025 breakout, MSFT 2024 SMA pullbacks).
+against known cases (JNJ 2025 breakout, MSFT 2024 SMA pullbacks, META 2023
+SMA reclaim).
 
 ## Commands
 
@@ -24,6 +25,7 @@ python run_scanners.py
 # each writes a backtest_*.csv and backtest_*.png (gitignored)
 python backtest_breakout.py --ticker JNJ  --start 2025-01-01 --end 2025-10-31
 python backtest_pullback.py --ticker MSFT --start 2024-01-01 --end 2025-06-30
+python backtest_reclaim.py  --ticker META --start 2023-01-01 --end 2023-12-31
 ```
 
 To test alert formatting/sending without spamming the channel, monkeypatch
@@ -51,12 +53,13 @@ real send.
   Adding a scanner = new module + one entry in `SCANNERS` + a config section.
 - **The `compute_*` function in each screen module is the single source of
   truth** for its condition math (`breakout_scanner.compute_signals`,
-  `sma_pullback.compute_pullback_signals`). Fully vectorized: every
+  `sma_pullback.compute_pullback_signals`,
+  `sma_reclaim.compute_reclaim_signals`). Fully vectorized: every
   input/output is a `(days, tickers)` DataFrame, no per-ticker loops. The
   production scan evaluates only the last row; the backtests
-  (`backtest_breakout.py`, `backtest_pullback.py`) evaluate every historical
-  day for one ticker and import the compute functions — never reimplement the
-  condition math there.
+  (`backtest_breakout.py`, `backtest_pullback.py`, `backtest_reclaim.py`)
+  evaluate every historical day for one ticker and import the compute
+  functions — never reimplement the condition math there.
 - **Shared infra lives in `scanner_common.py`** (config, Wikipedia tickers,
   bulk/single downloads, fundamentals, Discord send — content text + embed
   cards, batched automatically under Discord's 10-embed / 10-file / ~6000
@@ -71,15 +74,16 @@ real send.
   frame).
 - **Rolling-window conventions differ by design**: the breakout screen uses
   `shift(1)` so the prior range/volume baseline excludes the current day; the
-  pullback screen's SMA *includes* the current day (charting-standard "touch
-  of the 150-day line") while its trend-persistence count uses `shift(1)`.
-  Both are intentional — don't "fix" either.
+  pullback and reclaim screens' SMA *includes* the current day
+  (charting-standard "touch/cross of the line") while their persistence
+  counts (time above/below the SMA) and the reclaim screen's volume baseline
+  use `shift(1)`. All are intentional — don't "fix" any of them.
 - **Near-misses** (breakout screen only) = exactly 2 of 3 conditions true on
   scan day. Breakout-only failures are additionally filtered to closes within
   `near_miss_max_gap_pct` of the required level (production alert only; the
-  backtest log intentionally shows all 2-of-3 days). The pullback screen has
-  no production near-miss list; its backtest logs touch days that failed and
-  why.
+  backtest log intentionally shows all 2-of-3 days). The pullback and reclaim
+  screens have no production near-miss list; their backtests log touch days /
+  fresh-cross days that failed and why.
 - **Fundamentals are two config-driven layers** (`scanner_common.py`):
   `fields` = snapshot values from Yahoo `info` (`percent_fields` lists keys
   Yahoo returns as fractions, ×100 before display — but `dividendYield` is
@@ -109,9 +113,10 @@ real send.
 
 - `data.download_period` must exceed each screen's total lookback
   (breakout: `consolidation_window_days`; pullback: `sma_days +
-  trend_lookback_days`; ~21 trading days per calendar month), or the rolling
-  windows never fill and that screen can never fire (each prints a warning).
-  Check this whenever any of those values change.
+  trend_lookback_days`; reclaim: `sma_days + below_lookback_days`; ~21
+  trading days per calendar month), or the rolling windows never fill and
+  that screen can never fire (each prints a warning). Check this whenever
+  any of those values change.
 - The user frequently hand-tunes strategy values in `config.json` between
   sessions — read the file for current values; don't trust README's table or
   prior conversation, and don't revert their changes.

@@ -119,6 +119,56 @@ def plot_breakout(table: pd.DataFrame, strategy: dict, ticker: str,
 
 
 # --------------------------------------------------------------------------
+# SMA-reclaim chart
+# --------------------------------------------------------------------------
+
+def plot_reclaim(table: pd.DataFrame, strategy: dict, ticker: str,
+                 out_path: Path, dpi: int = 150) -> None:
+    """Price + volume chart of the SMA-reclaim calc table
+    (columns as produced by sma_reclaim.build_calc_table)."""
+    sma_days = strategy["sma_days"]
+    margin = strategy["cross_margin_pct"]
+    vol_days = strategy["volume_sma_days"]
+    vol_mult = strategy["volume_surge_multiplier"]
+    hits = table[table["SIGNAL"].fillna(False)]
+
+    fig, ax_p, ax_v = _two_panel_figure()
+
+    # -- price panel: close, SMA, cross level, signal markers --
+    ax_p.plot(table.index, table["SMA"], color=C["ink2"], linewidth=1.4,
+              label=f"{sma_days}d SMA")
+    if margin:
+        ax_p.plot(table.index, (1 + margin) * table["SMA"], color=C["ink2"],
+                  linewidth=1.0, linestyle="--",
+                  label=f"cross level (SMA +{margin:.0%})")
+    ax_p.plot(table.index, table["Close"], color=C["close"], linewidth=2, label="close")
+    _mark_signals(ax_p, hits, "Close", "reclaim signal")
+    ax_p.set_ylabel("Price (USD)", color=C["ink2"], fontsize=10)
+    ax_p.legend(loc="upper left", frameon=False, fontsize=9, labelcolor=C["ink2"])
+
+    # -- volume panel: bars + surge threshold --
+    surge = table["R3_VolumeSurge"].fillna(False)
+    ax_v.bar(table.index[~surge], table["Volume"][~surge] / 1e6,
+             color=C["axis"], width=1.0)
+    ax_v.bar(table.index[surge], table["Volume"][surge] / 1e6,
+             color=C["event"], width=1.0, label=f"volume >= {vol_mult}x {vol_days}d avg")
+    ax_v.plot(table.index, vol_mult * table["VolSMA"] / 1e6, color=C["ink2"],
+              linewidth=1.2, linestyle="--", label=f"{vol_mult}x {vol_days}d avg volume")
+    ax_v.set_ylabel("Volume (M)", color=C["ink2"], fontsize=10)
+    ax_v.legend(loc="upper left", frameon=False, fontsize=9, labelcolor=C["ink2"])
+
+    n_sig = len(hits)
+    subtitle = (f"{n_sig} signal day(s)" if n_sig else "no signal days") + \
+        f" -- below SMA >= {strategy['min_days_below_pct']:.0%} of last " \
+        f"{strategy['below_lookback_days']}d, volume {vol_mult}x {vol_days}d average"
+    _title(ax_p, f"{ticker} -- reclaim of {sma_days}-day SMA after downtrend", subtitle)
+
+    fig.savefig(out_path, dpi=dpi, bbox_inches="tight", facecolor=C["surface"])
+    plt.close(fig)
+    print(f"Chart saved to {out_path}")
+
+
+# --------------------------------------------------------------------------
 # SMA-pullback chart
 # --------------------------------------------------------------------------
 

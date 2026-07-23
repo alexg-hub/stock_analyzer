@@ -6,8 +6,8 @@ it, and sends one combined Discord alert (text sections + a chart image
 per hit).
 
 Adding a new scanner:
-  1. write a module exposing CONFIG_KEY, scan(), format_section(), plot_hit()
-     (see breakout_scanner.py / sma_pullback.py);
+  1. write a module exposing CONFIG_KEY, scan(), EMBED_COLOR + describe_hit(),
+     plot_hit() (see breakout_scanner.py / sma_pullback.py / sma_reclaim.py);
   2. add it to SCANNERS below;
   3. add its config section (with an "enabled" flag) to config.json.
 
@@ -22,6 +22,7 @@ from pathlib import Path
 
 import breakout_scanner
 import sma_pullback
+import sma_reclaim
 from scanner_common import (
     build_embeds,
     download_price_data,
@@ -32,7 +33,7 @@ from scanner_common import (
 )
 
 # Every screen that runs nightly, in alert order.
-SCANNERS = [breakout_scanner, sma_pullback]
+SCANNERS = [breakout_scanner, sma_pullback, sma_reclaim]
 
 
 def main() -> int:
