@@ -11,12 +11,27 @@
         "download_interval": "1d"
     },
     "strategy": {
+        "enabled": true,
         "consolidation_window_days": 312,
-        "max_consolidation_range_pct": 0.38,
+        "max_consolidation_range_pct": 0.32,
         "breakout_multiplier": 1.01,
         "volume_sma_days": 30,
-        "volume_surge_multiplier": 1.2,
+        "volume_surge_multiplier": 1.1,
         "near_miss_max_gap_pct": 0.05
+    },
+    "pullback_strategy": {
+        "enabled": true,
+        "sma_days": 150,
+        "touch_band_pct": 0.02,
+        "trend_lookback_days": 252,
+        "sma_slope_lookback_days": 63,
+        "min_days_above_sma_pct": 0.9,
+        "alert_only_on_band_entry": true
+    },
+    "charts": {
+        "enabled": true,
+        "lookback_days": 250,
+        "dpi": 120
     },
     "fundamentals": {
         "enabled": true,

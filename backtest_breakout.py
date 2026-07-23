@@ -18,94 +18,18 @@ Usage:
 """
 
 import argparse
-import math
 import sys
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import pandas as pd
-import yfinance as yf
 
-from breakout_scanner import compute_signals, load_config, near_miss_reason
-
-
-def warmup_months(window: int) -> int:
-    """Extra calendar months to download before the analysis window so the
-    rolling consolidation window (in trading days, ~21/month) is fully
-    warmed up by the first analysis day."""
-    return math.ceil(window / 21) + 2
-
-# Validated light-mode palette (dataviz reference instance).
-C = {
-    "surface": "#fcfcfb",
-    "ink": "#0b0b0b",
-    "ink2": "#52514e",
-    "muted": "#898781",
-    "grid": "#e1e0d9",
-    "axis": "#c3c2b7",
-    "close": "#2a78d6",   # series slot 1 (blue)
-    "event": "#eb6834",   # series slot 2 (orange) -- breakout highlights
-}
+import charts
+from breakout_scanner import build_calc_table, compute_signals, near_miss_reason
+from scanner_common import download_history, load_config
 
 
 def section(title: str) -> None:
     print(f"\n{'=' * 72}\n{title}\n{'=' * 72}")
-
-
-# --------------------------------------------------------------------------
-# Data
-# --------------------------------------------------------------------------
-
-def download_history(ticker: str, start: pd.Timestamp, end: pd.Timestamp,
-                     window: int) -> pd.DataFrame:
-    """Download one ticker's OHLCV in the same (Field, Ticker) column layout
-    the scanner uses, so compute_signals runs unchanged."""
-    months = warmup_months(window)
-    dl_start = start - pd.DateOffset(months=months)
-    print(f"Downloading {ticker} daily data {dl_start.date()} .. {end.date()} "
-          f"(includes {months} months of warm-up for the {window}-day rolling window)")
-    data = yf.download(
-        ticker,
-        start=dl_start,
-        end=end + pd.Timedelta(days=1),
-        interval="1d",
-        group_by="column",
-        auto_adjust=False,
-        progress=False,
-    )
-    if data.empty:
-        raise SystemExit(f"No data returned for {ticker} -- check the ticker/dates.")
-    if not isinstance(data.columns, pd.MultiIndex):
-        data.columns = pd.MultiIndex.from_product([data.columns, [ticker]])
-    return data
-
-
-def build_calc_table(data: pd.DataFrame, signals: dict, ticker: str) -> pd.DataFrame:
-    """Flatten OHLCV + every intermediate into one per-day table."""
-    def col(field):
-        return data[field][ticker]
-
-    return pd.DataFrame(
-        {
-            "Open": col("Open"),
-            "High": col("High"),
-            "Low": col("Low"),
-            "Close": col("Close"),
-            "Volume": col("Volume"),
-            "PriorHigh": signals["prior_high"][ticker],
-            "PriorLow": signals["prior_low"][ticker],
-            "RangePct": signals["range_pct"][ticker] * 100,
-            "VolSMA": signals["prior_vol_sma"][ticker],
-            "VolRatio": signals["vol_ratio"][ticker],
-            "C1_Consolidating": signals["is_consolidating"][ticker],
-            "C2_Breakout": signals["is_breakout"][ticker],
-            "C3_VolumeSurge": signals["is_volume_surge"][ticker],
-            "SIGNAL": signals["signal"][ticker],
-        }
-    ).rename_axis("Date")
 
 
 # --------------------------------------------------------------------------
@@ -172,77 +96,6 @@ def log_run(table: pd.DataFrame, strategy: dict, ticker: str) -> None:
 
 
 # --------------------------------------------------------------------------
-# Chart
-# --------------------------------------------------------------------------
-
-def plot_backtest(table: pd.DataFrame, strategy: dict, ticker: str, out_path: Path) -> None:
-    vol_mult = strategy["volume_surge_multiplier"]
-    vol_days = strategy["volume_sma_days"]
-    window = strategy["consolidation_window_days"]
-    hits = table[table["SIGNAL"].fillna(False)]
-
-    fig, (ax_p, ax_v) = plt.subplots(
-        2, 1, figsize=(12, 7.5), sharex=True,
-        gridspec_kw={"height_ratios": [3, 1], "hspace": 0.08},
-    )
-    fig.patch.set_facecolor(C["surface"])
-
-    for ax in (ax_p, ax_v):
-        ax.set_facecolor(C["surface"])
-        for side in ("top", "right"):
-            ax.spines[side].set_visible(False)
-        for side in ("left", "bottom"):
-            ax.spines[side].set_color(C["axis"])
-        ax.tick_params(colors=C["muted"], labelsize=9)
-        ax.grid(axis="y", color=C["grid"], linewidth=0.8)
-        ax.set_axisbelow(True)
-
-    # -- price panel: consolidation band, prior high, close, signal markers --
-    ax_p.fill_between(table.index, table["PriorLow"], table["PriorHigh"],
-                      color=C["grid"], alpha=0.55,
-                      label=f"prior {window}d range", linewidth=0)
-    ax_p.plot(table.index, table["PriorHigh"], color=C["ink2"], linewidth=1.2,
-              linestyle="--", label=f"prior {window}d high")
-    ax_p.plot(table.index, table["Close"], color=C["close"], linewidth=2, label="close")
-    if not hits.empty:
-        ax_p.scatter(hits.index, hits["Close"], color=C["event"], s=70, zorder=5,
-                     edgecolor=C["surface"], linewidth=1.5, label="breakout signal")
-        first = hits.iloc[0]
-        ax_p.annotate(
-            f"{hits.index[0].date()}\nclose {first['Close']:.2f}",
-            xy=(hits.index[0], first["Close"]),
-            xytext=(12, 18), textcoords="offset points",
-            fontsize=9, color=C["ink"],
-            arrowprops={"arrowstyle": "-", "color": C["muted"], "linewidth": 0.8},
-        )
-    ax_p.set_ylabel("Price (USD)", color=C["ink2"], fontsize=10)
-    ax_p.legend(loc="upper left", frameon=False, fontsize=9, labelcolor=C["ink2"])
-
-    # -- volume panel: bars + surge threshold --
-    surge = table["C3_VolumeSurge"].fillna(False)
-    ax_v.bar(table.index[~surge], table["Volume"][~surge] / 1e6,
-             color=C["axis"], width=1.0)
-    ax_v.bar(table.index[surge], table["Volume"][surge] / 1e6,
-             color=C["event"], width=1.0, label=f"volume >= {vol_mult}x {vol_days}d avg")
-    ax_v.plot(table.index, vol_mult * table["VolSMA"] / 1e6, color=C["ink2"],
-              linewidth=1.2, linestyle="--", label=f"{vol_mult}x {vol_days}d avg volume")
-    ax_v.set_ylabel("Volume (M)", color=C["ink2"], fontsize=10)
-    ax_v.legend(loc="upper left", frameon=False, fontsize=9, labelcolor=C["ink2"])
-
-    n_sig = len(hits)
-    subtitle = (f"{n_sig} signal day(s)" if n_sig else "no signal days") + \
-        f" -- range limit {strategy['max_consolidation_range_pct']:.0%}, " \
-        f"volume {vol_mult}x {strategy['volume_sma_days']}d average"
-    ax_p.set_title(f"{ticker} -- breakout from {window}-day consolidation\n",
-                   loc="left", fontsize=13, color=C["ink"], fontweight="bold")
-    ax_p.text(0, 1.02, subtitle, transform=ax_p.transAxes, fontsize=9.5, color=C["ink2"])
-
-    fig.savefig(out_path, dpi=150, bbox_inches="tight", facecolor=C["surface"])
-    plt.close(fig)
-    print(f"\nChart saved to {out_path}")
-
-
-# --------------------------------------------------------------------------
 # Main
 # --------------------------------------------------------------------------
 
@@ -268,7 +121,7 @@ def main() -> int:
     table.round(4).to_csv(csv_path)
     print(f"\nFull per-day calculation table saved to {csv_path}")
 
-    plot_backtest(table, strategy, ticker, out_dir / f"backtest_{ticker}.png")
+    charts.plot_breakout(table, strategy, ticker, out_dir / f"backtest_{ticker}.png")
     return 0
 
 
