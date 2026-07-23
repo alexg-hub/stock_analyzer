@@ -1,6 +1,6 @@
 {
     "discord": {
-        "webhook_url": "PASTE_YOUR_DISCORD_WEBHOOK_URL_HERE",
+        "webhook_url": "",
         "send_message_when_no_breakouts": true,
         "username": "Breakout Scanner",
         "request_timeout_seconds": 15
@@ -11,10 +11,12 @@
         "download_interval": "1d"
     },
     "strategy": {
-        "consolidation_window_days": 126,
+        "consolidation_window_days": 50,
         "max_consolidation_range_pct": 0.20,
+        "breakout_multiplier": 1.005,
         "volume_sma_days": 30,
-        "volume_surge_multiplier": 1.5
+        "volume_surge_multiplier": 1.1,
+        "near_miss_max_gap_pct": 0.05
     },
     "fundamentals": {
         "enabled": true,
