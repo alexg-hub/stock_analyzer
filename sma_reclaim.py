@@ -26,9 +26,10 @@ Optionally (`alert_only_on_cross`), the signal only fires on the day the
 close first crosses the level, so a stock that stays above it does not
 re-alert every night.
 
-Near-misses: a genuine fresh cross above the level where one OR two of the
-confirmation tests {R2 downtrend, R3 volume, R5 candle, R4 slope when
-enabled} fail (0 failing = hit; 3+ = too far off, dropped).
+Near-misses: a genuine fresh cross above the level *out of a real downtrend*
+(R2 required, like a hit) where one OR two of the remaining confirmations
+{R3 volume, R5 candle, R4 slope when enabled} fail (0 failing = hit; 3+ =
+too far off, dropped).
 
 Same conventions as the other screens: the SMA includes the current day
 (charting-standard "crossed the 200-day line"); the below-count (R2) and
@@ -169,8 +170,9 @@ def find_reclaims(data: pd.DataFrame, strategy: dict) -> tuple[pd.DataFrame, pd.
     Returns two ticker-indexed DataFrames:
       * hits -- tickers that reclaimed their SMA today after a long stretch
         below it (all conditions true);
-      * near-misses -- tickers that freshly crossed the level today but had
-        one or two confirmation tests fail, with the failure(s) explained.
+      * near-misses -- tickers that freshly crossed the level today out of a
+        real downtrend but had one or two of the remaining confirmations
+        (volume, candle, slope) fail, with the failure(s) explained.
     """
     needed = strategy["sma_days"] + strategy["below_lookback_days"]
     if len(data) <= needed:
@@ -199,18 +201,19 @@ def find_reclaims(data: pd.DataFrame, strategy: dict) -> tuple[pd.DataFrame, pd.
     signal_today = last["signal"].fillna(False)
     hits = day_stats(signal_today[signal_today].index.tolist())
 
-    # Near-misses: a genuine fresh cross today where 1 or 2 of the active
-    # confirmation tests fail (0 = hit; 3+ = too far off).
+    # Near-misses: a genuine fresh cross OUT OF A DOWNTREND today (both
+    # mandatory), where 1 or 2 of the remaining confirmations -- volume,
+    # candle, and the slope floor when enabled -- fail.
     fresh = last["is_fresh_cross"].fillna(False)
+    downtrend = last["is_downtrend"].fillna(False)
     fails = (
-        (~last["is_downtrend"].fillna(False)).astype(int)
-        + (~last["is_volume_surge"].fillna(False)).astype(int)
+        (~last["is_volume_surge"].fillna(False)).astype(int)
         + (~last["is_long_green_candle"].fillna(False)).astype(int)
     )
     if strategy.get("min_sma_slope_pct") is not None:
         is_slope_ok = last["sma_slope_pct"] >= strategy["min_sma_slope_pct"]
         fails += (~is_slope_ok.fillna(False)).astype(int)
-    near_mask = fresh & (fails >= 1) & (fails <= 2) & ~signal_today
+    near_mask = fresh & downtrend & (fails >= 1) & (fails <= 2) & ~signal_today
 
     near = day_stats(near_mask[near_mask].index.tolist())
     if not near.empty:

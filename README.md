@@ -106,10 +106,11 @@ section):
    re-alert every night.
 
 The alert also lists **near-miss candidates** — tickers that genuinely
-crossed above the level today (a fresh cross) but had **one or two** of the
-confirmation tests (downtrend, volume, green candle, and the slope floor
-when enabled) fail, with the failure(s) explained. Days that miss on three
-or more tests are dropped as too far off.
+crossed above the level today (a fresh cross) *out of a real downtrend*
+(the downtrend is required, same as for a hit) but had **one or two** of the
+remaining confirmations (volume, green candle, and the slope floor when
+enabled) fail, with the failure(s) explained. A cross that wasn't from a
+long downtrend, or that misses on too many confirmations, is dropped.
 
 First crosses of a long-term SMA are whipsaw-prone by nature — expect some
 signals to fail back below the line; this is a watchlist alert, not an

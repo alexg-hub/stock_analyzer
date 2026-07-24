@@ -93,7 +93,8 @@ def log_run(table: pd.DataFrame, strategy: dict, ticker: str) -> None:
                   f"body {row['BodyPct']:+.2f}% (needs >= {min_body:.1%}, green)")
 
     section("STEP 5 -- Fresh-cross days that did NOT fire (and why)")
-    print("(the production near-miss list is the subset failing only 1 or 2 tests)")
+    print("(the production near-miss list is the subset that were in a downtrend "
+          "and fail only 1 or 2 of {volume, candle, slope})")
     misses = table[table["FreshCross"].fillna(False) & ~table["SIGNAL"].fillna(False)]
     if misses.empty:
         print("None.")

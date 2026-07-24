@@ -88,9 +88,10 @@ real send.
   on scan day; breakout-condition failures are additionally filtered to closes
   within `near_miss_max_gap_pct` of the required level (production alert only;
   the backtest log intentionally shows all 3-of-4 days). Reclaim = a genuine
-  fresh cross today with **1 or 2** of its confirmation tests (downtrend,
-  volume, candle, and slope when enabled) failing — 0 = hit, 3+ dropped; its
-  reason string joins all failing tests (`cross_miss_reasons`). The pullback
+  fresh cross today **out of a long downtrend** (both mandatory, as for a hit)
+  with **1 or 2** of the remaining confirmations (volume, candle, and slope
+  when enabled) failing — 0 = hit, 3+ dropped; its reason string joins all
+  failing tests (`cross_miss_reasons`). The pullback
   screen has no production near-miss list; its backtest logs touch days that
   failed and why.
 - **Fundamentals are two config-driven layers** (`scanner_common.py`):
