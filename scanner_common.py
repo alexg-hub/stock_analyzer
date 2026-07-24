@@ -31,6 +31,11 @@ DISCORD_EMBED_CHAR_BUDGET = 5500
 # Embed side-bar color for near-miss cards (screens define their own).
 NEAR_MISS_COLOR = 0x898781
 
+# Reserved column (added by fetch_fundamentals) holding the company name for
+# the embed titles; not a config-driven fundamentals field, so it never
+# renders as an inline field.
+COMPANY_COL = "Company"
+
 
 # --------------------------------------------------------------------------
 # Config
@@ -266,7 +271,7 @@ def fetch_fundamentals(tickers: list[str], fund_cfg: dict) -> pd.DataFrame:
         except Exception as exc:  # noqa: BLE001 - a bad ticker must not kill the alert
             print(f"  fundamentals failed for {ticker}: {exc}")
             info = {}
-        row = {}
+        row = {COMPANY_COL: info.get("longName") or info.get("shortName")}
         for key, label in fields.items():
             value = info.get(key)
             if key in percent_fields and isinstance(value, (int, float)):
@@ -401,11 +406,22 @@ def build_embeds(module, result: ScanResult, fund_cfg: dict,
     `EMBED_COLOR` and `describe_hit(row, strategy)`.
     """
     badge = fund_cfg.get("quality", {}).get("badge", "")
+
+    def label(ticker, row) -> str:
+        """`TICKER (Company Name)` when the name is available, else the ticker."""
+        name = row.get(COMPANY_COL)
+        if isinstance(name, str) and name.strip():
+            name = name.strip()
+            if len(name) > 48:
+                name = name[:47].rstrip() + "…"
+            return f"{ticker} ({name})"
+        return str(ticker)
+
     embeds = []
     for ticker, row in result.hits.iterrows():
         prefix = f"{badge} " if badge and quality_check(row, fund_cfg) else ""
         embed = {
-            "title": f"{prefix}{ticker} -- {result.title}",
+            "title": f"{prefix}{label(ticker, row)} -- {result.title}",
             "description": module.describe_hit(row, result.strategy),
             "color": module.EMBED_COLOR,
             "fields": fundamentals_fields(row, fund_cfg),
@@ -416,7 +432,7 @@ def build_embeds(module, result: ScanResult, fund_cfg: dict,
     for ticker, row in result.near.iterrows():
         prefix = f"{badge} " if badge and quality_check(row, fund_cfg) else ""
         embed = {
-            "title": f"{prefix}{ticker} -- near miss ({result.title})",
+            "title": f"{prefix}{label(ticker, row)} -- near miss ({result.title})",
             "description": row["Reason"],
             "color": NEAR_MISS_COLOR,
             "fields": fundamentals_fields(row, fund_cfg),

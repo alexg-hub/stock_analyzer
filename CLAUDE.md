@@ -105,6 +105,10 @@ real send.
   `fundamentals_fields()` renders them as embed fields. Missing statement
   rows (banks lack Operating Income; a bank's hugely negative FCF is
   genuine) render as `n/a` — same tolerance rule as `info` fields.
+  `fetch_fundamentals` also adds a reserved `COMPANY_COL` ("Company")
+  column (`info` longName/shortName) that `build_embeds` puts in each card
+  title as `TICKER (Company Name)`; it is not a config field and never
+  renders as an inline field.
 - **Quality badge** (`fundamentals.quality` in config): `quality_check(row,
   fund_cfg)` in `scanner_common.py` evaluates `rules` — keyed by the same
   `info`/metric keys as the display config, each `{min, max, increasing}`;

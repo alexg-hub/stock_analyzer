@@ -3,9 +3,9 @@
 Nightly scans of all S&P 500 stocks (via Windows Task Scheduler) with results
 sent to Discord via a webhook — a short summary line per screen, then one
 **embed card per ticker**: colored side-bar (orange = breakout, blue =
-pullback, green = reclaim, gray = near-miss), the signal description, a
-fundamentals field grid, and the ticker's chart rendered inside the card
-(for hits and near-misses).
+pullback, green = reclaim, gray = near-miss), a title with the ticker and
+company name, the signal description, a fundamentals field grid, and the
+ticker's chart rendered inside the card (for hits and near-misses).
 
 Current screens:
 
