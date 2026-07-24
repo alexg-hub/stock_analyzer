@@ -157,7 +157,7 @@ python backtest_reclaim.py        # historical validation, reclaim screen
 
 ### Backtests
 
-Both backtests run the exact production condition math (the shared
+Each backtest runs the exact production condition math (the shared
 `compute_*` functions) over a historical window for one ticker, with
 step-by-step logging of every calculation, near-miss analysis, a per-day
 calculation table (CSV), and a chart (PNG):
@@ -167,6 +167,10 @@ python backtest_breakout.py --ticker JNJ  --start 2025-01-01 --end 2025-10-31
 python backtest_pullback.py --ticker MSFT --start 2024-01-01 --end 2025-06-30
 python backtest_reclaim.py  --ticker META --start 2023-01-01 --end 2023-12-31
 ```
+
+`run_backtests.bat` runs all three default validation cases in one go and
+writes their combined step-by-step output to `backtest_log.txt` (gitignored,
+overwritten each run) — separate from the nightly production `scanner_log.txt`.
 
 ## Configuration (`config.json`)
 

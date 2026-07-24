@@ -42,7 +42,7 @@
     },
     "charts": {
         "enabled": true,
-        "near_miss_charts": true,
+        "near_miss_charts": false,
         "lookback_days": 250,
         "dpi": 120
     },
