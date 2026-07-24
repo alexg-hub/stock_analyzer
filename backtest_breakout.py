@@ -108,7 +108,7 @@ def main() -> int:
 
     ticker = args.ticker.upper()
     start, end = pd.Timestamp(args.start), pd.Timestamp(args.end)
-    strategy = load_config()["strategy"]
+    strategy = load_config()["breakout_strategy"]
 
     data = download_history(ticker, start, end, strategy["consolidation_window_days"])
     signals = compute_signals(data, strategy)

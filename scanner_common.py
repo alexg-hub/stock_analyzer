@@ -414,8 +414,9 @@ def build_embeds(module, result: ScanResult, fund_cfg: dict,
             embed["image"] = {"url": f"attachment://{chart_files[ticker].name}"}
         embeds.append(embed)
     for ticker, row in result.near.iterrows():
+        prefix = f"{badge} " if badge and quality_check(row, fund_cfg) else ""
         embed = {
-            "title": f"{ticker} -- near miss ({result.title})",
+            "title": f"{prefix}{ticker} -- near miss ({result.title})",
             "description": row["Reason"],
             "color": NEAR_MISS_COLOR,
             "fields": fundamentals_fields(row, fund_cfg),

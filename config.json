@@ -17,7 +17,7 @@
         "breakout_multiplier": 1.01,
         "volume_sma_days": 30,
         "volume_surge_multiplier": 1.1,
-        "near_miss_max_gap_pct": 0.05
+        "near_miss_max_gap_pct": 0.01
     },
     "pullback_strategy": {
         "enabled": true,
@@ -42,7 +42,7 @@
     },
     "charts": {
         "enabled": true,
-        "near_miss_charts": false,
+        "near_miss_charts": true,
         "lookback_days": 250,
         "dpi": 120
     },
@@ -78,10 +78,10 @@
                 "revenueGrowth": {"min": 10},
                 "dividendYield": {"min": 0},
                 "payoutRatio": {"max": 50},
-                "roe": {"min": 15},
-                "roic": {"min": 15},
+                "roe": {"min": 10},
+                "roic": {"min": 10},
                 "operating_margin": {"min": 20, "increasing": true},
-                "profit_margin": {"min": 15, "increasing": true},
+                "profit_margin": {"min": 10, "increasing": true},
                 "fcf": {"min": 0, "increasing": true}
             }
         }
