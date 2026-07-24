@@ -43,6 +43,7 @@ def log_run(table: pd.DataFrame, strategy: dict, ticker: str) -> None:
     vol_mult = strategy["volume_surge_multiplier"]
     slope_days = strategy["sma_slope_lookback_days"]
     min_slope = strategy.get("min_sma_slope_pct")
+    min_body = strategy.get("min_candle_body_pct", 0.0)
     cross_only = strategy.get("alert_only_on_cross", True)
 
     section(f"STEP 1 -- Historical data for {ticker} (analysis window)")
@@ -59,12 +60,15 @@ def log_run(table: pd.DataFrame, strategy: dict, ticker: str) -> None:
     print(f"R3 volume:       Volume >= {vol_mult}x the prior {vol_days}d average")
     if min_slope is not None:
         print(f"R4 slope:        the SMA's change over {slope_days} days >= {min_slope:.1%}")
+    print(f"R5 candle:       Close must be > {1 + min_body} x the day's Open"
+          f" (green, body >= {min_body:.1%})")
     if cross_only:
         print("Entry filter:    signal only on the day the close first crosses the level")
 
     section(f"STEP 3 -- Days where Close freshly crossed the level (R1 + fresh cross)")
-    fmt_cols = ["Close", "SMA", "DistPct", "BelowPct", "VolRatio", "SmaSlopePct",
-                "R1_AboveLevel", "R2_TimeBelow", "R3_VolumeSurge", "FreshCross", "SIGNAL"]
+    fmt_cols = ["Close", "SMA", "DistPct", "BelowPct", "VolRatio", "SmaSlopePct", "BodyPct",
+                "R1_AboveLevel", "R2_TimeBelow", "R3_VolumeSurge", "R5_LongGreen",
+                "FreshCross", "SIGNAL"]
     crosses = table[table["FreshCross"].fillna(False)]
     if crosses.empty:
         print(f"None -- the close never crossed {1 + margin:.2f} x its {sma_days}d SMA "
@@ -85,8 +89,11 @@ def log_run(table: pd.DataFrame, strategy: dict, ticker: str) -> None:
                   f"(needs >= {min_below:.0%})")
             print(f"    Volume {row['VolRatio']:.2f}x the prior {vol_days}d average "
                   f"(needs >= {vol_mult}x)")
+            print(f"    Candle Open {row['Open']:.2f} -> Close {row['Close']:.2f} = "
+                  f"body {row['BodyPct']:+.2f}% (needs >= {min_body:.1%}, green)")
 
     section("STEP 5 -- Fresh-cross days that did NOT fire (and why)")
+    print("(the production near-miss list is the subset failing only 1 or 2 tests)")
     misses = table[table["FreshCross"].fillna(False) & ~table["SIGNAL"].fillna(False)]
     if misses.empty:
         print("None.")

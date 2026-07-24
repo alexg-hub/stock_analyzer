@@ -18,10 +18,17 @@ R4. (optional) SMA no longer falling steeply -- when `min_sma_slope_pct`
     is set (not null), the SMA's change over `sma_slope_lookback_days`
     must be at least that fraction. Defaults to off (null): it filters
     knife-catching but also delays entry.
+R5. Long green candle -- today's Close exceeds the Open by at least
+    `min_candle_body_pct` (Close > (1 + min_candle_body_pct) x Open), so
+    the reclaim day itself closes strongly instead of a weak/red cross.
 
 Optionally (`alert_only_on_cross`), the signal only fires on the day the
 close first crosses the level, so a stock that stays above it does not
 re-alert every night.
+
+Near-misses: a genuine fresh cross above the level where one OR two of the
+confirmation tests {R2 downtrend, R3 volume, R5 candle, R4 slope when
+enabled} fail (0 failing = hit; 3+ = too far off, dropped).
 
 Same conventions as the other screens: the SMA includes the current day
 (charting-standard "crossed the 200-day line"); the below-count (R2) and
@@ -61,8 +68,10 @@ def compute_reclaim_signals(data: pd.DataFrame, strategy: dict) -> dict[str, pd.
     vol_mult = strategy["volume_surge_multiplier"]
     slope_days = strategy["sma_slope_lookback_days"]
     min_slope = strategy.get("min_sma_slope_pct")
+    min_body = strategy.get("min_candle_body_pct", 0.0)
 
     close = data["Close"]
+    open_ = data["Open"]
     volume = data["Volume"]
     sma = close.rolling(sma_days).mean()
     level = (1 + margin) * sma
@@ -87,11 +96,16 @@ def compute_reclaim_signals(data: pd.DataFrame, strategy: dict) -> dict[str, pd.
     # R4 (optional): the SMA is no longer falling steeply.
     is_slope_ok = sma_slope_pct >= min_slope if min_slope is not None else None
 
+    # R5: the reclaim day is a green candle whose body (Close over Open) is
+    # at least min_candle_body_pct -- a weak/red cross usually fails back.
+    body_pct = close / open_ - 1
+    is_long_green_candle = close > (1 + min_body) * open_
+
     # Fresh cross: yesterday's close was not yet above the level, so today
     # is the day the reclaim actually happened.
     is_fresh_cross = is_above_level & ~(close.shift(1) > level.shift(1))
 
-    signal = is_above_level & is_downtrend & is_volume_surge
+    signal = is_above_level & is_downtrend & is_volume_surge & is_long_green_candle
     if is_slope_ok is not None:
         signal &= is_slope_ok
     if strategy.get("alert_only_on_cross", True):
@@ -104,41 +118,59 @@ def compute_reclaim_signals(data: pd.DataFrame, strategy: dict) -> dict[str, pd.
         "sma_slope_pct": sma_slope_pct,
         "vol_sma": vol_sma,
         "vol_ratio": vol_ratio,
+        "body_pct": body_pct,
         "is_above_level": is_above_level,
         "is_downtrend": is_downtrend,
         "is_volume_surge": is_volume_surge,
+        "is_long_green_candle": is_long_green_candle,
         "is_fresh_cross": is_fresh_cross,
         "signal": signal,
     }
 
 
-def cross_miss_reason(row: pd.Series, strategy: dict) -> str:
-    """Explain why a fresh-cross day did not fire the signal.
+def cross_miss_reasons(row: pd.Series, strategy: dict) -> list[str]:
+    """Every confirmation test a fresh-cross day failed, in condition order.
 
-    `row` is a build_calc_table row (percent columns already x100).
+    `row` is a build_calc_table row (percent columns already x100). Returns
+    one string per failing active confirmation (R2 downtrend, R3 volume, R4
+    slope when enabled, R5 candle); empty when all pass.
     """
     lookback = strategy["below_lookback_days"]
     min_below = strategy["min_days_below_pct"]
     vol_days = strategy["volume_sma_days"]
     vol_mult = strategy["volume_surge_multiplier"]
     min_slope = strategy.get("min_sma_slope_pct")
+    min_body = strategy.get("min_candle_body_pct", 0.0)
+
+    reasons = []
     if not row["R2_TimeBelow"]:
-        return (f"not a long downtrend: below SMA only {row['BelowPct']:.0f}% of "
-                f"the last {lookback} days < {min_below:.0%} required")
+        reasons.append(f"not a long downtrend: below SMA only {row['BelowPct']:.0f}% "
+                       f"of the last {lookback} days < {min_below:.0%} required")
     if not row["R3_VolumeSurge"]:
-        return (f"no volume confirmation: {row['VolRatio']:.2f}x < "
-                f"{vol_mult}x {vol_days}d avg required")
+        reasons.append(f"no volume confirmation: {row['VolRatio']:.2f}x < "
+                       f"{vol_mult}x {vol_days}d avg required")
     if min_slope is not None and row["SmaSlopePct"] < min_slope * 100:
-        return (f"SMA still falling: {row['SmaSlopePct']:+.2f}% < "
-                f"{min_slope:.1%} required")
-    return "already above the cross level (no fresh cross)"
+        reasons.append(f"SMA still falling: {row['SmaSlopePct']:+.2f}% < "
+                       f"{min_slope:.1%} required")
+    if not row["R5_LongGreen"]:
+        reasons.append(f"reclaim candle too weak: body {row['BodyPct']:+.1f}% < "
+                       f"{min_body:.1%} required")
+    return reasons
 
 
-def find_reclaims(data: pd.DataFrame, strategy: dict) -> pd.DataFrame:
+def cross_miss_reason(row: pd.Series, strategy: dict) -> str:
+    """Join every failing confirmation into one string (see cross_miss_reasons)."""
+    return "; ".join(cross_miss_reasons(row, strategy))
+
+
+def find_reclaims(data: pd.DataFrame, strategy: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Screen the whole universe on the most recent trading day.
 
-    Returns a ticker-indexed DataFrame of the tickers that reclaimed
-    their SMA today after a long stretch below it.
+    Returns two ticker-indexed DataFrames:
+      * hits -- tickers that reclaimed their SMA today after a long stretch
+        below it (all conditions true);
+      * near-misses -- tickers that freshly crossed the level today but had
+        one or two confirmation tests fail, with the failure(s) explained.
     """
     needed = strategy["sma_days"] + strategy["below_lookback_days"]
     if len(data) <= needed:
@@ -150,23 +182,58 @@ def find_reclaims(data: pd.DataFrame, strategy: dict) -> pd.DataFrame:
     signals = compute_reclaim_signals(data, strategy)
     last = {name: df.iloc[-1] for name, df in signals.items()}
 
+    def day_stats(tickers: list[str]) -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "Close": data["Close"].iloc[-1][tickers].round(2),
+                "SMA": last["sma"][tickers].round(2),
+                "Dist %": (last["dist_pct"][tickers] * 100).round(2),
+                "Below %": (last["pct_days_below"][tickers] * 100).round(1),
+                "Vol Ratio": last["vol_ratio"][tickers].round(2),
+                "SMA Slope %": (last["sma_slope_pct"][tickers] * 100).round(2),
+                "Body %": (last["body_pct"][tickers] * 100).round(2),
+            },
+            index=pd.Index(tickers, name="Ticker"),
+        )
+
     signal_today = last["signal"].fillna(False)
-    tickers = signal_today[signal_today].index.tolist()
-    hits = pd.DataFrame(
-        {
-            "Close": data["Close"].iloc[-1][tickers].round(2),
-            "SMA": last["sma"][tickers].round(2),
-            "Dist %": (last["dist_pct"][tickers] * 100).round(2),
-            "Below %": (last["pct_days_below"][tickers] * 100).round(1),
-            "Vol Ratio": last["vol_ratio"][tickers].round(2),
-            "SMA Slope %": (last["sma_slope_pct"][tickers] * 100).round(2),
-        },
-        index=pd.Index(tickers, name="Ticker"),
+    hits = day_stats(signal_today[signal_today].index.tolist())
+
+    # Near-misses: a genuine fresh cross today where 1 or 2 of the active
+    # confirmation tests fail (0 = hit; 3+ = too far off).
+    fresh = last["is_fresh_cross"].fillna(False)
+    fails = (
+        (~last["is_downtrend"].fillna(False)).astype(int)
+        + (~last["is_volume_surge"].fillna(False)).astype(int)
+        + (~last["is_long_green_candle"].fillna(False)).astype(int)
     )
+    if strategy.get("min_sma_slope_pct") is not None:
+        is_slope_ok = last["sma_slope_pct"] >= strategy["min_sma_slope_pct"]
+        fails += (~is_slope_ok.fillna(False)).astype(int)
+    near_mask = fresh & (fails >= 1) & (fails <= 2) & ~signal_today
+
+    near = day_stats(near_mask[near_mask].index.tolist())
+    if not near.empty:
+        near["Reason"] = [
+            cross_miss_reason(
+                pd.Series({
+                    "R2_TimeBelow": last["is_downtrend"].get(ticker, False),
+                    "R3_VolumeSurge": last["is_volume_surge"].get(ticker, False),
+                    "R5_LongGreen": last["is_long_green_candle"].get(ticker, False),
+                    "BelowPct": near.at[ticker, "Below %"],
+                    "VolRatio": near.at[ticker, "Vol Ratio"],
+                    "SmaSlopePct": near.at[ticker, "SMA Slope %"],
+                    "BodyPct": near.at[ticker, "Body %"],
+                }),
+                strategy,
+            )
+            for ticker in near.index
+        ]
 
     scan_date = data.index[-1].date()
-    print(f"Scan date: {scan_date} -- {len(hits)} SMA-reclaim setup(s).")
-    return hits
+    print(f"Scan date: {scan_date} -- {len(hits)} SMA-reclaim setup(s), "
+          f"{len(near)} near-miss(es).")
+    return hits, near
 
 
 # --------------------------------------------------------------------------
@@ -174,11 +241,12 @@ def find_reclaims(data: pd.DataFrame, strategy: dict) -> pd.DataFrame:
 # --------------------------------------------------------------------------
 
 def scan(data: pd.DataFrame, strategy: dict) -> ScanResult:
-    hits = find_reclaims(data, strategy)
+    hits, near = find_reclaims(data, strategy)
     sma_days = strategy["sma_days"]
     return ScanResult(
         title=f"Reclaim of {sma_days}-day SMA after downtrend",
         hits=hits,
+        near=near,
         strategy=strategy,
     )
 
@@ -189,7 +257,8 @@ def describe_hit(row, strategy: dict) -> str:
             f"{strategy['sma_days']}d SMA {fmt_value(row['SMA'])} "
             f"({row['Dist %']:+.1f}%), below SMA {row['Below %']:.0f}% of last "
             f"{strategy['below_lookback_days']}d, "
-            f"vol {row['Vol Ratio']:.1f}x {strategy['volume_sma_days']}d avg")
+            f"vol {row['Vol Ratio']:.1f}x {strategy['volume_sma_days']}d avg, "
+            f"green candle {row['Body %']:+.1f}%")
 
 
 def build_calc_table(data: pd.DataFrame, signals: dict, ticker: str) -> pd.DataFrame:
@@ -211,9 +280,11 @@ def build_calc_table(data: pd.DataFrame, signals: dict, ticker: str) -> pd.DataF
             "VolSMA": signals["vol_sma"][ticker],
             "VolRatio": signals["vol_ratio"][ticker],
             "SmaSlopePct": signals["sma_slope_pct"][ticker] * 100,
+            "BodyPct": signals["body_pct"][ticker] * 100,
             "R1_AboveLevel": signals["is_above_level"][ticker],
             "R2_TimeBelow": signals["is_downtrend"][ticker],
             "R3_VolumeSurge": signals["is_volume_surge"][ticker],
+            "R5_LongGreen": signals["is_long_green_candle"][ticker],
             "FreshCross": signals["is_fresh_cross"][ticker],
             "SIGNAL": signals["signal"][ticker],
         }

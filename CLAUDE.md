@@ -72,25 +72,27 @@ real send.
   shape (`scanner_common.download_history` does it;
   `scanner_common.single_ticker_panel` slices one ticker back out of a bulk
   frame).
-- **The breakout screen has four conditions**: C1 consolidation, C2 breakout,
-  C3 volume surge, and **C4 long green candle** (`close > (1 +
-  min_candle_body_pct) * open` — the only condition that reads the `Open`
-  field; a positive threshold enforces both green and a minimum body). Hits
-  require all four; a near-miss is **exactly 3 of the 4** (one condition
-  short). C4 adds no lookback — it's single-day — so it never affects
-  `download_period`.
+- **Green-candle condition** on both the breakout and reclaim screens:
+  `close > (1 + min_candle_body_pct) * open` (the only condition reading the
+  `Open` field; a positive threshold enforces both green and a minimum body,
+  single-day so no `download_period` impact). Breakout calls it C4 (hits need
+  all four conditions; near-miss = **exactly 3 of 4**). Reclaim calls it R5
+  and folds it into the signal the same way.
 - **Rolling-window conventions differ by design**: the breakout screen uses
   `shift(1)` so the prior range/volume baseline excludes the current day; the
   pullback and reclaim screens' SMA *includes* the current day
   (charting-standard "touch/cross of the line") while their persistence
   counts (time above/below the SMA) and the reclaim screen's volume baseline
   use `shift(1)`. All are intentional — don't "fix" any of them.
-- **Near-misses** (breakout screen only) = exactly 3 of 4 conditions true on
-  scan day. Breakout-only failures are additionally filtered to closes within
-  `near_miss_max_gap_pct` of the required level (production alert only; the
-  backtest log intentionally shows all 2-of-3 days). The pullback and reclaim
-  screens have no production near-miss list; their backtests log touch days /
-  fresh-cross days that failed and why.
+- **Near-misses** differ by screen. Breakout = exactly 3 of 4 conditions true
+  on scan day; breakout-condition failures are additionally filtered to closes
+  within `near_miss_max_gap_pct` of the required level (production alert only;
+  the backtest log intentionally shows all 3-of-4 days). Reclaim = a genuine
+  fresh cross today with **1 or 2** of its confirmation tests (downtrend,
+  volume, candle, and slope when enabled) failing — 0 = hit, 3+ dropped; its
+  reason string joins all failing tests (`cross_miss_reasons`). The pullback
+  screen has no production near-miss list; its backtest logs touch days that
+  failed and why.
 - **Fundamentals are two config-driven layers** (`scanner_common.py`):
   `fields` = snapshot values from Yahoo `info` (`percent_fields` lists keys
   Yahoo returns as fractions, ×100 before display — but `dividendYield` is

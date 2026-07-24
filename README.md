@@ -98,9 +98,18 @@ section):
    `min_sma_slope_pct` is set (not `null`), the SMA's change over
    `sma_slope_lookback_days` must be at least that fraction; filters
    knife-catching in stocks still in freefall, at the cost of later entry.
-5. **Fresh cross** (optional, `alert_only_on_cross`) — yesterday's close
+5. **Long green candle** — today's Close is above `(1 + min_candle_body_pct)
+   ×` the day's Open, so the reclaim day itself closes strongly (green, body
+   ≥ `min_candle_body_pct`) instead of a weak or red cross.
+6. **Fresh cross** (optional, `alert_only_on_cross`) — yesterday's close
    was not yet above the level, so a stock that stays above it doesn't
    re-alert every night.
+
+The alert also lists **near-miss candidates** — tickers that genuinely
+crossed above the level today (a fresh cross) but had **one or two** of the
+confirmation tests (downtrend, volume, green candle, and the slope floor
+when enabled) fail, with the failure(s) explained. Days that miss on three
+or more tests are dropped as too far off.
 
 First crosses of a long-term SMA are whipsaw-prone by nature — expect some
 signals to fail back below the line; this is a watchlist alert, not an
@@ -203,6 +212,7 @@ overwritten each run) — separate from the nightly production `scanner_log.txt`
 | `reclaim_strategy.below_lookback_days` | `200` | Downtrend-persistence lookback |
 | `reclaim_strategy.min_days_below_pct` | `0.8` | Min fraction of the lookback the close spent below the SMA |
 | `reclaim_strategy.cross_margin_pct` | `0.01` | Close must exceed the SMA by this fraction (1.01 × SMA) |
+| `reclaim_strategy.min_candle_body_pct` | `0.01` | Reclaim day's Close must exceed its Open by at least this fraction (green candle, body ≥ 1%); `0.0` = any green candle |
 | `reclaim_strategy.volume_sma_days` | `30` | Lookback for the average-volume baseline |
 | `reclaim_strategy.volume_surge_multiplier` | `1.2` | Required volume vs. that baseline |
 | `reclaim_strategy.sma_slope_lookback_days` | `63` | Lookback for the optional SMA-slope floor |
