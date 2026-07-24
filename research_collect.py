@@ -1,0 +1,357 @@
+"""
+Investment-case data collection -- Tier A (Yahoo / yfinance).
+
+Pure collection, no rendering: `collect_yahoo(ticker)` gathers everything
+useful yfinance exposes for one ticker into a plain nested dict (JSON-friendly
+scalars / lists), grouped by the job each field does in an investment case:
+valuation-in-context, forward estimates + revision trend, analyst view,
+earnings cadence & quality, balance-sheet durability, ownership & insiders,
+recent news, and profile.
+
+This is deliberately separate from `scanner_common.fetch_fundamentals` (which
+feeds the live nightly Discord embed) so the working alert stays untouched
+while the richer research layer is built and validated. Nothing is rendered
+here and nothing is hardcoded that belongs in config -- synthesis/formatting
+is a later step.
+
+Tier B (IBKR company graph / market stats / account) is *not* here: it is
+reachable only through the claude.ai MCP connector in an interactive session,
+never from this unattended-capable Python module.
+
+Run standalone to eyeball / validate collection:
+    python research_collect.py MSFT JNJ JPM
+"""
+
+import json
+import sys
+
+import pandas as pd
+import yfinance as yf
+
+
+# --------------------------------------------------------------------------
+# n/a-tolerant scalar helpers (a missing value never raises -- it becomes None)
+# --------------------------------------------------------------------------
+
+def _num(value):
+    """Return a plain float for a real number, else None."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)) and pd.notna(value):
+        return float(value)
+    return None
+
+
+def _pct(value, scale=100.0):
+    """Yahoo fraction (0.1616) -> percent (16.16), else None."""
+    v = _num(value)
+    return v * scale if v is not None else None
+
+
+def _get(info: dict, key: str):
+    return _num(info.get(key))
+
+
+def _df(obj):
+    """Only a non-empty DataFrame passes through; anything else -> None."""
+    return obj if isinstance(obj, pd.DataFrame) and not obj.empty else None
+
+
+# --------------------------------------------------------------------------
+# Per-group collectors -- each is self-contained and swallows its own errors
+# so one bad group never aborts the rest of the ticker.
+# --------------------------------------------------------------------------
+
+def _profile(info: dict) -> dict:
+    return {
+        "company": info.get("longName") or info.get("shortName"),
+        "sector": info.get("sector"),
+        "industry": info.get("industry"),
+        "employees": info.get("fullTimeEmployees"),
+        "country": info.get("country"),
+        "summary": info.get("longBusinessSummary"),
+    }
+
+
+def _ttm_eps_series(tk: yf.Ticker, index: pd.DatetimeIndex):
+    """Daily trailing-twelve-month EPS aligned to `index`, from reported
+    quarterly EPS (rolling 4). None if not reconstructable."""
+    ed = _df(getattr(tk, "earnings_dates", None))
+    if ed is None or "Reported EPS" not in ed.columns:
+        return None
+    eps = ed["Reported EPS"].dropna()
+    if len(eps) < 4:
+        return None
+    eps = eps.sort_index()
+    eps.index = pd.DatetimeIndex(eps.index).tz_localize(None).normalize()
+    ttm = eps.rolling(4).sum().dropna()
+    if ttm.empty:
+        return None
+    return ttm.reindex(index, method="ffill")
+
+
+def _valuation(info: dict, tk: yf.Ticker, close: pd.Series | None) -> dict:
+    out = {
+        "trailingPE": _get(info, "trailingPE"),
+        "forwardPE": _get(info, "forwardPE"),
+        "priceToSales": _get(info, "priceToSalesTrailing12Months"),
+        "priceToBook": _get(info, "priceToBook"),
+        "evToEbitda": _get(info, "enterpriseToEbitda"),
+        "evToRevenue": _get(info, "enterpriseToRevenue"),
+        "enterpriseValue": _get(info, "enterpriseValue"),
+        "marketCap": _get(info, "marketCap"),
+        "price_percentile_2y": None,
+        "pe_percentile_2y": None,
+        "pe_2y_low": None,
+        "pe_2y_high": None,
+    }
+    if close is None or close.dropna().empty:
+        return out
+    px = close.dropna()
+    px.index = pd.DatetimeIndex(px.index).tz_localize(None).normalize()
+    last = float(px.iloc[-1])
+    lo, hi = float(px.min()), float(px.max())
+    if hi > lo:
+        out["price_percentile_2y"] = round(100 * (last - lo) / (hi - lo), 1)
+    try:
+        ttm = _ttm_eps_series(tk, px.index)
+        if ttm is not None:
+            pe = (px / ttm).replace([float("inf"), float("-inf")], pd.NA).dropna()
+            pe = pe[pe > 0]
+            if len(pe) > 20:
+                cur = float(pe.iloc[-1])
+                out["pe_2y_low"] = round(float(pe.min()), 1)
+                out["pe_2y_high"] = round(float(pe.max()), 1)
+                out["pe_percentile_2y"] = round(100 * (pe < cur).mean(), 1)
+    except Exception as exc:  # noqa: BLE001
+        print(f"  pe_percentile failed: {exc}")
+    return out
+
+
+def _estimates(tk: yf.Ticker) -> dict:
+    """Forward EPS/revenue consensus, growth, and the estimate-revision trend
+    (whether analysts are marking numbers up or down)."""
+    def records(attr):
+        d = _df(getattr(tk, attr, None))
+        if d is None:
+            return None
+        return {str(period): {k: _num(v) if not isinstance(v, str) else v
+                              for k, v in row.items()}
+                for period, row in d.to_dict("index").items()}
+
+    return {
+        "eps": records("earnings_estimate"),
+        "revenue": records("revenue_estimate"),
+        "growth": records("growth_estimates"),
+        "eps_trend": records("eps_trend"),
+        "eps_revisions": records("eps_revisions"),
+    }
+
+
+def _analyst(tk: yf.Ticker, info: dict) -> dict:
+    targets = getattr(tk, "analyst_price_targets", None)
+    targets = targets if isinstance(targets, dict) else {}
+    mean = _num(targets.get("mean"))
+    cur = _num(targets.get("current")) or _get(info, "currentPrice")
+    upside = round(100 * (mean - cur) / cur, 1) if mean and cur else None
+
+    recs = None
+    rs = _df(getattr(tk, "recommendations_summary", None))
+    if rs is not None:
+        recs = [{k: (_num(v) if k != "period" else v) for k, v in row.items()}
+                for row in rs.to_dict("records")]
+
+    actions = None
+    ud = _df(getattr(tk, "upgrades_downgrades", None))
+    if ud is not None:
+        recent = ud.sort_index().tail(6)
+        actions = [{
+            "date": str(idx.date()) if hasattr(idx, "date") else str(idx),
+            "firm": row.get("Firm"),
+            "action": row.get("Action"),
+            "from": row.get("FromGrade"),
+            "to": row.get("ToGrade"),
+            "target": _num(row.get("currentPriceTarget")),
+        } for idx, row in recent.iterrows()]
+
+    return {
+        "targets": {"current": cur, "mean": mean,
+                    "low": _num(targets.get("low")), "high": _num(targets.get("high")),
+                    "upside_pct": upside},
+        "num_analysts": info.get("numberOfAnalystOpinions"),
+        "recommendation_key": info.get("recommendationKey"),
+        "recommendations": recs,
+        "recent_actions": actions,
+    }
+
+
+def _earnings(tk: yf.Ticker) -> dict:
+    """Next earnings date (a 'reports in N days' guard) + the beat/miss
+    surprise history."""
+    next_date, days_to = None, None
+    cal = getattr(tk, "calendar", None)
+    if isinstance(cal, dict):
+        dates = cal.get("Earnings Date")
+        if isinstance(dates, list) and dates:
+            next_date = dates[0]
+        elif dates:
+            next_date = dates
+    if next_date is not None:
+        try:
+            nd = pd.Timestamp(next_date).tz_localize(None).normalize()
+            days_to = int((nd - pd.Timestamp.now().normalize()).days)
+            next_date = str(nd.date())
+        except Exception:  # noqa: BLE001
+            next_date = str(next_date)
+
+    history = None
+    eh = _df(getattr(tk, "earnings_history", None))
+    if eh is not None:
+        history = [{
+            "quarter": str(idx.date()) if hasattr(idx, "date") else str(idx),
+            "eps_actual": _num(row.get("epsActual")),
+            "eps_estimate": _num(row.get("epsEstimate")),
+            "surprise_pct": _pct(row.get("surprisePercent")),
+        } for idx, row in eh.sort_index().tail(8).iterrows()]
+
+    return {"next_date": next_date, "days_to_next": days_to,
+            "surprise_history": history}
+
+
+def _quality(info: dict) -> dict:
+    """Balance-sheet durability ratios (extends the ROE/ROIC/FCF/margins the
+    live alert already computes)."""
+    ebitda = _get(info, "ebitda")
+    total_debt = _get(info, "totalDebt")
+    total_cash = _get(info, "totalCash")
+    net_debt_to_ebitda = None
+    if ebitda and total_debt is not None and total_cash is not None:
+        net_debt_to_ebitda = round((total_debt - total_cash) / ebitda, 2)
+    return {
+        "returnOnAssets_pct": _pct(info.get("returnOnAssets")),
+        "grossMargins_pct": _pct(info.get("grossMargins")),
+        "currentRatio": _get(info, "currentRatio"),
+        "quickRatio": _get(info, "quickRatio"),
+        "debtToEquity": _get(info, "debtToEquity"),
+        "netDebtToEbitda": net_debt_to_ebitda,
+    }
+
+
+def _ownership(tk: yf.Ticker, info: dict) -> dict:
+    top = None
+    ih = _df(getattr(tk, "institutional_holders", None))
+    if ih is not None and "Holder" in ih.columns:
+        top = [{"holder": row.get("Holder"), "pct": _pct(row.get("pctHeld"))}
+               for row in ih.head(5).to_dict("records")]
+
+    insider_net_6m = None
+    ip = _df(getattr(tk, "insider_purchases", None))
+    if ip is not None:
+        col = ip.columns[0]
+        for row in ip.to_dict("records"):
+            if str(row.get(col, "")).startswith("Net Shares"):
+                insider_net_6m = _num(row.get("Shares"))
+                break
+
+    # Buyback: net change in share count over the available window.
+    shares_change_pct = None
+    try:
+        sf = tk.get_shares_full(start=(pd.Timestamp.now() - pd.Timedelta(days=730)).date().isoformat())
+        if isinstance(sf, pd.Series) and len(sf.dropna()) >= 2:
+            s = sf.dropna()
+            first, latest = float(s.iloc[0]), float(s.iloc[-1])
+            if first:
+                shares_change_pct = round(100 * (latest - first) / first, 2)
+    except Exception as exc:  # noqa: BLE001
+        print(f"  shares_full failed: {exc}")
+
+    return {
+        "institutions_pct": _pct(info.get("heldPercentInstitutions")),
+        "insiders_pct": _pct(info.get("heldPercentInsiders")),
+        "top_holders": top,
+        "insider_net_shares_6m": insider_net_6m,
+        "shares_change_2y_pct": shares_change_pct,
+    }
+
+
+def _news(tk: yf.Ticker, limit: int = 8) -> list:
+    items = getattr(tk, "news", None)
+    if not isinstance(items, list):
+        return []
+    out = []
+    for item in items[:limit]:
+        c = item.get("content", item) if isinstance(item, dict) else {}
+        provider = c.get("provider") or {}
+        url = c.get("canonicalUrl") or c.get("clickThroughUrl") or {}
+        out.append({
+            "title": c.get("title"),
+            "publisher": provider.get("displayName") if isinstance(provider, dict) else None,
+            "published": c.get("pubDate") or c.get("displayTime"),
+            "link": url.get("url") if isinstance(url, dict) else None,
+        })
+    return out
+
+
+# --------------------------------------------------------------------------
+# Public entry point
+# --------------------------------------------------------------------------
+
+def collect_yahoo(ticker: str, close: pd.Series | None = None) -> dict:
+    """Gather every Tier-A (Yahoo) group for one ticker into a plain dict.
+
+    `close` is an optional 2y daily close Series (the nightly pipeline already
+    holds it -- pass it to avoid a redundant download and to keep the P/E
+    percentile on the exact same series the screens use). If omitted, a 2y
+    history is fetched here.
+    """
+    tk = yf.Ticker(ticker)
+    try:
+        info = tk.info or {}
+    except Exception as exc:  # noqa: BLE001
+        print(f"  info failed for {ticker}: {exc}")
+        info = {}
+
+    if close is None:
+        try:
+            hist = tk.history(period="2y", auto_adjust=False)
+            close = hist["Close"] if isinstance(hist, pd.DataFrame) and not hist.empty else None
+        except Exception as exc:  # noqa: BLE001
+            print(f"  history failed for {ticker}: {exc}")
+            close = None
+
+    groups = {
+        "profile": (_profile, (info,)),
+        "valuation": (_valuation, (info, tk, close)),
+        "estimates": (_estimates, (tk,)),
+        "analyst": (_analyst, (tk, info)),
+        "earnings": (_earnings, (tk,)),
+        "quality": (_quality, (info,)),
+        "ownership": (_ownership, (tk, info)),
+    }
+    out = {"ticker": ticker}
+    for name, (fn, args) in groups.items():
+        try:
+            out[name] = fn(*args)
+        except Exception as exc:  # noqa: BLE001 - one bad group must not sink the ticker
+            print(f"  group '{name}' failed for {ticker}: {exc}")
+            out[name] = None
+    try:
+        out["news"] = _news(tk)
+    except Exception as exc:  # noqa: BLE001
+        print(f"  group 'news' failed for {ticker}: {exc}")
+        out["news"] = []
+    return out
+
+
+def _default(o):
+    if isinstance(o, (pd.Timestamp,)):
+        return str(o)
+    return str(o)
+
+
+if __name__ == "__main__":
+    tickers = sys.argv[1:] or ["MSFT"]
+    for t in tickers:
+        print(f"\n{'#' * 72}\n# {t}\n{'#' * 72}")
+        data = collect_yahoo(t)
+        print(json.dumps(data, indent=2, default=_default, ensure_ascii=False))
