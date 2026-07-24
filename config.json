@@ -94,6 +94,77 @@
     "research": {
         "latest_hits_path": "latest_hits.json",
         "drive_report_dir": "C:\\Users\\Lenovo\\Desktop\\*Google Drive*",
-        "report_subdir": "stock_reports"
+        "report_subdir": "stock_reports",
+        "sec": {
+            "user_agent": "stock-analyzer/1.0 (you@example.com)",
+            "forms": ["10-Q", "10-K"],
+            "max_section_chars": 24000,
+            "xbrl_concepts": [
+                "RevenueFromContractWithCustomerExcludingAssessedTax",
+                "Revenues",
+                "GrossProfit",
+                "OperatingIncomeLoss",
+                "NetIncomeLoss",
+                "Assets",
+                "Liabilities",
+                "StockholdersEquity",
+                "CashAndCashEquivalentsAtCarryingValue",
+                "NetCashProvidedByUsedInOperatingActivities",
+                "LongTermDebtNoncurrent"
+            ]
+        },
+        "synthesis": {
+            "narrative_adj_max": 15,
+            "tiers": [
+                {"label": "STRONG", "min": 70},
+                {"label": "WATCH", "min": 45},
+                {"label": "PASS", "min": 0}
+            ],
+            "dimensions": {
+                "valuation": {
+                    "weight": 0.18,
+                    "metrics": {
+                        "pe_percentile_2y": {"good": 10, "bad": 90},
+                        "analyst_upside_pct": {"good": 25, "bad": -10}
+                    }
+                },
+                "growth": {
+                    "weight": 0.18,
+                    "metrics": {
+                        "growth_this_year_pct": {"good": 20, "bad": 0},
+                        "growth_next_year_pct": {"good": 15, "bad": 0}
+                    }
+                },
+                "estimate_momentum": {
+                    "weight": 0.15,
+                    "metrics": {
+                        "eps_revision_net": {"good": 0.6, "bad": -0.4},
+                        "eps_trend_change": {"good": 0.05, "bad": -0.05}
+                    }
+                },
+                "earnings_quality": {
+                    "weight": 0.12,
+                    "metrics": {
+                        "earnings_avg_surprise": {"good": 8, "bad": -2},
+                        "earnings_beat_rate": {"good": 1.0, "bad": 0.5}
+                    }
+                },
+                "financial_quality": {
+                    "weight": 0.22,
+                    "metrics": {
+                        "return_on_assets": {"good": 15, "bad": 2},
+                        "gross_margin": {"good": 60, "bad": 20},
+                        "net_debt_to_ebitda": {"good": 0, "bad": 4},
+                        "buyback_2y": {"good": -5, "bad": 3}
+                    }
+                },
+                "analyst_sentiment": {
+                    "weight": 0.15,
+                    "metrics": {
+                        "analyst_buy_ratio": {"good": 0.8, "bad": 0.3}
+                    }
+                }
+            }
+        }
     }
 }
