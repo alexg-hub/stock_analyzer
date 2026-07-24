@@ -29,7 +29,7 @@
         "min_days_above_sma_pct": 0.85,
         "max_candle_body_pct": 0.01,
         "min_candle_range_pct": 0.03,
-        "require_reversal_candle": true,
+        "require_reversal_candle": false,
         "alert_only_on_band_entry": true
     },
     "reclaim_strategy": {
@@ -90,5 +90,10 @@
                 "fcf": {"min": 0, "increasing": true}
             }
         }
+    },
+    "research": {
+        "latest_hits_path": "latest_hits.json",
+        "drive_report_dir": "C:\\Users\\Lenovo\\Desktop\\*Google Drive*",
+        "report_subdir": "stock_reports"
     }
 }

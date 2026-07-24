@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 scanner_log.txt
 backtest_log.txt
+latest_hits.json
 backtest_*.csv
 backtest_*.png
 .venv/

@@ -30,6 +30,7 @@ from scanner_common import (
     get_sp500_tickers,
     load_config,
     send_discord_alert,
+    write_latest_hits,
 )
 
 # Every screen that runs nightly, in alert order.
@@ -79,6 +80,14 @@ def main() -> int:
             print(result.hits.to_string())
         if not result.near.empty:
             print(result.near.to_string())
+
+    # -- hand-off for the on-demand deep-dive: always written (even when
+    #    empty) so an interactive session sees exactly what fired tonight --
+    research_cfg = cfg.get("research", {})
+    hits_path = Path(research_cfg.get("latest_hits_path", "latest_hits.json"))
+    if not hits_path.is_absolute():
+        hits_path = Path(__file__).with_name(str(hits_path))
+    write_latest_hits(hits_path, scan_date, results)
 
     all_empty = all(r.hits.empty and r.near.empty for _, r in results)
     if all_empty and not cfg["discord"]["send_message_when_no_breakouts"]:

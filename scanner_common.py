@@ -7,11 +7,13 @@ Screen modules (breakout_scanner.py, sma_pullback.py, ...) contain only
 their own condition math and formatting; run_scanners.py orchestrates.
 """
 
+import glob
 import io
 import json
 import math
 import sys
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -512,3 +514,87 @@ def send_discord_alert(content: str, discord_cfg: dict, embeds: list[dict] = (),
         resp.raise_for_status()
     print(f"Discord alert sent ({len(batches)} message(s), "
           f"{len(embeds)} card(s), {len(paths)} chart(s)).")
+
+
+# --------------------------------------------------------------------------
+# Research hand-off (Stage 1 -> Stage 2)
+# --------------------------------------------------------------------------
+# The nightly scan writes latest_hits.json so an on-demand interactive Claude
+# session can pick up exactly what fired (no Discord read-back). The full
+# deep-dive report is later archived into the local Google Drive folder,
+# resolved by glob (its real name starts with an invisible U+200F mark).
+
+def _json_safe(obj):
+    """Recursively convert pandas/numpy row values to JSON-native types.
+
+    NaN/NaT -> None; numpy scalars -> Python scalars; Timestamps -> str;
+    the fundamentals' [(year, value)] lists survive as nested arrays.
+    """
+    if obj is None:
+        return None
+    if isinstance(obj, bool):
+        return obj
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, (int, str)):
+        return obj
+    if isinstance(obj, dict):
+        return {str(k): _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(x) for x in obj]
+    item = getattr(obj, "item", None)  # numpy / pandas scalar
+    if callable(item):
+        try:
+            return _json_safe(obj.item())
+        except (ValueError, TypeError):
+            pass
+    if isinstance(obj, pd.Timestamp):
+        return str(obj)
+    try:
+        if pd.isna(obj):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return str(obj)
+
+
+def write_latest_hits(path: Path, scan_date, results) -> None:
+    """Serialize every screen's hit/near rows to `path` for the deep-dive.
+
+    `results` is the list of (module, ScanResult) the nightly run already
+    holds. Rows are whatever each screen put in its hits/near frame (day
+    stats + any joined fundamentals), made JSON-safe.
+    """
+    payload = {
+        "scan_date": str(scan_date),
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "screens": [],
+    }
+    for module, result in results:
+        payload["screens"].append({
+            "config_key": module.CONFIG_KEY,
+            "title": result.title,
+            "strategy": _json_safe(result.strategy),
+            "hits": {str(t): _json_safe(row.to_dict())
+                     for t, row in result.hits.iterrows()},
+            "near": {str(t): _json_safe(row.to_dict())
+                     for t, row in result.near.iterrows()},
+        })
+    Path(path).write_text(json.dumps(payload, indent=2, ensure_ascii=False),
+                          encoding="utf-8")
+    n = sum(len(s["hits"]) + len(s["near"]) for s in payload["screens"])
+    print(f"Wrote {path} ({n} ticker row(s) across {len(payload['screens'])} screen(s)).")
+
+
+def resolve_drive_dir(pattern: str) -> Path | None:
+    """First existing directory matching a glob pattern, else None.
+
+    Used for the Google Drive sync folder whose real name begins with an
+    invisible U+200F RTL mark -- glob (`...\\*Google Drive*`) sidesteps having
+    to embed that character in config or code.
+    """
+    for match in glob.glob(pattern):
+        p = Path(match)
+        if p.is_dir():
+            return p
+    return None
