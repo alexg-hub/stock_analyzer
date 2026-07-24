@@ -10,7 +10,7 @@
         "download_period": "2y",
         "download_interval": "1d"
     },
-    "strategy": {
+    "breakout_strategy": {
         "enabled": true,
         "consolidation_window_days": 312,
         "max_consolidation_range_pct": 0.32,

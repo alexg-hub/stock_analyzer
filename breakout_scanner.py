@@ -24,7 +24,7 @@ import charts
 from scanner_common import ScanResult, fmt_value, single_ticker_panel
 
 # Config section this screen reads (run_scanners.py registry contract).
-CONFIG_KEY = "strategy"
+CONFIG_KEY = "breakout_strategy"
 # Side-bar color of this screen's Discord embed cards (palette orange).
 EMBED_COLOR = 0xEB6834
 
