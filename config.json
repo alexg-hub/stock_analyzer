@@ -15,6 +15,7 @@
         "consolidation_window_days": 312,
         "max_consolidation_range_pct": 0.32,
         "breakout_multiplier": 1.01,
+        "min_candle_body_pct": 0.01,
         "volume_sma_days": 30,
         "volume_surge_multiplier": 1.1,
         "near_miss_max_gap_pct": 0.01

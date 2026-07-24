@@ -34,8 +34,8 @@ Adding a new scanner = new module exposing `CONFIG_KEY`, `scan()`,
 
 ## Screen 1: breakout from consolidation
 
-All three conditions must be true on the most recent trading day (parameter
-names refer to the `strategy` section of `config.json`):
+All four conditions must be true on the most recent trading day (parameter
+names refer to the `breakout_strategy` section of `config.json`):
 
 1. **Horizontal movement** — over the previous `consolidation_window_days`
    trading days (excluding today),
@@ -45,9 +45,13 @@ names refer to the `strategy` section of `config.json`):
    pokes above the range).
 3. **Volume surge** — today's Volume ≥ `volume_surge_multiplier ×` the average
    volume of the previous `volume_sma_days` trading days.
+4. **Long green candle** — today's Close is above
+   `(1 + min_candle_body_pct) ×` the day's Open, so the breakout day itself
+   closes strongly (green, with a body of at least `min_candle_body_pct`)
+   instead of gapping up and fading to a weak or red close.
 
 The alert also lists **near-miss candidates** — tickers that passed exactly
-two of the three conditions — with the failed condition explained. Near-misses
+three of the four conditions — with the failed condition explained. Near-misses
 that failed only the breakout condition are reported only when the close is
 within `near_miss_max_gap_pct` of the required level, so routine volume spikes
 deep inside a range don't flood the alert.
@@ -179,13 +183,14 @@ overwritten each run) — separate from the nightly production `scanner_log.txt`
 | `discord.webhook_url` | (set) | Discord webhook URL (Server Settings → Integrations → Webhooks → New Webhook → Copy URL). Until set, the alert prints to the console instead. |
 | `discord.send_message_when_no_breakouts` | `true` | Also send a "nothing found" message |
 | `data.download_period` | `2y` | History to download — must exceed each screen's total lookback (~21 trading days per calendar month) or its rolling windows never fill and no signal can ever fire; the scanners warn if violated |
-| `strategy.enabled` | `true` | Run the breakout screen |
-| `strategy.consolidation_window_days` | `312` | Length of the prior consolidation window (trading days) |
-| `strategy.max_consolidation_range_pct` | `0.32` | Max high-to-low range of that window |
-| `strategy.breakout_multiplier` | `1.01` | Close must exceed this × the range high (1.01 = +1%) |
-| `strategy.volume_sma_days` | `30` | Lookback for the average-volume baseline |
-| `strategy.volume_surge_multiplier` | `1.1` | Required volume vs. that baseline |
-| `strategy.near_miss_max_gap_pct` | `0.05` | Report breakout-condition near-misses only if the close is within this fraction of the required level |
+| `breakout_strategy.enabled` | `true` | Run the breakout screen |
+| `breakout_strategy.consolidation_window_days` | `312` | Length of the prior consolidation window (trading days) |
+| `breakout_strategy.max_consolidation_range_pct` | `0.32` | Max high-to-low range of that window |
+| `breakout_strategy.breakout_multiplier` | `1.01` | Close must exceed this × the range high (1.01 = +1%) |
+| `breakout_strategy.min_candle_body_pct` | `0.01` | Breakout day's Close must exceed its Open by at least this fraction (green candle with a body ≥ 1%); `0.0` = any green candle |
+| `breakout_strategy.volume_sma_days` | `30` | Lookback for the average-volume baseline |
+| `breakout_strategy.volume_surge_multiplier` | `1.1` | Required volume vs. that baseline |
+| `breakout_strategy.near_miss_max_gap_pct` | `0.05` | Report breakout-condition near-misses only if the close is within this fraction of the required level |
 | `pullback_strategy.enabled` | `true` | Run the SMA-pullback screen |
 | `pullback_strategy.sma_days` | `150` | SMA length (trading days) |
 | `pullback_strategy.touch_band_pct` | `0.02` | "Touch" = close within this fraction of the SMA |

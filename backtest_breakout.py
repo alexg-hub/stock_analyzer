@@ -42,6 +42,7 @@ def log_run(table: pd.DataFrame, strategy: dict, ticker: str) -> None:
     brk_mult = strategy.get("breakout_multiplier", 1.0)
     vol_days = strategy["volume_sma_days"]
     vol_mult = strategy["volume_surge_multiplier"]
+    min_body = strategy.get("min_candle_body_pct", 0.0)
 
     section(f"STEP 1 -- Historical data for {ticker} (analysis window)")
     print(f"{len(table)} trading days, {table.index[0].date()} .. {table.index[-1].date()}")
@@ -57,11 +58,14 @@ def log_run(table: pd.DataFrame, strategy: dict, ticker: str) -> None:
     print(f"C2 breakout:      Close must be > {brk_mult} x the prior {window}-day max High"
           f" (i.e. {brk_mult - 1:+.1%} above it)")
     print(f"C3 volume surge:  Volume must be >= {vol_mult} x the prior {vol_days}-day average volume")
+    print(f"C4 long green:    Close must be > {1 + min_body} x the day's Open"
+          f" (body >= {min_body:.1%})")
 
     section(f"STEP 3 -- Days where Close cleared {brk_mult} x the prior "
             f"{window}-day high (C2 true)")
-    fmt_cols = ["Close", "PriorHigh", "PriorLow", "RangePct", "VolRatio",
-                "C1_Consolidating", "C2_Breakout", "C3_VolumeSurge", "SIGNAL"]
+    fmt_cols = ["Close", "PriorHigh", "PriorLow", "RangePct", "VolRatio", "BodyPct",
+                "C1_Consolidating", "C2_Breakout", "C3_VolumeSurge", "C4_LongGreen",
+                "SIGNAL"]
     c2_days = table[table["C2_Breakout"].fillna(False)]
     if c2_days.empty:
         print(f"None -- price never closed above {brk_mult} x its prior "
@@ -69,10 +73,10 @@ def log_run(table: pd.DataFrame, strategy: dict, ticker: str) -> None:
     else:
         print(c2_days[fmt_cols].round(2).to_string())
 
-    section("STEP 4 -- SIGNAL days (all three conditions true)")
+    section("STEP 4 -- SIGNAL days (all four conditions true)")
     hits = table[table["SIGNAL"].fillna(False)]
     if hits.empty:
-        print("No day satisfied all three conditions.")
+        print("No day satisfied all four conditions.")
     else:
         for date, row in hits.iterrows():
             print(f"{date.date()}  BREAKOUT CONFIRMED")
@@ -82,16 +86,20 @@ def log_run(table: pd.DataFrame, strategy: dict, ticker: str) -> None:
                   f"  = {row['RangePct']:.1f}% (limit {max_range:.0%})")
             print(f"    Volume {row['Volume']:,.0f} = {row['VolRatio']:.2f}x the {vol_days}d"
                   f" average {row['VolSMA']:,.0f} (needs >= {vol_mult}x)")
+            print(f"    Candle Open {row['Open']:.2f} -> Close {row['Close']:.2f} = "
+                  f"body {row['BodyPct']:+.2f}% (needs >= {min_body:.1%}, green)")
 
-    section("STEP 5 -- Near-misses (exactly 2 of 3 conditions true)")
-    conds = table[["C1_Consolidating", "C2_Breakout", "C3_VolumeSurge"]].fillna(False)
-    near = table[(conds.sum(axis=1) == 2) & ~table["SIGNAL"].fillna(False)]
+    section("STEP 5 -- Near-misses (exactly 3 of 4 conditions true)")
+    conds = table[["C1_Consolidating", "C2_Breakout", "C3_VolumeSurge",
+                   "C4_LongGreen"]].fillna(False)
+    near = table[(conds.sum(axis=1) == 3) & ~table["SIGNAL"].fillna(False)]
     if near.empty:
         print("None.")
     else:
         for date, row in near.iterrows():
             reason = near_miss_reason(row["Close"], row["PriorHigh"],
-                                      row["RangePct"] / 100, row["VolRatio"], strategy)
+                                      row["RangePct"] / 100, row["VolRatio"],
+                                      row["BodyPct"] / 100, strategy)
             print(f"{date.date()}  failed -> {reason}")
 
 

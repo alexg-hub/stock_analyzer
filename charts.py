@@ -110,7 +110,8 @@ def plot_breakout(table: pd.DataFrame, strategy: dict, ticker: str,
     n_sig = len(hits)
     subtitle = (f"{n_sig} signal day(s)" if n_sig else "no signal days") + \
         f" -- range limit {strategy['max_consolidation_range_pct']:.0%}, " \
-        f"volume {vol_mult}x {vol_days}d average"
+        f"volume {vol_mult}x {vol_days}d average, " \
+        f"candle body >= {strategy.get('min_candle_body_pct', 0.0):.1%}"
     _title(ax_p, f"{ticker} -- breakout from {window}-day consolidation", subtitle)
 
     fig.savefig(out_path, dpi=dpi, bbox_inches="tight", facecolor=C["surface"])
