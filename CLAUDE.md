@@ -72,12 +72,17 @@ real send.
   shape (`scanner_common.download_history` does it;
   `scanner_common.single_ticker_panel` slices one ticker back out of a bulk
   frame).
-- **Green-candle condition** on both the breakout and reclaim screens:
-  `close > (1 + min_candle_body_pct) * open` (the only condition reading the
-  `Open` field; a positive threshold enforces both green and a minimum body,
-  single-day so no `download_period` impact). Breakout calls it C4 (hits need
-  all four conditions; near-miss = **exactly 3 of 4**). Reclaim calls it R5
-  and folds it into the signal the same way.
+- **Candle conditions read `Open`/`High`/`Low`** (all single-day, so no
+  `download_period` impact), but each screen wants a different shape:
+  - Breakout **C4** and reclaim **R5**: a strong **green** candle,
+    `close > (1 + min_candle_body_pct) * open` (positive threshold enforces
+    green + a minimum body). Breakout hits need all four conditions;
+    breakout near-miss = **exactly 3 of 4**. Reclaim folds R5 into the signal.
+  - Pullback **T4** (`sma_pullback.py`): the *opposite* — a small-body,
+    long-tailed reversal bar at the touch: `|close-open|/open <=
+    max_candle_body_pct` AND `(high-low)/open >= min_candle_range_pct` (body
+    red or green). Gated by `require_reversal_candle` (default true); it's a
+    strict filter, so most ordinary touch days stop qualifying when it's on.
 - **Rolling-window conventions differ by design**: the breakout screen uses
   `shift(1)` so the prior range/volume baseline excludes the current day; the
   pullback and reclaim screens' SMA *includes* the current day

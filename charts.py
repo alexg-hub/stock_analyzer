@@ -214,6 +214,9 @@ def plot_pullback(table: pd.DataFrame, strategy: dict, ticker: str,
     subtitle = (f"{n_sig} signal day(s)" if n_sig else "no signal days") + \
         f" -- touch band +/-{band:.0%}, rising SMA, " \
         f"above SMA >= {strategy['min_days_above_sma_pct']:.0%} of last {lookback}d"
+    if strategy.get("require_reversal_candle", True):
+        subtitle += (f", reversal candle body<={strategy.get('max_candle_body_pct', 0.0):.1%}"
+                     f" range>={strategy.get('min_candle_range_pct', 0.0):.1%}")
     _title(ax_p, f"{ticker} -- pullback to rising {sma_days}-day SMA", subtitle)
 
     fig.savefig(out_path, dpi=dpi, bbox_inches="tight", facecolor=C["surface"])

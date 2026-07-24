@@ -11,6 +11,11 @@ T2. Sustained uptrend -- the Close was above the SMA on at least
     in a year-long uptrend, not life on the SMA.
 T3. Touch -- today's Close is within `touch_band_pct` of the SMA
     (either side of it).
+T4. Reversal candle (optional, `require_reversal_candle`) -- the touch day
+    is a small-body, long-tailed bar (indecision/reversal at support):
+    body |Close - Open| <= `max_candle_body_pct` of the Open AND range
+    High - Low >= `min_candle_range_pct` of the Open. Body may be red or
+    green; the shape (small body, wide range) is what matters.
 
 Optionally (`alert_only_on_band_entry`), the signal only fires on the day
 the close *enters* the band from above, so a stock sitting on its SMA does
@@ -51,8 +56,13 @@ def compute_pullback_signals(data: pd.DataFrame, strategy: dict) -> dict[str, pd
     lookback = strategy["trend_lookback_days"]
     slope_days = strategy["sma_slope_lookback_days"]
     min_above = strategy["min_days_above_sma_pct"]
+    max_body = strategy.get("max_candle_body_pct", 1.0)
+    min_range = strategy.get("min_candle_range_pct", 0.0)
 
     close = data["Close"]
+    open_ = data["Open"]
+    high = data["High"]
+    low = data["Low"]
     sma = close.rolling(sma_days).mean()
 
     dist_pct = close / sma - 1
@@ -71,11 +81,19 @@ def compute_pullback_signals(data: pd.DataFrame, strategy: dict) -> dict[str, pd
     # T3: today's close is within the touch band around the SMA.
     is_touch = dist_pct.abs() <= band
 
+    # T4: the touch day is a small-body, long-tailed candle -- open and close
+    # near each other (body) but high and low far apart (range).
+    body_pct = (close - open_).abs() / open_
+    range_pct = (high - low) / open_
+    is_reversal_candle = (body_pct <= max_body) & (range_pct >= min_range)
+
     # Fresh entry: yesterday's close was still above the band, so today is
     # the day the pullback actually reached the SMA.
     is_band_entry = close.shift(1) > (1 + band) * sma.shift(1)
 
     signal = is_sma_rising & is_trend_persistent & is_touch
+    if strategy.get("require_reversal_candle", True):
+        signal &= is_reversal_candle
     if strategy.get("alert_only_on_band_entry", True):
         signal &= is_band_entry
 
@@ -84,9 +102,12 @@ def compute_pullback_signals(data: pd.DataFrame, strategy: dict) -> dict[str, pd
         "dist_pct": dist_pct,
         "pct_days_above": pct_days_above,
         "sma_slope_pct": sma_slope_pct,
+        "body_pct": body_pct,
+        "range_pct": range_pct,
         "is_sma_rising": is_sma_rising,
         "is_trend_persistent": is_trend_persistent,
         "is_touch": is_touch,
+        "is_reversal_candle": is_reversal_candle,
         "is_band_entry": is_band_entry,
         "signal": signal,
     }
@@ -100,12 +121,17 @@ def touch_miss_reason(row: pd.Series, strategy: dict) -> str:
     lookback = strategy["trend_lookback_days"]
     slope_days = strategy["sma_slope_lookback_days"]
     min_above = strategy["min_days_above_sma_pct"]
+    max_body = strategy.get("max_candle_body_pct", 1.0)
+    min_range = strategy.get("min_candle_range_pct", 0.0)
     if not row["T1_RisingSMA"]:
         return (f"SMA not rising: {row['SmaSlopePct']:+.2f}% vs "
                 f"{slope_days} days ago")
     if not row["T2_TimeAbove"]:
         return (f"trend too weak: above SMA only {row['AbovePct']:.0f}% of the "
                 f"last {lookback} days < {min_above:.0%} required")
+    if strategy.get("require_reversal_candle", True) and not row["T4_ReversalCandle"]:
+        return (f"not a reversal candle: body {row['BodyPct']:.2f}% (max "
+                f"{max_body:.1%}), range {row['RangePct']:.2f}% (min {min_range:.1%})")
     return "already inside the touch band (no fresh entry from above)"
 
 
@@ -134,6 +160,8 @@ def find_pullbacks(data: pd.DataFrame, strategy: dict) -> pd.DataFrame:
             "Dist %": (last["dist_pct"][tickers] * 100).round(2),
             "Above %": (last["pct_days_above"][tickers] * 100).round(1),
             "SMA Slope %": (last["sma_slope_pct"][tickers] * 100).round(2),
+            "Body %": (last["body_pct"][tickers] * 100).round(2),
+            "Range %": (last["range_pct"][tickers] * 100).round(2),
         },
         index=pd.Index(tickers, name="Ticker"),
     )
@@ -164,7 +192,8 @@ def describe_hit(row, strategy: dict) -> str:
             f"({row['Dist %']:+.1f}%), above SMA {row['Above %']:.0f}% of last "
             f"{strategy['trend_lookback_days']}d, "
             f"SMA {row['SMA Slope %']:+.1f}% over "
-            f"{strategy['sma_slope_lookback_days']}d")
+            f"{strategy['sma_slope_lookback_days']}d, "
+            f"reversal candle body {row['Body %']:.1f}% / range {row['Range %']:.1f}%")
 
 
 def build_calc_table(data: pd.DataFrame, signals: dict, ticker: str) -> pd.DataFrame:
@@ -184,9 +213,12 @@ def build_calc_table(data: pd.DataFrame, signals: dict, ticker: str) -> pd.DataF
             "DistPct": signals["dist_pct"][ticker] * 100,
             "AbovePct": signals["pct_days_above"][ticker] * 100,
             "SmaSlopePct": signals["sma_slope_pct"][ticker] * 100,
+            "BodyPct": signals["body_pct"][ticker] * 100,
+            "RangePct": signals["range_pct"][ticker] * 100,
             "T1_RisingSMA": signals["is_sma_rising"][ticker],
             "T2_TimeAbove": signals["is_trend_persistent"][ticker],
             "T3_Touch": signals["is_touch"][ticker],
+            "T4_ReversalCandle": signals["is_reversal_candle"][ticker],
             "BandEntry": signals["is_band_entry"][ticker],
             "SIGNAL": signals["signal"][ticker],
         }

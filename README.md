@@ -68,7 +68,15 @@ refer to the `pullback_strategy` section):
    days, so today's touch is the exception in a year-long uptrend.
 3. **Touch** — today's Close is within `touch_band_pct` of the SMA (either
    side).
-4. **Fresh entry** (optional, `alert_only_on_band_entry`) — yesterday's close
+4. **Reversal candle** (optional, `require_reversal_candle`) — the touch day
+   is a small-body, long-tailed bar: body `|Close − Open| ≤
+   max_candle_body_pct` of the Open **and** range `High − Low ≥
+   min_candle_range_pct` of the Open. The body may be red or green — the
+   shape (open and close close together, high and low far apart) is the
+   "buyers stepped in at support" signal. Set `require_reversal_candle` to
+   `false` to drop it. This is a strict filter; most ordinary touch days
+   don't qualify.
+5. **Fresh entry** (optional, `alert_only_on_band_entry`) — yesterday's close
    was still above the band, so the signal fires only on the day the pullback
    actually reaches the SMA instead of re-alerting every night the stock sits
    on it.
@@ -207,6 +215,9 @@ overwritten each run) — separate from the nightly production `scanner_log.txt`
 | `pullback_strategy.trend_lookback_days` | `252` | Uptrend persistence lookback (~1 year) |
 | `pullback_strategy.sma_slope_lookback_days` | `63` | SMA must be higher than this many days ago |
 | `pullback_strategy.min_days_above_sma_pct` | `0.9` | Min fraction of the lookback the close spent above the SMA |
+| `pullback_strategy.max_candle_body_pct` | `0.01` | Touch day's body `\|Close−Open\|` must be ≤ this fraction of the Open (small body) |
+| `pullback_strategy.min_candle_range_pct` | `0.03` | Touch day's range `High−Low` must be ≥ this fraction of the Open (long tails) |
+| `pullback_strategy.require_reversal_candle` | `true` | Require the small-body/long-tailed touch candle; `false` disables it |
 | `pullback_strategy.alert_only_on_band_entry` | `true` | Alert only on the day the close enters the band from above |
 | `reclaim_strategy.enabled` | `true` | Run the SMA-reclaim screen |
 | `reclaim_strategy.sma_days` | `200` | SMA length (trading days) |

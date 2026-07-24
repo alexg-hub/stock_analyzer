@@ -40,6 +40,9 @@ def log_run(table: pd.DataFrame, strategy: dict, ticker: str) -> None:
     lookback = strategy["trend_lookback_days"]
     slope_days = strategy["sma_slope_lookback_days"]
     min_above = strategy["min_days_above_sma_pct"]
+    max_body = strategy.get("max_candle_body_pct", 1.0)
+    min_range = strategy.get("min_candle_range_pct", 0.0)
+    reversal = strategy.get("require_reversal_candle", True)
     entry_only = strategy.get("alert_only_on_band_entry", True)
 
     section(f"STEP 1 -- Historical data for {ticker} (analysis window)")
@@ -54,13 +57,17 @@ def log_run(table: pd.DataFrame, strategy: dict, ticker: str) -> None:
     print(f"T1 rising SMA:   the {sma_days}d SMA must be higher than {slope_days} trading days ago")
     print(f"T2 trend:        Close above the SMA on >= {min_above:.0%} of the prior {lookback} trading days")
     print(f"T3 touch:        Close within +/-{band:.0%} of the {sma_days}d SMA")
+    if reversal:
+        print(f"T4 candle:       small body (|Close-Open| <= {max_body:.1%} of Open) "
+              f"AND wide range (High-Low >= {min_range:.1%} of Open)")
     if entry_only:
         print(f"Entry filter:    signal only on the day the close enters the band from above"
               f" (previous close > {1 + band:.2f} x SMA)")
 
     section(f"STEP 3 -- Days where Close touched the {sma_days}d SMA (T3 true)")
-    fmt_cols = ["Close", "SMA", "DistPct", "AbovePct", "SmaSlopePct",
-                "T1_RisingSMA", "T2_TimeAbove", "T3_Touch", "BandEntry", "SIGNAL"]
+    fmt_cols = ["Close", "SMA", "DistPct", "AbovePct", "SmaSlopePct", "BodyPct", "RangePct",
+                "T1_RisingSMA", "T2_TimeAbove", "T3_Touch", "T4_ReversalCandle",
+                "BandEntry", "SIGNAL"]
     touch_days = table[table["T3_Touch"].fillna(False)]
     if touch_days.empty:
         print(f"None -- the close never came within {band:.0%} of its {sma_days}d SMA "
@@ -80,6 +87,9 @@ def log_run(table: pd.DataFrame, strategy: dict, ticker: str) -> None:
             print(f"    Above the SMA {row['AbovePct']:.0f}% of the prior {lookback}d "
                   f"(needs >= {min_above:.0%})")
             print(f"    SMA {row['SmaSlopePct']:+.2f}% vs {slope_days} days ago (must be rising)")
+            if reversal:
+                print(f"    Reversal candle: body {row['BodyPct']:.2f}% (max {max_body:.1%}), "
+                      f"range {row['RangePct']:.2f}% (min {min_range:.1%})")
 
     section("STEP 5 -- Touch days that did NOT fire (and why)")
     misses = table[table["T3_Touch"].fillna(False) & ~table["SIGNAL"].fillna(False)]
