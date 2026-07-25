@@ -129,10 +129,19 @@ real send.
   frame).
 - **Candle conditions read `Open`/`High`/`Low`** (all single-day, so no
   `download_period` impact), but each screen wants a different shape:
-  - Breakout **C4** and reclaim **R5**: a strong **green** candle,
+  - Breakout **C4**: a strong **green** candle,
     `close > (1 + min_candle_body_pct) * open` (positive threshold enforces
     green + a minimum body). A `full` breakout needs all four conditions, a
-    `partial` one exactly 3 of 4. Reclaim folds R5 into the signal.
+    `partial` one exactly 3 of 4.
+  - Reclaim **R5** is **gap-aware** (`is_strong_day`): the body route above
+    **OR**, when `min_day_gain_pct` is not null, `close/prev_close - 1 >=
+    min_day_gain_pct` while still closing green. A body compares close to
+    *open*, so it cannot see an overnight gap — and the biggest reclaims gap
+    (META 2023-02-02 closed **+23.3%** on the day with a body of only
+    **+2.9%**, having opened +19.8% up; `min_candle_body_pct: 0.03` rejected
+    it). The gap route can only ever *add* signals, so leaving
+    `min_day_gain_pct: null` reproduces the old behaviour exactly. Don't
+    "simplify" R5 back to a body-only test.
   - Pullback **T4** (`sma_pullback.py`): the *opposite* — a small-body,
     long-tailed reversal bar at the touch: `|close-open|/open <=
     max_candle_body_pct` AND `(high-low)/open >= min_candle_range_pct` (body

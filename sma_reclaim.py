@@ -18,9 +18,15 @@ R4. (optional) SMA no longer falling steeply -- when `min_sma_slope_pct`
     is set (not null), the SMA's change over `sma_slope_lookback_days`
     must be at least that fraction. Defaults to off (null): it filters
     knife-catching but also delays entry.
-R5. Long green candle -- today's Close exceeds the Open by at least
-    `min_candle_body_pct` (Close > (1 + min_candle_body_pct) x Open), so
-    the reclaim day itself closes strongly instead of a weak/red cross.
+R5. Strong reclaim day -- the cross day itself closes strongly rather than
+    being a weak or red cross. Two ways to qualify:
+      * body: Close > (1 + `min_candle_body_pct`) x Open; or
+      * (when `min_day_gain_pct` is set, not null) the day's move vs the
+        PREVIOUS close is at least that much, while still closing green.
+    The second route exists because the body cannot see an overnight gap and
+    the biggest reclaims gap: META's 2023-02-02 turn closed +23.3% for the
+    day but had a body of only +2.9%, so a body-only test rejects exactly the
+    moves worth catching. A gap that fades to a red close never qualifies.
 
 Optionally (`alert_only_on_cross`), the signal only fires on the day the
 close first crosses the level, so a stock that stays above it does not
@@ -76,6 +82,7 @@ def compute_reclaim_signals(data: pd.DataFrame, strategy: dict) -> dict[str, pd.
     slope_days = strategy["sma_slope_lookback_days"]
     min_slope = strategy.get("min_sma_slope_pct")
     min_body = strategy.get("min_candle_body_pct", 0.0)
+    min_gain = strategy.get("min_day_gain_pct")
 
     close = data["Close"]
     open_ = data["Open"]
@@ -103,16 +110,26 @@ def compute_reclaim_signals(data: pd.DataFrame, strategy: dict) -> dict[str, pd.
     # R4 (optional): the SMA is no longer falling steeply.
     is_slope_ok = sma_slope_pct >= min_slope if min_slope is not None else None
 
-    # R5: the reclaim day is a green candle whose body (Close over Open) is
-    # at least min_candle_body_pct -- a weak/red cross usually fails back.
+    # R5: the reclaim day is a STRONG day. Two ways to qualify, because the
+    # body (Close over Open) cannot see an overnight gap -- and the biggest
+    # reclaims gap. META's 2023-02-02 turn closed +23.3% on the day but had a
+    # body of only +2.9%, since it opened +19.8% higher; a body-only test
+    # rejects exactly the moves worth catching.
     body_pct = close / open_ - 1
+    gain_pct = close / close.shift(1) - 1
     is_long_green_candle = close > (1 + min_body) * open_
+    is_strong_day = is_long_green_candle
+    if min_gain is not None:
+        # Alternative route: a gap-up that still closes green qualifies on its
+        # move vs the PREVIOUS close. `close > open_` keeps the original intent
+        # of the body test -- a gap that fades to a red close never counts.
+        is_strong_day = is_strong_day | ((close > open_) & (gain_pct >= min_gain))
 
     # Fresh cross: yesterday's close was not yet above the level, so today
     # is the day the reclaim actually happened.
     is_fresh_cross = is_above_level & ~(close.shift(1) > level.shift(1))
 
-    signal = is_above_level & is_downtrend & is_volume_surge & is_long_green_candle
+    signal = is_above_level & is_downtrend & is_volume_surge & is_strong_day
     if is_slope_ok is not None:
         signal &= is_slope_ok
     if strategy.get("alert_only_on_cross", True):
@@ -126,10 +143,11 @@ def compute_reclaim_signals(data: pd.DataFrame, strategy: dict) -> dict[str, pd.
         "vol_sma": vol_sma,
         "vol_ratio": vol_ratio,
         "body_pct": body_pct,
+        "gain_pct": gain_pct,
         "is_above_level": is_above_level,
         "is_downtrend": is_downtrend,
         "is_volume_surge": is_volume_surge,
-        "is_long_green_candle": is_long_green_candle,
+        "is_strong_day": is_strong_day,
         "is_fresh_cross": is_fresh_cross,
         "signal": signal,
     }
@@ -149,7 +167,7 @@ def partial_mask(data: pd.DataFrame, signals: dict, strategy: dict) -> pd.DataFr
     fresh = signals["is_fresh_cross"].fillna(False)
     downtrend = signals["is_downtrend"].fillna(False)
     fails = ((~signals["is_volume_surge"].fillna(False)).astype(int)
-             + (~signals["is_long_green_candle"].fillna(False)).astype(int))
+             + (~signals["is_strong_day"].fillna(False)).astype(int))
     min_slope = strategy.get("min_sma_slope_pct")
     if min_slope is not None:
         is_slope_ok = signals["sma_slope_pct"] >= min_slope
@@ -178,6 +196,7 @@ def missing_reasons(row: pd.Series, strategy: dict) -> list[str]:
     vol_mult = strategy["volume_surge_multiplier"]
     min_slope = strategy.get("min_sma_slope_pct")
     min_body = strategy.get("min_candle_body_pct", 0.0)
+    min_gain = strategy.get("min_day_gain_pct")
 
     reasons = []
     if not row["R2_TimeBelow"]:
@@ -189,9 +208,12 @@ def missing_reasons(row: pd.Series, strategy: dict) -> list[str]:
     if min_slope is not None and row["SmaSlopePct"] < min_slope * 100:
         reasons.append(f"SMA still falling: {row['SmaSlopePct']:+.2f}% < "
                        f"{min_slope:.1%} required")
-    if not row["R5_LongGreen"]:
-        reasons.append(f"reclaim candle too weak: body {row['BodyPct']:+.1f}% < "
-                       f"{min_body:.1%} required")
+    if not row["R5_StrongDay"]:
+        why = f"body {row['BodyPct']:+.1f}% < {min_body:.1%}"
+        if min_gain is not None:
+            why += (f" and day {row['GainPct']:+.1f}% < {min_gain:.1%} "
+                    f"vs the previous close")
+        reasons.append(f"reclaim day too weak: {why} required")
     return reasons
 
 
@@ -228,6 +250,7 @@ def find_reclaims(data: pd.DataFrame, strategy: dict) -> pd.DataFrame:
                 "Vol Ratio": last["vol_ratio"][tickers].round(2),
                 "SMA Slope %": (last["sma_slope_pct"][tickers] * 100).round(2),
                 "Body %": (last["body_pct"][tickers] * 100).round(2),
+                "Day %": (last["gain_pct"][tickers] * 100).round(2),
             },
             index=pd.Index(tickers, name="Ticker"),
         )
@@ -246,11 +269,12 @@ def find_reclaims(data: pd.DataFrame, strategy: dict) -> pd.DataFrame:
                 pd.Series({
                     "R2_TimeBelow": last["is_downtrend"].get(ticker, False),
                     "R3_VolumeSurge": last["is_volume_surge"].get(ticker, False),
-                    "R5_LongGreen": last["is_long_green_candle"].get(ticker, False),
+                    "R5_StrongDay": last["is_strong_day"].get(ticker, False),
                     "BelowPct": hits.at[ticker, "Below %"],
                     "VolRatio": hits.at[ticker, "Vol Ratio"],
                     "SmaSlopePct": hits.at[ticker, "SMA Slope %"],
                     "BodyPct": hits.at[ticker, "Body %"],
+                    "GainPct": hits.at[ticker, "Day %"],
                 }),
                 strategy,
             )
@@ -286,7 +310,7 @@ def describe_hit(row, strategy: dict) -> str:
             f"({row['Dist %']:+.1f}%), below SMA {row['Below %']:.0f}% of last "
             f"{strategy['below_lookback_days']}d, "
             f"vol {row['Vol Ratio']:.1f}x {strategy['volume_sma_days']}d avg, "
-            f"green candle {row['Body %']:+.1f}%")
+            f"day {row['Day %']:+.1f}% (body {row['Body %']:+.1f}%)")
 
 
 def build_calc_table(data: pd.DataFrame, signals: dict, ticker: str) -> pd.DataFrame:
@@ -309,10 +333,11 @@ def build_calc_table(data: pd.DataFrame, signals: dict, ticker: str) -> pd.DataF
             "VolRatio": signals["vol_ratio"][ticker],
             "SmaSlopePct": signals["sma_slope_pct"][ticker] * 100,
             "BodyPct": signals["body_pct"][ticker] * 100,
+            "GainPct": signals["gain_pct"][ticker] * 100,
             "R1_AboveLevel": signals["is_above_level"][ticker],
             "R2_TimeBelow": signals["is_downtrend"][ticker],
             "R3_VolumeSurge": signals["is_volume_surge"][ticker],
-            "R5_LongGreen": signals["is_long_green_candle"][ticker],
+            "R5_StrongDay": signals["is_strong_day"][ticker],
             "FreshCross": signals["is_fresh_cross"][ticker],
             "SIGNAL": signals["signal"][ticker],
         }

@@ -112,15 +112,23 @@ section):
    `min_sma_slope_pct` is set (not `null`), the SMA's change over
    `sma_slope_lookback_days` must be at least that fraction; filters
    knife-catching in stocks still in freefall, at the cost of later entry.
-5. **Long green candle** — today's Close is above `(1 + min_candle_body_pct)
-   ×` the day's Open, so the reclaim day itself closes strongly (green, body
-   ≥ `min_candle_body_pct`) instead of a weak or red cross.
+5. **Strong reclaim day** — the cross day closes strongly rather than being a
+   weak or red cross. Two ways to qualify:
+   - **body** — Close above `(1 + min_candle_body_pct) ×` the day's Open; or
+   - **the day's move** — when `min_day_gain_pct` is set (not `null`), Close at
+     least that much above the **previous close**, while still closing green.
+
+   The second route exists because a body can't see an overnight gap, and the
+   biggest reclaims gap. META's 2023-02-02 turn closed **+23.3% on the day**
+   but had a body of only **+2.9%** (it opened +19.8% higher), so a body-only
+   test rejects exactly the moves worth catching. A gap that fades to a red
+   close never qualifies either way.
 6. **Fresh cross** (optional, `alert_only_on_cross`) — yesterday's close
    was not yet above the level, so a stock that stays above it doesn't
    re-alert every night.
 
 The fresh cross out of a real downtrend is always mandatory; the remaining
-confirmations (volume, green candle, and the slope floor when enabled) set the
+confirmations (volume, strong day, and the slope floor when enabled) set the
 tier — none failing is a `full` setup, **one or two** failing is a `partial`
 one (failures named in `Missing`). A cross that wasn't from a long downtrend, or
 that misses on three or more confirmations, is dropped entirely.
@@ -336,7 +344,8 @@ the run header):
 | `reclaim_strategy.below_lookback_days` | `200` | Downtrend-persistence lookback |
 | `reclaim_strategy.min_days_below_pct` | `0.8` | Min fraction of the lookback the close spent below the SMA |
 | `reclaim_strategy.cross_margin_pct` | `0.01` | Close must exceed the SMA by this fraction (1.01 × SMA) |
-| `reclaim_strategy.min_candle_body_pct` | `0.01` | Reclaim day's Close must exceed its Open by at least this fraction (green candle, body ≥ 1%); `0.0` = any green candle |
+| `reclaim_strategy.min_candle_body_pct` | `0.0` | Body route to R5: Close must exceed its Open by this fraction; `0.0` = any green candle |
+| `reclaim_strategy.min_day_gain_pct` | `null` | Gap-inclusive route to R5: a day closing this far above the **previous** close qualifies even with a small body (must still close green). `null` = off, in which case only the body route applies — and at `min_candle_body_pct: 0.0` the body route already admits every green day, so this knob only bites once you raise the body floor |
 | `reclaim_strategy.volume_sma_days` | `30` | Lookback for the average-volume baseline |
 | `reclaim_strategy.volume_surge_multiplier` | `1.2` | Required volume vs. that baseline |
 | `reclaim_strategy.sma_slope_lookback_days` | `63` | Lookback for the optional SMA-slope floor |

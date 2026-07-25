@@ -160,10 +160,14 @@ def plot_reclaim(table: pd.DataFrame, strategy: dict, ticker: str,
     ax_v.legend(loc="upper left", frameon=False, fontsize=9, labelcolor=C["ink2"])
 
     n_sig = len(hits)
+    min_gain = strategy.get("min_day_gain_pct")
+    strength = f"body >= {strategy.get('min_candle_body_pct', 0.0):.1%}"
+    if min_gain is not None:
+        strength += f" or day >= {min_gain:.1%} vs prev close"
     subtitle = (f"{n_sig} signal day(s)" if n_sig else "no signal days") + \
         f" -- below SMA >= {strategy['min_days_below_pct']:.0%} of last " \
         f"{strategy['below_lookback_days']}d, volume {vol_mult}x {vol_days}d average, " \
-        f"candle body >= {strategy.get('min_candle_body_pct', 0.0):.1%}"
+        f"{strength}"
     _title(ax_p, f"{ticker} -- reclaim of {sma_days}-day SMA after downtrend", subtitle)
 
     fig.savefig(out_path, dpi=dpi, bbox_inches="tight", facecolor=C["surface"])
