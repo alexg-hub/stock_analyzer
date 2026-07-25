@@ -504,6 +504,14 @@ Notes:
   automatically if more tickers fire.
 - Occasional per-ticker download failures (delistings, transient Yahoo errors)
   are tolerated — those tickers simply drop out of the scan.
+- A trailing bar with **no settled close** is dropped and the previous session
+  scanned instead, with a `WARNING:` line naming the dropped date. Yahoo returns
+  an unsettled session as a normal row with Open/High/Low/Volume but a null
+  `Close`, and can revert a settled bar to that state hours later; since every
+  condition compares against the close, scanning it would report zero signals
+  with no sign of trouble. So **an unexplained zero-signal run is worth checking
+  in `output/scanner_log.txt`** — either the warning is there (bad bar, screens
+  fine) or the day genuinely had no setups.
 - Yahoo legitimately lacks some fundamentals for some companies (e.g. no P/E
   when trailing earnings are negative, no Debt/Equity when equity is negative);
   those show as `n/a` in the alert.

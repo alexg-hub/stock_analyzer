@@ -275,6 +275,20 @@ real send.
   have no Debt/Equity); individual ticker download failures just drop out of
   the scan; Wikipedia scraping needs the browser-like User-Agent header;
   tickers use `-` not `.` (BRK-B).
+- **Unsettled last bar.** Yahoo serves a session it has not settled as an
+  ordinary daily row — Open/High/Low/Volume present, **`Close` null** — and it
+  sometimes *reverts an already-settled bar to that form hours later* (seen
+  2026-07-24: 503 of 504 closes withdrawn on the Saturday, after Friday's
+  nightly run had scanned that same bar fine). Every condition compares against
+  `Close`, so the row makes each test NaN, `fillna(False)` reads that as "no
+  signal", and **the scan reports a confident 0 signals on data that looks
+  complete** — no error, no warning. `scanner_common.drop_unsettled_tail` (a
+  *fraction*-of-tickers test, since individual tickers legitimately go missing)
+  strips such trailing bars in both download functions and on every cache load,
+  printing which bar it dropped; that also makes an intraday run scan the last
+  settled session instead of a partial one. If a zero-signal night ever looks
+  wrong, check `output/scanner_log.txt` for that WARNING first, and never assume
+  a NaN close means a failed condition.
 - Windows box, Microsoft Store Python 3.13 (`python` on PATH). yfinance's
   progress bar is disabled for non-TTY output so `output/scanner_log.txt` stays
   readable. matplotlib uses the Agg backend (set in `charts.py`).

@@ -9,6 +9,8 @@ being pinned are the ones the hits/near-miss unification introduced:
   * the two tiers are disjoint, and `Setup`/`Missing` agree with them
   * one card per signal, partials visibly marked, no near-miss vocabulary left
   * the hand-off is a single list and the deep-dive can resolve either tier
+  * an unsettled trailing bar (Yahoo's null-close row) is dropped rather than
+    scanned as a silent zero
 
 Uses the cached price panel; never downloads. Discord is stubbed -- this test
 must never send.
@@ -26,7 +28,7 @@ from _harness import Checks, busiest_day, cached_panel_or_skip, screens
 
 import research_report
 import run_scanners
-from scanner_common import PARTIAL_COLOR
+from scanner_common import PARTIAL_COLOR, drop_unsettled_tail
 
 c = Checks("signal contract")
 panel, cfg = cached_panel_or_skip()
@@ -154,5 +156,52 @@ rc2 = run_scanners.main()
 builtins.print = _print
 c.ok("empty scan day still returns 0", rc2 == 0)
 c.ok("empty scan day still sends a summary", "content" in captured)
+
+# --------------------------------------------------------------------------
+# Yahoo serves an unsettled session as a normal row with Open/High/Low/Volume
+# but a null Close, and can revert a settled bar to that form hours later
+# (2026-07-24). Because every condition compares against Close, such a bar
+# scans as a confident zero -- so the guard has to be load-bearing, not
+# cosmetic, and that is what the last check here asserts.
+c.section("an unsettled trailing bar is dropped, never scanned")
+all_tickers = list(panel["Close"].columns)
+
+
+def with_unsettled(frame, bars=1, missing=None):
+    """`frame` plus trailing copies of its last row with Close blanked out for
+    `missing` tickers (all of them by default)."""
+    out = frame
+    blank = all_tickers if missing is None else all_tickers[:missing]
+    cols = pd.MultiIndex.from_product([["Close"], blank])
+    for _ in range(bars):
+        row = out.iloc[[-1]].copy()
+        row.index = [out.index[-1] + pd.Timedelta(days=1)]
+        row.loc[:, cols] = float("nan")
+        out = pd.concat([out, row])
+    return out
+
+
+c.ok("a clean panel is returned untouched",
+     drop_unsettled_tail(panel).index.equals(panel.index))
+c.ok("a fully unsettled bar is dropped",
+     drop_unsettled_tail(with_unsettled(panel)).index.equals(panel.index))
+c.ok("several unsettled bars are all dropped",
+     drop_unsettled_tail(with_unsettled(panel, bars=3)).index.equals(panel.index))
+c.ok("a few missing tickers do not discard the bar",
+     len(drop_unsettled_tail(
+         with_unsettled(panel, missing=max(1, len(all_tickers) // 10)))
+     ) == len(panel) + 1,
+     "per-ticker download failures are normal and must not lose the day")
+
+unsettled = with_unsettled(panel)
+for module, compute, strategy in screens(cfg):
+    def last_fires(frame):
+        return module.fires_mask(
+            frame, compute(frame, strategy), strategy).fillna(False).iloc[-1]
+
+    raw, guarded = last_fires(unsettled), last_fires(drop_unsettled_tail(unsettled))
+    c.ok(f"{module.CONFIG_KEY}: unsettled bar would scan as zero, guard restores it",
+         int(raw.sum()) == 0 and guarded.equals(last_fires(panel)),
+         f"unguarded={int(raw.sum())} guarded={int(guarded.sum())}")
 
 sys.exit(c.finish())

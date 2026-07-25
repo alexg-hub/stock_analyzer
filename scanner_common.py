@@ -115,6 +115,41 @@ def get_sp500_tickers(source_url: str) -> list[str]:
     return tickers
 
 
+def drop_unsettled_tail(data: pd.DataFrame, max_missing_pct: float = 0.5) -> pd.DataFrame:
+    """Drop trailing bars that have no settled close.
+
+    Yahoo serves an unsettled session as an ordinary daily row with Open/High/
+    Low/Volume filled in but **Close null** -- and it sometimes reverts an
+    already-settled bar to that form hours later (observed 2026-07-24: 503 of
+    504 closes withdrawn on the Saturday after Friday's nightly run had scanned
+    that same bar successfully). Every condition in every screen compares
+    against Close, so such a row makes each test NaN, `fillna(False)` turns
+    that into "no signal", and the scan reports a confident zero on data that
+    looks complete. Scanning the last *settled* bar instead is also the right
+    behaviour for an intraday run.
+
+    A fraction, not `any`: individual tickers legitimately go missing
+    (delistings, per-ticker download failures) and must not discard the day.
+    """
+    if "Close" not in data.columns.get_level_values(0):
+        return data
+    missing = data["Close"].isna().mean(axis=1)   # NaN fraction per bar
+    keep = len(data)
+    while keep and missing.iloc[keep - 1] > max_missing_pct:
+        keep -= 1
+    if keep == len(data):
+        return data
+    dropped = [str(d.date()) for d in data.index[keep:]]
+    if not keep:
+        raise RuntimeError(
+            f"No bar has a settled close (checked {len(dropped)}) -- Yahoo is "
+            f"serving unsettled rows; retry later.")
+    print(f"WARNING: {', '.join(dropped)} has no settled close for most tickers "
+          f"(Yahoo has not published it) -- dropping and scanning "
+          f"{data.index[keep - 1].date()} instead.")
+    return data.iloc[:keep]
+
+
 def download_price_data(tickers: list[str], period: str, interval: str) -> pd.DataFrame:
     """Bulk-download OHLCV for all tickers in one threaded yfinance call.
 
@@ -133,7 +168,7 @@ def download_price_data(tickers: list[str], period: str, interval: str) -> pd.Da
     )
     if data.empty:
         raise RuntimeError("yfinance returned no data -- check connectivity.")
-    return data
+    return drop_unsettled_tail(data)
 
 
 def warmup_months(window: int) -> int:
@@ -164,7 +199,7 @@ def download_history(ticker: str, start: pd.Timestamp, end: pd.Timestamp,
         raise SystemExit(f"No data returned for {ticker} -- check the ticker/dates.")
     if not isinstance(data.columns, pd.MultiIndex):
         data.columns = pd.MultiIndex.from_product([data.columns, [ticker]])
-    return data
+    return drop_unsettled_tail(data)
 
 
 def single_ticker_panel(data: pd.DataFrame, ticker: str) -> pd.DataFrame:

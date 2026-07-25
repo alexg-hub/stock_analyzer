@@ -73,15 +73,20 @@ def cached_panel_or_skip():
 
     Tests never download: a suite that can silently spend two minutes pulling
     500 tickers is a suite people stop running.
+
+    Unsettled trailing bars are dropped, exactly as the download path does, so
+    the fixture matches what production sees -- a cache written mid-session
+    otherwise hands every test a last row with no closes.
     """
     import backtest_universe
+    from scanner_common import drop_unsettled_tail
     cfg = config()
     path = backtest_universe.cache_path(cfg["backtest"])
     if not path.exists():
         print(f"SKIP: no cached panel at {path}\n"
               f"      run `python backtest_universe.py` once first.")
         sys.exit(SKIP)
-    panel = pd.read_pickle(path)
+    panel = drop_unsettled_tail(pd.read_pickle(path))
     print(f"panel: {panel.shape[1] // 6} tickers, {len(panel)} days, "
           f"{panel.index[0].date()} .. {panel.index[-1].date()}")
     return panel, cfg
