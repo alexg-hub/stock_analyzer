@@ -1,15 +1,21 @@
 ---
 name: deep-dive
-description: Produce a graded investment-case deep-dive for a scanner hit/near-miss — a config-driven quant score anchored by Claude's narrative (moat, growth, earnings/management, news & rumors) → a tier + 0-100 conviction verdict, the full report archived to Google Drive and a combined verdict summary posted to Discord. Use when the user asks to deep-dive, analyze, or build an investment case for one or more tickers from the nightly scan.
+description: Produce a graded investment-case deep-dive for a scanner signal — a config-driven quant score anchored by Claude's narrative (moat, growth, earnings/management, news & rumors) → a tier + 0-100 conviction verdict, the full report archived to Google Drive and a combined verdict summary posted to Discord. Use when the user asks to deep-dive, analyze, or build an investment case for one or more tickers from the nightly scan.
 ---
 
 # Deep-dive stock analysis
 
 This skill is the **synthesis layer** of the stock_analyzer pipeline. The nightly
-scan (`run_scanners.py`) writes `latest_hits.json`; this skill turns a hit/near
-ticker into a full investment case. Synthesis is **your reasoning**, anchored by
-a deterministic quant score. Everything mechanical is in `research_report.py` and
-`sec.py`; the judgment is yours.
+scan (`run_scanners.py`) writes `latest_hits.json`; this skill turns a
+signalling ticker into a full investment case. Each screen reports **one signal
+list** whose `Setup` is `full` (every condition held) or `partial` (breakout:
+3 of 4; reclaim: 1-2 confirmations failed, named in `Missing`). Treat a partial
+setup as a weaker technical trigger than a full one and say so in the report --
+it does not change the quant score, only your reading of the trigger.
+
+Synthesis is **your reasoning**, anchored by a deterministic quant score.
+Everything mechanical is in `research_report.py` and `sec.py`; the judgment is
+yours.
 
 **Framing (non-negotiable):** this is research analysis, **not investment advice**.
 The "verdict" is an analytical rating, never a buy/sell instruction. Put the
@@ -95,7 +101,7 @@ crowded/expensive positioning). Stay within ±N; the quant score does the heavy 
 # TICKER (Company) — deep-dive — <scan_date>
 
 **Verdict: TIER · Conviction NN/100**  (quant NN + narrative ±M)
-Trigger: <screen> (<hit|near-miss>)  ·  *Analysis, not investment advice.*
+Trigger: <screen> (<full|partial> setup)  ·  *Analysis, not investment advice.*
 
 ## Snapshot
 price · mkt cap · P/E (fwd) + 2y percentile · growth (this/next yr) ·

@@ -50,11 +50,11 @@ real send.
   - `CONFIG_KEY` — its section name in `config.json`; the section's
     `enabled` flag skips the screen.
   - `scan(data, strategy) -> ScanResult` (dataclass in `scanner_common.py`:
-    title, ticker-indexed `hits`/`near` DataFrames, the strategy dict).
+    title, one ticker-indexed `hits` DataFrame, the strategy dict).
   - `EMBED_COLOR` + `describe_hit(row, strategy)` — the screen-specific parts
     of its Discord embed cards (`scanner_common.build_embeds` assembles the
-    cards: one per hit/near-miss, fundamentals as inline fields, the hit's
-    chart bound in via `attachment://<filename>`).
+    cards: one per signal, fundamentals as inline fields, the chart bound in
+    via `attachment://<filename>`).
   - `plot_hit(data, ticker, strategy, chart_cfg, out_path)` — per-hit alert
     chart (delegates to `charts.py`).
   Adding a scanner = new module + one entry in `SCANNERS` + a config section.
@@ -67,19 +67,30 @@ real send.
   (`backtest_breakout.py`, `backtest_pullback.py`, `backtest_reclaim.py`)
   evaluate every historical day for one ticker and import the compute
   functions — never reimplement the condition math there.
-- **Each screen module also exposes `required_history(strategy)`** (its total
-  lookback, used by its own "NO signal can ever fire" warning and by the
-  universe backtest's warm-up) and **`near_miss_mask(data, signals, strategy)`**
-  — the near-miss *combination* logic, vectorized over all days like the
-  `compute_*` functions. `find_breakouts`/`find_reclaims` take `.iloc[-1]` of
-  it, so production and the backtest share one definition. The pullback
-  screen's `near_miss_mask` is **backtest-only** (`is_touch & ~signal`, cohort
-  name `NEAR_COHORT = "touch-no-fire"`); that screen has no production
-  near-miss list.
+- **One signal list per screen, two tiers.** There is no separate near-miss
+  list: `find_*` returns a single `hits` frame with a **`Setup`** column
+  (`full`/`partial`) and **`Missing`** (the failing test, `""` when full),
+  sorted full-first. Alongside `compute_*` each module exposes:
+  - `required_history(strategy)` — total lookback, used by its own "NO signal
+    can ever fire" warning and the universe backtest's warm-up;
+  - `partial_mask(data, signals, strategy)` — the *partial-tier* combination
+    logic, vectorized over all days like `compute_*`;
+  - `fires_mask(...)` = `signal | partial_mask` — every day the screen alerts
+    on. **The pullback screen is the exception**: it stays strict, so its
+    `fires_mask` is just `signal` and its `partial_mask` (touch-but-no-fire) is
+    **backtest-only**, a control cohort that is never alerted.
+  `find_*` takes `.iloc[-1]` of `fires_mask`, so production and the backtest
+  share one definition. `missing_reason(...)` (breakout: positional args;
+  reclaim: a calc-table row) names the failing leg.
+  Merging the tiers was driven by the backtest: partial breakout setups
+  returned +3.10% vs +0.67% for full ones over 30 days, so suppressing them was
+  discarding the better cohort. Keep the tier recorded — it is the only thing
+  that preserves that distinction.
 - **`backtest_universe.py` is the profit backtest** — the whole universe ×
   all history, one fixed-horizon trade per signal. It reuses the production
-  `compute_*` + `near_miss_mask` unchanged (its own `SCREENS` registry pairs
-  each module with its compute function) and reuses
+  `compute_*` + `fires_mask` unchanged (its own `SCREENS` registry pairs
+  each module with its compute function) — one cohort per screen, or `full`
+  vs `partial` under `--split-by-tier`/`backtest.split_by_tier` — and reuses
   `scanner_common.download_price_data`/`warmup_months`; the simulation itself
   is a few `shift()`s (`forward_trades`), never a loop. `holding_days` counts
   trading days held *after* the entry day. Excursion (MFE/MAE) windows must
@@ -105,8 +116,8 @@ real send.
   `download_period` impact), but each screen wants a different shape:
   - Breakout **C4** and reclaim **R5**: a strong **green** candle,
     `close > (1 + min_candle_body_pct) * open` (positive threshold enforces
-    green + a minimum body). Breakout hits need all four conditions;
-    breakout near-miss = **exactly 3 of 4**. Reclaim folds R5 into the signal.
+    green + a minimum body). A `full` breakout needs all four conditions, a
+    `partial` one exactly 3 of 4. Reclaim folds R5 into the signal.
   - Pullback **T4** (`sma_pullback.py`): the *opposite* — a small-body,
     long-tailed reversal bar at the touch: `|close-open|/open <=
     max_candle_body_pct` AND `(high-low)/open >= min_candle_range_pct` (body
@@ -118,16 +129,17 @@ real send.
   (charting-standard "touch/cross of the line") while their persistence
   counts (time above/below the SMA) and the reclaim screen's volume baseline
   use `shift(1)`. All are intentional — don't "fix" any of them.
-- **Near-misses** differ by screen. Breakout = exactly 3 of 4 conditions true
-  on scan day; breakout-condition failures are additionally filtered to closes
-  within `near_miss_max_gap_pct` of the required level (production alert only;
-  the backtest log intentionally shows all 3-of-4 days). Reclaim = a genuine
-  fresh cross today **out of a long downtrend** (both mandatory, as for a hit)
-  with **1 or 2** of the remaining confirmations (volume, candle, and slope
-  when enabled) failing — 0 = hit, 3+ dropped; its reason string joins all
-  failing tests (`cross_miss_reasons`). The pullback
-  screen has no production near-miss list; its backtest logs touch days that
-  failed and why.
+- **The `partial` tier differs by screen.** Breakout = exactly 3 of 4
+  conditions; a failing *breakout* leg is additionally filtered to closes
+  within `near_miss_max_gap_pct` of the required level (alert only — the
+  single-ticker backtest log intentionally shows all 3-of-4 days). Reclaim = a
+  genuine fresh cross **out of a long downtrend** (both mandatory, as for a
+  full setup) with **1 or 2** of the remaining confirmations (volume, candle,
+  and slope when enabled) failing — 0 = full, 3+ dropped; `missing_reasons`
+  joins every failing test. The pullback screen never alerts a partial; its
+  `partial_mask` is the backtest's touch-but-no-fire control cohort (measured
+  at +1.57% vs a +2.10% random-entry baseline — i.e. its filters earn their
+  keep).
 - **Fundamentals are two config-driven layers** (`scanner_common.py`):
   `fields` = snapshot values from Yahoo `info` (`percent_fields` lists keys
   Yahoo returns as fractions, ×100 before display — but `dividendYield` is
@@ -148,9 +160,11 @@ real send.
   `info`/metric keys as the display config, each `{min, max, increasing}`;
   strict compares, latest fiscal year for multi-year metrics, missing value
   = rule fails (banks can never pass). `build_embeds` prefixes the
-  configured `badge` to a passing **hit** card's title (hits only, every
-  screen automatically; near-misses never get it). The default rule set is
-  intentionally strict — most tickers fail at least one rule.
+  configured `badge` to any passing signal card's title, every screen
+  automatically — **including `partial` setups** (it grades fundamentals, which
+  are independent of setup completeness; this changed when the tiers merged).
+  The default rule set is intentionally strict — most tickers fail at least one
+  rule.
 - **Everything tunable lives in `config.json`** (per-screen strategy
   sections, charts, Discord, fundamentals fields) and all user-facing text
   (alert lines, backtest STEP logs, chart labels) is built from those values

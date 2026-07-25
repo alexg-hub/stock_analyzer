@@ -1,7 +1,7 @@
 """
 Screen module: upward breakout from a horizontal consolidation range.
 
-Setup detected (all four must be true on the most recent trading day):
+Four conditions, evaluated on the most recent trading day:
 
 1. Horizontal movement -- over the previous `consolidation_window_days`
    trading days (excluding today), (max High - min Low) / min Low must be
@@ -13,6 +13,13 @@ Setup detected (all four must be true on the most recent trading day):
 4. Long green candle -- today's Close exceeds the Open by at least
    `min_candle_body_pct` (Close > (1 + min_candle_body_pct) x Open), so the
    breakout day itself closes strongly instead of gapping up and fading.
+
+The screen alerts on **one list with two tiers**: a `full` setup has all four
+conditions, a `partial` setup has exactly 3 of 4 (and, when the breakout
+condition itself is the one that failed, a close within
+`near_miss_max_gap_pct` of the required level, so a volume spike deep inside
+the range doesn't qualify). The `Setup` column says which, `Missing` names the
+failing test.
 
 This file contains only the (fully vectorized) condition math and this
 screen's alert section/chart. Data download, fundamentals, and Discord
@@ -31,7 +38,7 @@ CONFIG_KEY = "breakout_strategy"
 # Side-bar color of this screen's Discord embed cards (palette orange).
 EMBED_COLOR = 0xEB6834
 
-# The four conditions, in C1..C4 order (near-miss = exactly 3 of these).
+# The four conditions, in C1..C4 order (a partial setup = exactly 3 of these).
 CONDITIONS = ("is_consolidating", "is_breakout", "is_volume_surge",
               "is_long_green_candle")
 
@@ -109,8 +116,8 @@ def compute_signals(data: pd.DataFrame, strategy: dict) -> dict[str, pd.DataFram
     }
 
 
-def near_miss_mask(data: pd.DataFrame, signals: dict, strategy: dict) -> pd.DataFrame:
-    """(days, tickers) mask of near-misses: exactly 3 of the 4 conditions true.
+def partial_mask(data: pd.DataFrame, signals: dict, strategy: dict) -> pd.DataFrame:
+    """(days, tickers) mask of *partial* setups: exactly 3 of the 4 conditions.
 
     C2 (breakout) failures are additionally required to close within
     `near_miss_max_gap_pct` of the breakout level, so a volume spike deep
@@ -120,21 +127,28 @@ def near_miss_mask(data: pd.DataFrame, signals: dict, strategy: dict) -> pd.Data
     takes `.iloc[-1]`, the universe backtest uses the whole frame.
     """
     n_true = sum(signals[c].fillna(False).astype(int) for c in CONDITIONS)
-    near = (n_true == 3) & ~signals["signal"].fillna(False)
+    partial = (n_true == 3) & ~signals["signal"].fillna(False)
 
     gap = strategy.get("near_miss_max_gap_pct", 0.05)
     brk_level = strategy.get("breakout_multiplier", 1.0) * signals["prior_high"]
     # NaN prior_high (warm-up) compares as False, so those days drop out.
-    return near & (signals["is_breakout"].fillna(False)
-                   | (data["Close"] >= (1 - gap) * brk_level))
+    return partial & (signals["is_breakout"].fillna(False)
+                      | (data["Close"] >= (1 - gap) * brk_level))
 
 
-def near_miss_reason(close, prior_high, range_pct, vol_ratio, body_pct,
-                     strategy: dict) -> str:
-    """Explain which single condition a 3-of-4 near-miss failed.
+def fires_mask(data: pd.DataFrame, signals: dict, strategy: dict) -> pd.DataFrame:
+    """(days, tickers) mask of every day this screen alerts on -- the full
+    setup (4 of 4) or a partial one (3 of 4). One list, two tiers; `Setup`
+    on the hits frame says which."""
+    return signals["signal"].fillna(False) | partial_mask(data, signals, strategy)
+
+
+def missing_reason(close, prior_high, range_pct, vol_ratio, body_pct,
+                   strategy: dict) -> str:
+    """Name the condition a partial (3-of-4) setup failed.
 
     `range_pct` and `body_pct` are fractions (0.28 = 28%), matching
-    compute_signals. Exactly one condition fails in a 3-of-4 near-miss, so the
+    compute_signals. Exactly one condition fails in a 3-of-4 setup, so the
     checks below -- in condition order C1..C4 -- return the first that trips.
     """
     max_range = strategy["max_consolidation_range_pct"]
@@ -152,15 +166,12 @@ def near_miss_reason(close, prior_high, range_pct, vol_ratio, body_pct,
             f"{min_body:.1%} required")
 
 
-def find_breakouts(data: pd.DataFrame, strategy: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
+def find_breakouts(data: pd.DataFrame, strategy: dict) -> pd.DataFrame:
     """Screen the whole universe on the most recent trading day.
 
-    Returns two DataFrames indexed by ticker:
-      * hits -- tickers passing all three conditions;
-      * near-misses -- tickers passing exactly two, with the failed
-        condition explained (C2 failures only when the close is within
-        `near_miss_max_gap_pct` of the required breakout level, so a
-        volume spike deep inside a range doesn't spam the alert).
+    Returns one ticker-indexed DataFrame of every signal -- full setups (all
+    four conditions) and partial ones (exactly 3 of 4) together, tagged by
+    `Setup` with the failing test named in `Missing`. Full setups sort first.
     """
     needed = required_history(strategy)
     if len(data) <= needed:
@@ -183,23 +194,28 @@ def find_breakouts(data: pd.DataFrame, strategy: dict) -> tuple[pd.DataFrame, pd
             index=pd.Index(tickers, name="Ticker"),
         )
 
-    signal_today = last["signal"].fillna(False)
-    hits = day_stats(signal_today[signal_today].index.tolist())
-
-    # Near-misses: exactly three of the four conditions true today (the mask
-    # is computed for every day; the scan only needs the last one).
-    near_mask = near_miss_mask(data, signals, strategy).iloc[-1]
-    near = day_stats(near_mask[near_mask].index.tolist())
-    near["Reason"] = [
-        near_miss_reason(row["Close"], row["Range High"], row["Range %"] / 100,
-                         row["Vol Ratio"], row["Body %"] / 100, strategy)
-        for _, row in near.iterrows()
+    # One list: full setups plus partials (both masks are computed for every
+    # day; the scan only needs the last one).
+    full_today = last["signal"].fillna(False)
+    fires = fires_mask(data, signals, strategy).iloc[-1]
+    hits = day_stats(fires[fires].index.tolist())
+    hits["Setup"] = ["full" if full_today.get(t, False) else "partial"
+                     for t in hits.index]
+    hits["Missing"] = [
+        "" if row["Setup"] == "full" else
+        missing_reason(row["Close"], row["Range High"], row["Range %"] / 100,
+                       row["Vol Ratio"], row["Body %"] / 100, strategy)
+        for _, row in hits.iterrows()
     ]
+    # "full" < "partial", so ascending puts complete setups first; stable keeps
+    # ticker order within each tier.
+    hits = hits.sort_values("Setup", kind="stable")
 
+    n_full = int((hits["Setup"] == "full").sum())
     scan_date = data.index[-1].date()
-    print(f"Scan date: {scan_date} -- {len(hits)} breakout(s), "
-          f"{len(near)} near-miss candidate(s).")
-    return hits, near
+    print(f"Scan date: {scan_date} -- {len(hits)} breakout signal(s) "
+          f"({n_full} full, {len(hits) - n_full} partial).")
+    return hits
 
 
 # --------------------------------------------------------------------------
@@ -207,18 +223,16 @@ def find_breakouts(data: pd.DataFrame, strategy: dict) -> tuple[pd.DataFrame, pd
 # --------------------------------------------------------------------------
 
 def scan(data: pd.DataFrame, strategy: dict) -> ScanResult:
-    hits, near = find_breakouts(data, strategy)
     window = strategy["consolidation_window_days"]
     return ScanResult(
         title=f"Breakout from {window}-day consolidation",
-        hits=hits,
-        near=near,
+        hits=find_breakouts(data, strategy),
         strategy=strategy,
     )
 
 
 def describe_hit(row, strategy: dict) -> str:
-    """Embed-card description of one confirmed breakout."""
+    """Embed-card description of one breakout signal."""
     return (f"Close {fmt_value(row['Close'])} broke range high "
             f"{fmt_value(row['Range High'])} (range {fmt_value(row['Range %'])}%, "
             f"vol {fmt_value(row['Vol Ratio'])}x avg, "

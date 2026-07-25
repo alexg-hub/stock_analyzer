@@ -23,7 +23,7 @@ import pandas as pd
 
 import charts
 from scanner_common import download_history, load_config
-from sma_reclaim import build_calc_table, compute_reclaim_signals, cross_miss_reason
+from sma_reclaim import build_calc_table, compute_reclaim_signals, missing_reason
 
 
 def section(title: str) -> None:
@@ -93,14 +93,14 @@ def log_run(table: pd.DataFrame, strategy: dict, ticker: str) -> None:
                   f"body {row['BodyPct']:+.2f}% (needs >= {min_body:.1%}, green)")
 
     section("STEP 5 -- Fresh-cross days that did NOT fire (and why)")
-    print("(the production near-miss list is the subset that were in a downtrend "
+    print("(the alert's 'partial' tier is the subset that were in a downtrend "
           "and fail only 1 or 2 of {volume, candle, slope})")
     misses = table[table["FreshCross"].fillna(False) & ~table["SIGNAL"].fillna(False)]
     if misses.empty:
         print("None.")
     else:
         for date, row in misses.iterrows():
-            print(f"{date.date()}  failed -> {cross_miss_reason(row, strategy)}")
+            print(f"{date.date()}  failed -> {missing_reason(row, strategy)}")
 
 
 # --------------------------------------------------------------------------

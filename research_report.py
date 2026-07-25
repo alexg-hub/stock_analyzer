@@ -49,14 +49,18 @@ def load_hits(cfg: dict) -> dict:
 
 
 def find_ticker(hits: dict, ticker: str) -> dict | None:
-    """Locate `ticker` in the hand-off; return {screen, kind, row} or None."""
+    """Locate `ticker` in the hand-off; return {screen, kind, row} or None.
+
+    `kind` is the row's setup tier (`full` or `partial`) -- every screen now
+    reports one signal list, with partial setups tagged rather than split out.
+    """
     for screen in hits.get("screens", []):
-        for kind in ("hits", "near"):
-            if ticker in screen.get(kind, {}):
-                return {"screen": screen["title"], "config_key": screen["config_key"],
-                        "kind": "hit" if kind == "hits" else "near-miss",
-                        "strategy": screen.get("strategy", {}),
-                        "row": screen[kind][ticker]}
+        row = screen.get("hits", {}).get(ticker)
+        if row is not None:
+            return {"screen": screen["title"], "config_key": screen["config_key"],
+                    "kind": row.get("Setup", "full"),
+                    "strategy": screen.get("strategy", {}),
+                    "row": row}
     return None
 
 

@@ -40,11 +40,6 @@ CONFIG_KEY = "pullback_strategy"
 EMBED_COLOR = 0x2A78D6
 
 
-# Name of this screen's backtest cohort of non-firing days. It is NOT a
-# near-miss list (this screen has none in production) -- see near_miss_mask.
-NEAR_COHORT = "touch-no-fire"
-
-
 def required_history(strategy: dict) -> int:
     """Trading days of history needed before this screen can ever fire."""
     return strategy["sma_days"] + strategy["trend_lookback_days"]
@@ -123,16 +118,27 @@ def compute_pullback_signals(data: pd.DataFrame, strategy: dict) -> dict[str, pd
     }
 
 
-def near_miss_mask(data: pd.DataFrame, signals: dict, strategy: dict) -> pd.DataFrame:
+def partial_mask(data: pd.DataFrame, signals: dict, strategy: dict) -> pd.DataFrame:
     """(days, tickers) mask of touch days that did NOT fire -- **backtest only**.
 
-    This screen has no production near-miss list (the nightly alert never
-    sends pullback near-misses); this is the "touch but no signal" cohort the
-    single-ticker backtest already logs in its STEP 5, exposed as a frame so
-    the universe backtest can measure whether those days were worth trading.
+    This screen deliberately stays strict: it never alerts on partial setups,
+    so this cohort is *not* part of `fires_mask`. It is the "touch but no
+    signal" set the single-ticker backtest already logs in its STEP 5, exposed
+    as a frame so the universe backtest can measure whether those days were
+    worth trading (they were not: +1.57% vs a +2.10% random-entry baseline).
     `touch_miss_reason` explains an individual one.
     """
     return signals["is_touch"].fillna(False) & ~signals["signal"].fillna(False)
+
+
+def fires_mask(data: pd.DataFrame, signals: dict, strategy: dict) -> pd.DataFrame:
+    """(days, tickers) mask of every day this screen alerts on.
+
+    Unlike the breakout and reclaim screens this is just the strict signal --
+    every pullback signal is a `full` setup, and `partial_mask` above is
+    excluded on purpose.
+    """
+    return signals["signal"].fillna(False)
 
 
 def touch_miss_reason(row: pd.Series, strategy: dict) -> str:
@@ -161,7 +167,8 @@ def find_pullbacks(data: pd.DataFrame, strategy: dict) -> pd.DataFrame:
     """Screen the whole universe on the most recent trading day.
 
     Returns a ticker-indexed DataFrame of the tickers whose close touched
-    their rising SMA today after a sustained uptrend.
+    their rising SMA today after a sustained uptrend. This screen stays
+    strict, so every row is `Setup == "full"`.
     """
     needed = required_history(strategy)
     if len(data) <= needed:
@@ -173,8 +180,8 @@ def find_pullbacks(data: pd.DataFrame, strategy: dict) -> pd.DataFrame:
     signals = compute_pullback_signals(data, strategy)
     last = {name: df.iloc[-1] for name, df in signals.items()}
 
-    signal_today = last["signal"].fillna(False)
-    tickers = signal_today[signal_today].index.tolist()
+    fires = fires_mask(data, signals, strategy).iloc[-1]
+    tickers = fires[fires].index.tolist()
     hits = pd.DataFrame(
         {
             "Close": data["Close"].iloc[-1][tickers].round(2),
@@ -187,9 +194,14 @@ def find_pullbacks(data: pd.DataFrame, strategy: dict) -> pd.DataFrame:
         },
         index=pd.Index(tickers, name="Ticker"),
     )
+    # This screen never alerts on a partial setup, so the tier columns every
+    # screen carries are constant here -- present so the alert, the hand-off
+    # and the backtest can treat all screens identically.
+    hits["Setup"] = "full"
+    hits["Missing"] = ""
 
     scan_date = data.index[-1].date()
-    print(f"Scan date: {scan_date} -- {len(hits)} SMA-pullback setup(s).")
+    print(f"Scan date: {scan_date} -- {len(hits)} SMA-pullback signal(s).")
     return hits
 
 

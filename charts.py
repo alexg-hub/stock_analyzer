@@ -228,10 +228,10 @@ def plot_pullback(table: pd.DataFrame, strategy: dict, ticker: str,
 # Universe-backtest summary
 # --------------------------------------------------------------------------
 
-# Cohort -> hue, assigned in fixed order (never cycled): hits are the primary
-# series, the non-firing cohorts the secondary one.
-COHORT_COLOR = {"hit": C["close"], "near": C["event"],
-                "touch-no-fire": C["event"]}
+# Cohort -> hue, assigned in fixed order (never cycled). The default run has
+# one cohort per screen ("signal"); --split-by-tier breaks it into the full
+# setup (primary hue) and the partial one (secondary).
+COHORT_COLOR = {"signal": C["close"], "full": C["close"], "partial": C["event"]}
 
 
 def plot_backtest_summary(summary: pd.DataFrame, horizon: int, entry: str,
@@ -312,17 +312,19 @@ def plot_backtest_summary(summary: pd.DataFrame, horizon: int, entry: str,
     draw(ax_win, bars["win_rate_%"].tolist(), base["win_rate_%"].squeeze(),
          "Win rate (%)", "{:.1f}%", from_zero=True)
 
-    # Cohort legend once, below both panels, where it can't cover a bar.
-    # Grouped by hue, so the cohorts that share one (every "did not fire"
-    # flavour) become a single entry instead of two identical swatches.
+    # Cohort legend below both panels, where it can't cover a bar -- grouped by
+    # hue so cohorts sharing one become a single entry. Skipped entirely for a
+    # single cohort: the y-axis labels already carry identity, so a one-entry
+    # legend is pure noise (and would sit on the axis label).
     by_hue = {}
     for cohort in bars["cohort"]:
         by_hue.setdefault(COHORT_COLOR.get(cohort, C["muted"]), []).append(cohort)
-    fig.legend(
-        handles=[plt.Rectangle((0, 0), 1, 1, color=hue) for hue in by_hue],
-        labels=[" / ".join(dict.fromkeys(cs)) for cs in by_hue.values()],
-        loc="lower center", ncol=len(by_hue), frameon=False, fontsize=9.5,
-        labelcolor=C["ink2"], bbox_to_anchor=(0.5, -0.02))
+    if len(by_hue) > 1:
+        fig.legend(
+            handles=[plt.Rectangle((0, 0), 1, 1, color=hue) for hue in by_hue],
+            labels=[" / ".join(dict.fromkeys(cs)) for cs in by_hue.values()],
+            loc="lower center", ncol=len(by_hue), frameon=False, fontsize=9.5,
+            labelcolor=C["ink2"], bbox_to_anchor=(0.5, -0.06))
 
     _title(ax_ret,
            f"Screen performance -- buy at {entry.replace('_', ' ')}, "

@@ -47,7 +47,7 @@
     },
     "charts": {
         "enabled": true,
-        "near_miss_charts": true,
+        "partial_charts": true,
         "lookback_days": 250,
         "dpi": 120
     },
@@ -55,7 +55,7 @@
         "years": 3,
         "holding_days": [30],
         "entry": "next_open",
-        "include_near_misses": true,
+        "split_by_tier": false,
         "measure_excursions": true,
         "benchmark_ticker": "SPY",
         "cache_path": "backtest_universe_cache.pkl",

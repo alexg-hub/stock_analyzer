@@ -49,8 +49,9 @@ from scanner_common import (
 )
 
 # Every screen the backtest can run, paired with its compute function. The
-# modules also supply required_history() and near_miss_mask() -- the same
-# functions the nightly scan uses, so there is one source of truth per screen.
+# modules also supply required_history(), fires_mask() and partial_mask() --
+# the same functions the nightly scan uses, so there is one source of truth
+# per screen.
 SCREENS = [
     (breakout_scanner, breakout_scanner.compute_signals),
     (sma_pullback, sma_pullback.compute_pullback_signals),
@@ -300,8 +301,9 @@ def parse_args(bt_cfg: dict) -> argparse.Namespace:
                    choices=["next_open", "signal_close"])
     p.add_argument("--screens", default=",".join(bt_cfg.get("screens", [])),
                    help="comma-separated config keys of the screens to run")
-    p.add_argument("--no-near-misses", action="store_true",
-                   help="hits only (default follows config include_near_misses)")
+    p.add_argument("--split-by-tier", action="store_true",
+                   help="measure full and partial setups as separate cohorts "
+                        "(default follows config split_by_tier)")
     p.add_argument("--refresh", action="store_true",
                    help="re-download the universe, ignoring the cache")
     p.add_argument("--no-chart", action="store_true")
@@ -320,7 +322,7 @@ def main() -> int:
 
     horizons = [int(h) for h in args.holding_days.split(",") if h.strip()]
     wanted = [s.strip() for s in args.screens.split(",") if s.strip()]
-    near_ok = bt_cfg.get("include_near_misses", True) and not args.no_near_misses
+    split_tiers = bt_cfg.get("split_by_tier", False) or args.split_by_tier
     excursions = bt_cfg.get("measure_excursions", True)
     benchmark = bt_cfg.get("benchmark_ticker")
 
@@ -373,19 +375,28 @@ def main() -> int:
     masks = {}
     for module, compute, strategy in active:
         signals = compute(data, strategy)
-        hit = signals["signal"].fillna(False)[universe]
-        masks[(module.CONFIG_KEY, "hit")] = hit
-        n_hit = int(hit.loc[start:].sum().sum())
-        line = f"{module.CONFIG_KEY}: {n_hit} hit(s)"
-        if near_ok:
-            # Most screens' second cohort is their production near-miss list;
-            # the pullback screen has none, so it names its own (touch-no-fire).
-            cohort = getattr(module, "NEAR_COHORT", "near")
-            near = module.near_miss_mask(data, signals, strategy)
-            near = near.fillna(False)[universe]
-            masks[(module.CONFIG_KEY, cohort)] = near
-            line += f", {int(near.loc[start:].sum().sum())} {cohort}"
-        print(line + " in the analysis window")
+        # The alert cohort: exactly what the nightly scan would have sent.
+        fires = module.fires_mask(data, signals, strategy).fillna(False)[universe]
+        n_fires = int(fires.loc[start:].sum().sum())
+        if not split_tiers:
+            masks[(module.CONFIG_KEY, "signal")] = fires
+            print(f"{module.CONFIG_KEY}: {n_fires} signal(s) in the analysis window")
+            continue
+
+        # Split the tiers apart for analysis. Note the pullback screen's
+        # partial_mask is NOT part of its fires_mask (it never alerts on
+        # partials), so there it is a control cohort, not a sent signal.
+        full = signals["signal"].fillna(False)[universe]
+        partial = module.partial_mask(data, signals, strategy).fillna(False)[universe]
+        masks[(module.CONFIG_KEY, "full")] = full
+        masks[(module.CONFIG_KEY, "partial")] = partial
+        n_full = int(full.loc[start:].sum().sum())
+        n_partial = int(partial.loc[start:].sum().sum())
+        # When fires == full the screen stays strict, so its partial cohort is
+        # a control group that was never alerted on.
+        note = "" if n_fires > n_full else " (partial never alerted -- control only)"
+        print(f"{module.CONFIG_KEY}: {n_fires} alerted signal(s) = {n_full} full "
+              f"+ {n_partial} partial{note}, in the analysis window")
 
     # -- STEP 3: simulate, per horizon --
     section("STEP 3 -- Trade simulation")

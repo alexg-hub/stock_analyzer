@@ -26,10 +26,11 @@ Optionally (`alert_only_on_cross`), the signal only fires on the day the
 close first crosses the level, so a stock that stays above it does not
 re-alert every night.
 
-Near-misses: a genuine fresh cross above the level *out of a real downtrend*
-(R2 required, like a hit) where one OR two of the remaining confirmations
-{R3 volume, R5 candle, R4 slope when enabled} fail (0 failing = hit; 3+ =
-too far off, dropped).
+The screen alerts on **one list with two tiers**. R1 (above the level, fresh
+cross) and R2 (real prior downtrend) are always mandatory; the remaining
+confirmations {R3 volume, R5 candle, R4 slope when enabled} decide the tier:
+0 failing = `full`, 1 or 2 failing = `partial`, 3+ = too far off, dropped.
+`Setup` says which, `Missing` names every failing test.
 
 Same conventions as the other screens: the SMA includes the current day
 (charting-standard "crossed the 200-day line"); the below-count (R2) and
@@ -134,13 +135,13 @@ def compute_reclaim_signals(data: pd.DataFrame, strategy: dict) -> dict[str, pd.
     }
 
 
-def near_miss_mask(data: pd.DataFrame, signals: dict, strategy: dict) -> pd.DataFrame:
-    """(days, tickers) mask of reclaim near-misses.
+def partial_mask(data: pd.DataFrame, signals: dict, strategy: dict) -> pd.DataFrame:
+    """(days, tickers) mask of *partial* reclaim setups.
 
     A genuine fresh cross above the level *out of a real downtrend* (R1+R2,
-    both mandatory exactly as for a hit) where **one or two** of the remaining
-    confirmations -- R3 volume, R5 candle, and R4 slope when enabled -- fail.
-    Zero failing = a hit; three or more = too far off, dropped.
+    both mandatory exactly as for a full setup) where **one or two** of the
+    remaining confirmations -- R3 volume, R5 candle, and R4 slope when enabled
+    -- fail. Zero failing = a full setup; three or more = too far off, dropped.
 
     Vectorized over every day like the compute_* functions: the nightly scan
     takes `.iloc[-1]`, the universe backtest uses the whole frame.
@@ -157,7 +158,14 @@ def near_miss_mask(data: pd.DataFrame, signals: dict, strategy: dict) -> pd.Data
             & ~signals["signal"].fillna(False))
 
 
-def cross_miss_reasons(row: pd.Series, strategy: dict) -> list[str]:
+def fires_mask(data: pd.DataFrame, signals: dict, strategy: dict) -> pd.DataFrame:
+    """(days, tickers) mask of every day this screen alerts on -- the full
+    setup (all confirmations) or a partial one (1-2 failing). One list, two
+    tiers; `Setup` on the hits frame says which."""
+    return signals["signal"].fillna(False) | partial_mask(data, signals, strategy)
+
+
+def missing_reasons(row: pd.Series, strategy: dict) -> list[str]:
     """Every confirmation test a fresh-cross day failed, in condition order.
 
     `row` is a build_calc_table row (percent columns already x100). Returns
@@ -187,20 +195,18 @@ def cross_miss_reasons(row: pd.Series, strategy: dict) -> list[str]:
     return reasons
 
 
-def cross_miss_reason(row: pd.Series, strategy: dict) -> str:
-    """Join every failing confirmation into one string (see cross_miss_reasons)."""
-    return "; ".join(cross_miss_reasons(row, strategy))
+def missing_reason(row: pd.Series, strategy: dict) -> str:
+    """Join every failing confirmation into one string (see missing_reasons)."""
+    return "; ".join(missing_reasons(row, strategy))
 
 
-def find_reclaims(data: pd.DataFrame, strategy: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
+def find_reclaims(data: pd.DataFrame, strategy: dict) -> pd.DataFrame:
     """Screen the whole universe on the most recent trading day.
 
-    Returns two ticker-indexed DataFrames:
-      * hits -- tickers that reclaimed their SMA today after a long stretch
-        below it (all conditions true);
-      * near-misses -- tickers that freshly crossed the level today out of a
-        real downtrend but had one or two of the remaining confirmations
-        (volume, candle, slope) fail, with the failure(s) explained.
+    Returns one ticker-indexed DataFrame of every ticker that freshly crossed
+    above its SMA today out of a long downtrend: `Setup` is `full` when every
+    confirmation held and `partial` when one or two failed, with the
+    failure(s) named in `Missing`. Full setups sort first.
     """
     needed = required_history(strategy)
     if len(data) <= needed:
@@ -226,35 +232,38 @@ def find_reclaims(data: pd.DataFrame, strategy: dict) -> tuple[pd.DataFrame, pd.
             index=pd.Index(tickers, name="Ticker"),
         )
 
-    signal_today = last["signal"].fillna(False)
-    hits = day_stats(signal_today[signal_today].index.tolist())
-
-    # Near-misses: a genuine fresh cross OUT OF A DOWNTREND today with 1 or 2
-    # confirmations failing (the mask is computed for every day; the scan only
-    # needs the last one).
-    near_mask = near_miss_mask(data, signals, strategy).iloc[-1]
-    near = day_stats(near_mask[near_mask].index.tolist())
-    if not near.empty:
-        near["Reason"] = [
-            cross_miss_reason(
+    # One list: fresh crosses out of a downtrend, whether every confirmation
+    # held (full) or one or two failed (partial). Both masks are computed for
+    # every day; the scan only needs the last one.
+    full_today = last["signal"].fillna(False)
+    fires = fires_mask(data, signals, strategy).iloc[-1]
+    hits = day_stats(fires[fires].index.tolist())
+    if not hits.empty:
+        hits["Setup"] = ["full" if full_today.get(t, False) else "partial"
+                         for t in hits.index]
+        hits["Missing"] = [
+            "" if hits.at[ticker, "Setup"] == "full" else missing_reason(
                 pd.Series({
                     "R2_TimeBelow": last["is_downtrend"].get(ticker, False),
                     "R3_VolumeSurge": last["is_volume_surge"].get(ticker, False),
                     "R5_LongGreen": last["is_long_green_candle"].get(ticker, False),
-                    "BelowPct": near.at[ticker, "Below %"],
-                    "VolRatio": near.at[ticker, "Vol Ratio"],
-                    "SmaSlopePct": near.at[ticker, "SMA Slope %"],
-                    "BodyPct": near.at[ticker, "Body %"],
+                    "BelowPct": hits.at[ticker, "Below %"],
+                    "VolRatio": hits.at[ticker, "Vol Ratio"],
+                    "SmaSlopePct": hits.at[ticker, "SMA Slope %"],
+                    "BodyPct": hits.at[ticker, "Body %"],
                 }),
                 strategy,
             )
-            for ticker in near.index
+            for ticker in hits.index
         ]
+        # "full" < "partial", so ascending puts complete setups first.
+        hits = hits.sort_values("Setup", kind="stable")
 
+    n_full = int((hits["Setup"] == "full").sum()) if not hits.empty else 0
     scan_date = data.index[-1].date()
-    print(f"Scan date: {scan_date} -- {len(hits)} SMA-reclaim setup(s), "
-          f"{len(near)} near-miss(es).")
-    return hits, near
+    print(f"Scan date: {scan_date} -- {len(hits)} SMA-reclaim signal(s) "
+          f"({n_full} full, {len(hits) - n_full} partial).")
+    return hits
 
 
 # --------------------------------------------------------------------------
@@ -262,18 +271,16 @@ def find_reclaims(data: pd.DataFrame, strategy: dict) -> tuple[pd.DataFrame, pd.
 # --------------------------------------------------------------------------
 
 def scan(data: pd.DataFrame, strategy: dict) -> ScanResult:
-    hits, near = find_reclaims(data, strategy)
     sma_days = strategy["sma_days"]
     return ScanResult(
         title=f"Reclaim of {sma_days}-day SMA after downtrend",
-        hits=hits,
-        near=near,
+        hits=find_reclaims(data, strategy),
         strategy=strategy,
     )
 
 
 def describe_hit(row, strategy: dict) -> str:
-    """Embed-card description of one confirmed reclaim setup."""
+    """Embed-card description of one reclaim signal."""
     return (f"Close {fmt_value(row['Close'])} crossed above the "
             f"{strategy['sma_days']}d SMA {fmt_value(row['SMA'])} "
             f"({row['Dist %']:+.1f}%), below SMA {row['Below %']:.0f}% of last "

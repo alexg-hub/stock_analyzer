@@ -3,9 +3,14 @@
 Nightly scans of all S&P 500 stocks (via Windows Task Scheduler) with results
 sent to Discord via a webhook — a short summary line per screen, then one
 **embed card per ticker**: colored side-bar (orange = breakout, blue =
-pullback, green = reclaim, gray = near-miss), a title with the ticker and
-company name, the signal description, a fundamentals field grid, and the
-ticker's chart rendered inside the card (for hits and near-misses).
+pullback, green = reclaim, gray = a *partial* setup), a title with the ticker
+and company name, the signal description, a fundamentals field grid, and the
+ticker's chart rendered inside the card.
+
+Each screen reports **one signal list with two tiers** (there is no separate
+"near-miss" list): `Setup` is `full` when every condition held and `partial`
+when the setup is incomplete, with `Missing` naming the failing test. Full
+setups are listed first. See [Signal tiers](#signal-tiers).
 
 Current screens:
 
@@ -51,11 +56,11 @@ names refer to the `breakout_strategy` section of `config.json`):
    closes strongly (green, with a body of at least `min_candle_body_pct`)
    instead of gapping up and fading to a weak or red close.
 
-The alert also lists **near-miss candidates** — tickers that passed exactly
-three of the four conditions — with the failed condition explained. Near-misses
-that failed only the breakout condition are reported only when the close is
-within `near_miss_max_gap_pct` of the required level, so routine volume spikes
-deep inside a range don't flood the alert.
+A ticker passing all four is a `full` setup; passing exactly three is a
+**`partial`** setup, alerted in the same list with the failed condition named
+in `Missing`. When the *breakout* condition is the one that failed, the partial
+only counts if the close is within `near_miss_max_gap_pct` of the required
+level, so routine volume spikes deep inside a range don't flood the alert.
 
 ## Screen 2: pullback to a rising SMA
 
@@ -114,20 +119,43 @@ section):
    was not yet above the level, so a stock that stays above it doesn't
    re-alert every night.
 
-The alert also lists **near-miss candidates** — tickers that genuinely
-crossed above the level today (a fresh cross) *out of a real downtrend*
-(the downtrend is required, same as for a hit) but had **one or two** of the
-remaining confirmations (volume, green candle, and the slope floor when
-enabled) fail, with the failure(s) explained. A cross that wasn't from a
-long downtrend, or that misses on too many confirmations, is dropped.
+The fresh cross out of a real downtrend is always mandatory; the remaining
+confirmations (volume, green candle, and the slope floor when enabled) set the
+tier — none failing is a `full` setup, **one or two** failing is a `partial`
+one (failures named in `Missing`). A cross that wasn't from a long downtrend, or
+that misses on three or more confirmations, is dropped entirely.
 
 First crosses of a long-term SMA are whipsaw-prone by nature — expect some
 signals to fail back below the line; this is a watchlist alert, not an
 entry system.
 
+## Signal tiers
+
+There is one signal list per screen. `Setup` grades it:
+
+| tier | breakout | pullback | reclaim |
+|---|---|---|---|
+| `full` | all 4 conditions | all conditions (the only tier) | every confirmation held |
+| `partial` | exactly 3 of 4 (+ proximity guard when the breakout leg failed) | — never; this screen stays strict | fresh cross out of a downtrend, 1–2 confirmations failing |
+
+Both tiers are alerted together, sorted full-first, and both are carried into
+`latest_hits.json` for the deep-dive. A partial card uses the grey side bar and
+appends a **Missing:** line naming what failed.
+
+Why: the universe backtest measured the tiers separately and the *partial*
+breakout setups outperformed the full ones (+3.10% vs +0.67% over 30 days,
+n=2418 vs 201), so suppressing them was discarding the better cohort. Splitting
+them back apart for analysis is still one flag away
+(`python backtest_universe.py --split-by-tier`).
+
+Consequence worth knowing: the `⭐` quality badge used to be hits-only, so a
+near-miss could never earn it. Now that everything is one list, a **partial
+setup can carry the badge** — it grades fundamentals, which are independent of
+how complete the technical setup is.
+
 ## Fundamentals
 
-Every hit and near-miss ticker gets a fundamentals field grid on its embed
+Every signalling ticker gets a fundamentals field grid on its embed
 card, from two config-driven layers (`fundamentals` in `config.json`):
 
 - **Snapshot fields** from Yahoo `info` (`fields` map): currently P/E, PEG,
@@ -183,7 +211,7 @@ python backtest_universe.py       # universe-wide profit backtest (all screens)
 
 Each backtest runs the exact production condition math (the shared
 `compute_*` functions) over a historical window for one ticker, with
-step-by-step logging of every calculation, near-miss analysis, a per-day
+step-by-step logging of every calculation, partial-setup analysis, a per-day
 calculation table (CSV), and a chart (PNG):
 
 ```
@@ -216,10 +244,11 @@ It adds no condition math — every screen's `compute_*` already returns
 `(days, tickers)` frames, so the whole `signal` frame is masked against a
 vectorized forward-return matrix.
 
-Per screen it measures two cohorts: **hits** and the screen's non-firing
-comparison set (the production **near-miss** list for breakout/reclaim;
-**touch-no-fire** days for pullback, which has no production near-miss list).
-Each is compared against two baselines: **random entry** (the same
+Per screen it measures **one cohort — every signal the scan would have sent**
+(`fires_mask`, i.e. both tiers). `--split-by-tier` breaks it into `full` and
+`partial` instead; for the pullback screen, whose `partial` set is never
+alerted, that tier is a pure control group.
+Each cohort is compared against two baselines: **random entry** (the same
 forward-return matrix over *all* stock-days — the bar a screen must clear) and
 **SPY buy-and-hold**. Outputs: a console stats table + per-signal-year
 breakdown, `backtest_universe_trades.csv` (every trade, with `status`
@@ -259,7 +288,7 @@ the run header):
 | `breakout_strategy.min_candle_body_pct` | `0.01` | Breakout day's Close must exceed its Open by at least this fraction (green candle with a body ≥ 1%); `0.0` = any green candle |
 | `breakout_strategy.volume_sma_days` | `30` | Lookback for the average-volume baseline |
 | `breakout_strategy.volume_surge_multiplier` | `1.1` | Required volume vs. that baseline |
-| `breakout_strategy.near_miss_max_gap_pct` | `0.05` | Report breakout-condition near-misses only if the close is within this fraction of the required level |
+| `breakout_strategy.near_miss_max_gap_pct` | `0.05` | A partial setup whose *breakout* leg failed only counts if the close is within this fraction of the required level |
 | `pullback_strategy.enabled` | `true` | Run the SMA-pullback screen |
 | `pullback_strategy.sma_days` | `150` | SMA length (trading days) |
 | `pullback_strategy.touch_band_pct` | `0.02` | "Touch" = close within this fraction of the SMA |
@@ -281,21 +310,21 @@ the run header):
 | `reclaim_strategy.sma_slope_lookback_days` | `63` | Lookback for the optional SMA-slope floor |
 | `reclaim_strategy.min_sma_slope_pct` | `null` | Optional slope floor (e.g. `-0.02`); `null` = off |
 | `reclaim_strategy.alert_only_on_cross` | `true` | Alert only on the day the close first crosses the level |
-| `charts.enabled` | `true` | Attach a chart image per hit to the Discord alert |
-| `charts.near_miss_charts` | `true` | Also attach a chart to near-miss cards (set `false` for hits-only charts) |
+| `charts.enabled` | `true` | Attach a chart image per signal to the Discord alert |
+| `charts.partial_charts` | `true` | Also chart `partial` setups (set `false` to chart full setups only) |
 | `charts.lookback_days` | `250` | Trading days shown in alert charts |
 | `charts.dpi` | `120` | Alert-chart resolution |
 | `backtest.years` | `3` | Length of the analysis window; the download adds the warm-up the longest screen lookback needs |
 | `backtest.holding_days` | `[30]` | Holding periods in **trading** days, held after the entry day; a list runs several horizons in one pass |
 | `backtest.entry` | `next_open` | `next_open` (buy the open after the signal) or `signal_close` (buy the trigger close) |
-| `backtest.include_near_misses` | `true` | Also measure each screen's non-firing cohort (near-miss / touch-no-fire) |
+| `backtest.split_by_tier` | `false` | Measure `full` and `partial` setups as separate cohorts instead of one combined signal cohort |
 | `backtest.measure_excursions` | `true` | Compute MFE/MAE (best/worst excursion while the trade was open) |
 | `backtest.benchmark_ticker` | `SPY` | Buy-and-hold benchmark, downloaded alongside the universe |
 | `backtest.cache_path` | `backtest_universe_cache.pkl` | Cached price panel (gitignored); `--refresh` re-downloads |
 | `backtest.cache_max_age_days` | `1` | Reuse the cache only while it is younger than this |
 | `backtest.screens` | all three | Config keys of the screens to include |
 | `backtest.output.*` | — | Trades CSV, summary CSV, chart path + DPI (chart names get an `_h<N>` suffix when several horizons run) |
-| `fundamentals.enabled` | `true` | Fetch fundamentals for hits and near-misses |
+| `fundamentals.enabled` | `true` | Fetch fundamentals for every signalling ticker |
 | `fundamentals.fields` | 6 fields | Yahoo `info` key → display label; add/remove entries to change what the alert shows |
 | `fundamentals.percent_fields` | `revenueGrowth`, `payoutRatio` | Fields Yahoo returns as fractions, converted to % (note: `dividendYield` is *not* here — Yahoo already returns it as a %) |
 | `fundamentals.statements.enabled` | `true` | Compute per-year metrics from the annual statements |

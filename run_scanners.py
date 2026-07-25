@@ -60,26 +60,22 @@ def main() -> int:
             continue
         results.append((module, module.scan(data, strategy)))
 
-    # -- one fundamentals pass for every hit/near ticker of every screen --
+    # -- one fundamentals pass for every signalling ticker of every screen --
     fund_cfg = cfg["fundamentals"]
     wanted = []
     for _, result in results:
-        for ticker in list(result.hits.index) + list(result.near.index):
+        for ticker in result.hits.index:
             if ticker not in wanted:
                 wanted.append(ticker)
     if fund_cfg["enabled"] and wanted:
-        print("Fetching fundamentals for hit + near-miss tickers...")
+        print("Fetching fundamentals for signalling tickers...")
         fundamentals = fetch_fundamentals(wanted, fund_cfg)
         for _, result in results:
             result.hits = result.hits.join(fundamentals)
-            if not result.near.empty:
-                result.near = result.near.join(fundamentals)
 
     for _, result in results:
         if not result.hits.empty:
             print(result.hits.to_string())
-        if not result.near.empty:
-            print(result.near.to_string())
 
     # -- hand-off for the on-demand deep-dive: always written (even when
     #    empty) so an interactive session sees exactly what fired tonight --
@@ -89,23 +85,23 @@ def main() -> int:
         hits_path = Path(__file__).with_name(str(hits_path))
     write_latest_hits(hits_path, scan_date, results)
 
-    all_empty = all(r.hits.empty and r.near.empty for _, r in results)
+    all_empty = all(r.hits.empty for _, r in results)
     if all_empty and not cfg["discord"]["send_message_when_no_breakouts"]:
         print("Nothing found by any screen and empty alerts are disabled -- done.")
         return 0
 
-    # -- one chart per hit (and per near-miss unless disabled), rendered
-    #    first so its embed can reference it --
+    # -- one chart per signal (partial setups included unless disabled),
+    #    rendered first so its embed can reference it --
     chart_cfg = cfg.get("charts", {})
     chart_files = {}  # module CONFIG_KEY -> {ticker: Path}
     if chart_cfg.get("enabled", True):
         chart_dir = Path(tempfile.mkdtemp(prefix="scanner_charts_"))
         for module, result in results:
             per_screen = {}
-            tickers = list(result.hits.index)
-            if chart_cfg.get("near_miss_charts", True):
-                tickers += list(result.near.index)
-            for ticker in tickers:
+            hits = result.hits
+            if not chart_cfg.get("partial_charts", True) and "Setup" in hits:
+                hits = hits[hits["Setup"] != "partial"]
+            for ticker in hits.index:
                 out_path = chart_dir / f"{module.CONFIG_KEY}_{ticker}.png"
                 try:
                     module.plot_hit(data, ticker, result.strategy, chart_cfg, out_path)
@@ -118,13 +114,14 @@ def main() -> int:
     summary = [f"**S&P 500 Scan -- {scan_date}**"]
     embeds, image_paths = [], []
     for module, result in results:
-        if result.hits.empty and result.near.empty:
+        if result.hits.empty:
             summary.append(f"{result.title}: nothing today.")
             continue
-        counts = [f"{len(result.hits)} hit(s)"]
-        if not result.near.empty:
-            counts.append(f"{len(result.near)} near-miss(es)")
-        summary.append(f"{result.title}: " + ", ".join(counts))
+        n_full = int((result.hits["Setup"] == "full").sum())
+        n_partial = len(result.hits) - n_full
+        counts = f"{len(result.hits)} signal(s) ({n_full} full"
+        counts += f", {n_partial} partial)" if n_partial else ")"
+        summary.append(f"{result.title}: {counts}")
         per_screen = chart_files.get(module.CONFIG_KEY, {})
         embeds += build_embeds(module, result, fund_cfg, per_screen)
         image_paths += per_screen.values()

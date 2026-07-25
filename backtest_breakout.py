@@ -8,7 +8,7 @@ setup.
 
 Outputs:
   * console log of every step (data listing, thresholds, per-day conditions,
-    signal days, near-misses)
+    signal days, partial setups)
   * backtest_<ticker>.csv  -- full per-day calculation table
   * backtest_<ticker>.png  -- price/volume chart of the consolidation + breakout
 
@@ -24,7 +24,7 @@ from pathlib import Path
 import pandas as pd
 
 import charts
-from breakout_scanner import build_calc_table, compute_signals, near_miss_reason
+from breakout_scanner import build_calc_table, compute_signals, missing_reason
 from scanner_common import download_history, load_config
 
 
@@ -89,7 +89,7 @@ def log_run(table: pd.DataFrame, strategy: dict, ticker: str) -> None:
             print(f"    Candle Open {row['Open']:.2f} -> Close {row['Close']:.2f} = "
                   f"body {row['BodyPct']:+.2f}% (needs >= {min_body:.1%}, green)")
 
-    section("STEP 5 -- Near-misses (exactly 3 of 4 conditions true)")
+    section("STEP 5 -- Partial setups (exactly 3 of 4 conditions true)")
     conds = table[["C1_Consolidating", "C2_Breakout", "C3_VolumeSurge",
                    "C4_LongGreen"]].fillna(False)
     near = table[(conds.sum(axis=1) == 3) & ~table["SIGNAL"].fillna(False)]
@@ -97,9 +97,9 @@ def log_run(table: pd.DataFrame, strategy: dict, ticker: str) -> None:
         print("None.")
     else:
         for date, row in near.iterrows():
-            reason = near_miss_reason(row["Close"], row["PriorHigh"],
-                                      row["RangePct"] / 100, row["VolRatio"],
-                                      row["BodyPct"] / 100, strategy)
+            reason = missing_reason(row["Close"], row["PriorHigh"],
+                                    row["RangePct"] / 100, row["VolRatio"],
+                                    row["BodyPct"] / 100, strategy)
             print(f"{date.date()}  failed -> {reason}")
 
 

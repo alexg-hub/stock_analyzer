@@ -30,8 +30,9 @@ DISCORD_CHAR_LIMIT = 1900
 DISCORD_MAX_EMBEDS = 10
 DISCORD_EMBED_CHAR_BUDGET = 5500
 
-# Embed side-bar color for near-miss cards (screens define their own).
-NEAR_MISS_COLOR = 0x898781
+# Embed side-bar color for a *partial* setup's card (a full setup gets the
+# screen's own EMBED_COLOR) -- one card type, tier visible at a glance.
+PARTIAL_COLOR = 0x898781
 
 # Reserved column (added by fetch_fundamentals) holding the company name for
 # the embed titles; not a config-driven fundamentals field, so it never
@@ -56,13 +57,13 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
 class ScanResult:
     """Output of one screen over the whole universe on the scan day.
 
-    `hits`/`near` are ticker-indexed DataFrames (near may be empty for
-    screens without a near-miss concept). `strategy` is the config section
-    the screen ran with, kept here so formatting/plotting stay config-driven.
+    `hits` is a ticker-indexed DataFrame of every signal the screen fired --
+    one list, with a `Setup` column of `full`/`partial` and `Missing` naming
+    the failing test on a partial. `strategy` is the config section the screen
+    ran with, kept here so formatting/plotting stay config-driven.
     """
     title: str
     hits: pd.DataFrame
-    near: pd.DataFrame = field(default_factory=pd.DataFrame)
     strategy: dict = field(default_factory=dict)
 
 
@@ -258,7 +259,7 @@ def fetch_fundamentals(tickers: list[str], fund_cfg: dict) -> pd.DataFrame:
       * `statements` -- per-year metrics computed from the annual income
         statement / cash flow / balance sheet (FCF, margins, ROE, ROIC).
 
-    Only runs on the (small) list of hit/near-miss tickers, so a plain
+    Only runs on the (small) list of signalling tickers, so a plain
     loop is fine here.
     """
     fields = fund_cfg["fields"]
@@ -402,10 +403,12 @@ def quality_check(row, fund_cfg: dict) -> bool:
 
 def build_embeds(module, result: ScanResult, fund_cfg: dict,
                  chart_files: dict[str, Path] = {}) -> list[dict]:
-    """One embed card per hit (chart image bound in) and per near-miss.
+    """One embed card per signal, with its chart image bound in.
 
     `module` supplies the screen-specific pieces of the registry contract:
-    `EMBED_COLOR` and `describe_hit(row, strategy)`.
+    `EMBED_COLOR` and `describe_hit(row, strategy)`. A `partial` setup keeps
+    the same card shape but gets the grey `PARTIAL_COLOR` side bar and its
+    `Missing` text appended, so one list still shows the tier at a glance.
     """
     badge = fund_cfg.get("quality", {}).get("badge", "")
 
@@ -422,21 +425,18 @@ def build_embeds(module, result: ScanResult, fund_cfg: dict,
     embeds = []
     for ticker, row in result.hits.iterrows():
         prefix = f"{badge} " if badge and quality_check(row, fund_cfg) else ""
+        partial = row.get("Setup") == "partial"
+        title = f"{prefix}{label(ticker, row)} -- {result.title}"
+        if partial:
+            title += " (partial)"
+        description = module.describe_hit(row, result.strategy)
+        missing = row.get("Missing")
+        if partial and isinstance(missing, str) and missing:
+            description += f"\n**Missing:** {missing}"
         embed = {
-            "title": f"{prefix}{label(ticker, row)} -- {result.title}",
-            "description": module.describe_hit(row, result.strategy),
-            "color": module.EMBED_COLOR,
-            "fields": fundamentals_fields(row, fund_cfg),
-        }
-        if ticker in chart_files:
-            embed["image"] = {"url": f"attachment://{chart_files[ticker].name}"}
-        embeds.append(embed)
-    for ticker, row in result.near.iterrows():
-        prefix = f"{badge} " if badge and quality_check(row, fund_cfg) else ""
-        embed = {
-            "title": f"{prefix}{label(ticker, row)} -- near miss ({result.title})",
-            "description": row["Reason"],
-            "color": NEAR_MISS_COLOR,
+            "title": title,
+            "description": description,
+            "color": PARTIAL_COLOR if partial else module.EMBED_COLOR,
             "fields": fundamentals_fields(row, fund_cfg),
         }
         if ticker in chart_files:
@@ -559,11 +559,12 @@ def _json_safe(obj):
 
 
 def write_latest_hits(path: Path, scan_date, results) -> None:
-    """Serialize every screen's hit/near rows to `path` for the deep-dive.
+    """Serialize every screen's signal rows to `path` for the deep-dive.
 
     `results` is the list of (module, ScanResult) the nightly run already
-    holds. Rows are whatever each screen put in its hits/near frame (day
-    stats + any joined fundamentals), made JSON-safe.
+    holds. Rows are whatever each screen put in its hits frame (day stats,
+    the Setup/Missing tier columns, and any joined fundamentals), made
+    JSON-safe.
     """
     payload = {
         "scan_date": str(scan_date),
@@ -577,12 +578,10 @@ def write_latest_hits(path: Path, scan_date, results) -> None:
             "strategy": _json_safe(result.strategy),
             "hits": {str(t): _json_safe(row.to_dict())
                      for t, row in result.hits.iterrows()},
-            "near": {str(t): _json_safe(row.to_dict())
-                     for t, row in result.near.iterrows()},
         })
     Path(path).write_text(json.dumps(payload, indent=2, ensure_ascii=False),
                           encoding="utf-8")
-    n = sum(len(s["hits"]) + len(s["near"]) for s in payload["screens"])
+    n = sum(len(s["hits"]) for s in payload["screens"])
     print(f"Wrote {path} ({n} ticker row(s) across {len(payload['screens'])} screen(s)).")
 
 
