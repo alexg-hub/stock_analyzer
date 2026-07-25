@@ -70,9 +70,32 @@ def section(title: str) -> None:
 # Data: one download, cached to disk
 # --------------------------------------------------------------------------
 
-def _cache_path(bt_cfg: dict) -> Path:
+def cache_path(bt_cfg: dict) -> Path:
+    """Where the downloaded price panel is cached (inside `output/` unless the
+    config gives an absolute path). Public because `tune_screen.py` reads the
+    same cache."""
     path = Path(bt_cfg.get("cache_path", "backtest_universe_cache.pkl"))
     return path if path.is_absolute() else output_dir() / path
+
+
+def cached_panel(bt_cfg: dict) -> pd.DataFrame:
+    """The cached panel, or a clear error -- never a silent 500-ticker download.
+
+    For tools that only ever want to reason over history already on disk
+    (`tune_screen.py`), so a missing cache fails loudly instead of quietly
+    costing minutes.
+    """
+    path = cache_path(bt_cfg)
+    if not path.exists():
+        raise SystemExit(
+            f"No cached price panel at {path}.\n"
+            f"Run `python backtest_universe.py` (optionally with --years N) "
+            f"once to download and cache it.")
+    panel = pd.read_pickle(path)
+    print(f"Using cached panel {path.name} ({panel.shape[1] // 6} tickers, "
+          f"{len(panel)} days, {panel.index[0].date()} .. "
+          f"{panel.index[-1].date()})")
+    return panel
 
 
 def load_panel(bt_cfg: dict, cfg: dict, years: int, warmup_days: int,
@@ -87,7 +110,7 @@ def load_panel(bt_cfg: dict, cfg: dict, years: int, warmup_days: int,
     # longest rolling window needs (~21 trading days per month).
     period_years = years + math.ceil(warmup_months(warmup_days) / 12)
     period = f"{period_years}y"
-    path = _cache_path(bt_cfg)
+    path = cache_path(bt_cfg)
     max_age_days = bt_cfg.get("cache_max_age_days", 1)
 
     if path.exists() and not refresh:

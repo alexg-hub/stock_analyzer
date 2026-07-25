@@ -5,16 +5,26 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 A set of S&P 500 screens that run nightly on this Windows machine via Task
-Scheduler and push one combined alert (text + per-hit chart images) to a
-Discord channel, plus single-ticker historical backtesters for validating
-each screen. No test suite; validation is done by running the backtests
-against known cases (JNJ 2025 breakout, MSFT 2024 SMA pullbacks, META 2023
-SMA reclaim).
+Scheduler and push one combined alert (text + per-signal chart images) to a
+Discord channel, plus historical tooling: single-ticker backtesters, a
+universe-wide profit backtest, and a threshold tuner.
+
+Validation is `python tests/run_all.py` — plain scripts, no test dependency,
+asserting **invariants** rather than recorded output (config gets retuned
+constantly, so snapshot tests would be stale within a session). The documented
+known cases (JNJ 2025 breakout, MSFT 2024 SMA pullbacks, META 2023-02-02 SMA
+reclaim) live in `tests/test_path_equivalence.py`, which needs the network and
+so runs only with `--network`.
 
 ## Commands
 
 ```powershell
 pip install -r requirements.txt
+
+# Tests. Offline + cache-backed by default; exit 0 pass / 1 fail / 2 skip.
+# Never downloads and never sends to Discord.
+python tests/run_all.py
+python tests/run_all.py --network      # adds the Yahoo round-trip test
 
 # Full production scan (all screens). WARNING: sends a real Discord message
 # to the user's channel (config.json contains a live webhook URL). Don't run
@@ -34,6 +44,13 @@ python backtest_universe.py
 python backtest_universe.py --entry-delay 0 --holding-days 30   # one cell
 python backtest_universe.py --screens breakout_strategy --entry signal_close
 python backtest_universe.py --split-by-tier                     # full vs partial
+
+# Threshold tuning for ONE screen, scored against the random-entry baseline and
+# against protected cases that must keep firing. Reads the cached panel only --
+# run backtest_universe.py once first. No Discord.
+python tune_screen.py sensitivity reclaim_strategy
+python tune_screen.py grid breakout_strategy --csv
+python tune_screen.py delay reclaim_strategy
 ```
 
 To test alert formatting/sending without spamming the channel, monkeypatch
@@ -121,6 +138,31 @@ real send.
   embed-char per-message limits) and **`charts.py`**
   (validated palette + the per-screen chart builders used by both the alert
   and the backtests).
+- **`tests/` asserts invariants, never snapshots.** Anything comparing against
+  recorded counts goes stale the moment the user retunes `config.json`, which is
+  constantly — so a check has to hold at *any* thresholds (e.g. "`fires_mask` is
+  `signal` or exactly `signal | partial`", not "breakout fires 2709 times"). Test
+  fixtures come from the **cached** panel via `_harness.cached_panel_or_skip()`
+  and a `busiest_day()` found from the data, so no test downloads, hardcodes a
+  date, or sends to Discord. Exit codes are the interface: 0 pass, 1 fail,
+  **2 skip** (a missing cache is a skip with instructions, not a failure).
+  Add new checks to the existing file that owns that concern rather than making
+  another script; `run_all.py` lists them in dependency order.
+- **`tune_screen.py` is the threshold tuner** — sweeps one screen's parameters
+  (`sensitivity` one at a time / `grid` crossing 2-3 / `delay` wait×hold) over
+  the **cached** panel via `backtest_universe.cached_panel()`, which raises
+  rather than silently re-downloading 500 tickers. It reuses the production
+  `compute_*` / `fires_mask` / `partial_mask` and `backtest_universe`'s
+  `forward_trades` / `cohort_values` / `stats_from` — never reimplement either.
+  **The `protected` column is the point**: `tuning.protected_cases` names setups
+  that must keep firing (META 2023-02-02 etc.) and each candidate is graded
+  `FULL`/`partial`/`MISSED`, because a config that scores well by dropping the
+  wanted setups is not an improvement. Ranges, protected cases and grid axes all
+  live in `config.json` → `tuning`; adding a value is a config edit, never a code
+  edit. Measured so far: reclaim is **untunable** (all candidates below
+  baseline, every tightening hurts) while breakout **does** respond
+  (`breakout_multiplier` 1.01→1.02 lifts excess +0.62→+1.33 but demotes the JNJ
+  protected case).
 - **Every generated file goes to `output/`** via
   `scanner_common.output_dir()` — both logs, `latest_hits.json`, the cached
   price panel, and all backtest tables/charts. The project root holds only

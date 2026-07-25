@@ -36,7 +36,7 @@
         "enabled": true,
         "sma_days": 200,
         "below_lookback_days": 200,
-        "min_days_below_pct": 0.9,
+        "min_days_below_pct": 0.8,
         "cross_margin_pct": 0.01,
         "min_candle_body_pct": 0.0,
         "min_day_gain_pct": null,
@@ -70,6 +70,55 @@
             "chart_path": "backtest_universe.png",
             "grid_chart_path": "backtest_universe_grid.png",
             "chart_dpi": 120
+        }
+    },
+    "tuning": {
+        "years": 5,
+        "holding_days": [30, 60],
+        "protected_cases": [
+            {"screen": "reclaim_strategy", "ticker": "META", "date": "2023-02-02",
+             "note": "Stage-2 turn after the 2022 collapse; +23.3% day, 2.9% body"},
+            {"screen": "breakout_strategy", "ticker": "JNJ", "date": "2025-09-30",
+             "note": "the original breakout validation case"},
+            {"screen": "pullback_strategy", "ticker": "MSFT", "date": "2024-04-30",
+             "note": "the original pullback validation case"}
+        ],
+        "sweeps": {
+            "breakout_strategy": {
+                "consolidation_window_days": [126, 252, 312],
+                "max_consolidation_range_pct": [0.2, 0.3, 0.38, 0.5],
+                "breakout_multiplier": [1.0, 1.005, 1.01, 1.02],
+                "min_candle_body_pct": [0.0, 0.005, 0.01, 0.02],
+                "volume_surge_multiplier": [1.0, 1.1, 1.3, 1.5],
+                "near_miss_max_gap_pct": [0.005, 0.01, 0.03, 0.05]
+            },
+            "pullback_strategy": {
+                "sma_days": [100, 150, 200],
+                "touch_band_pct": [0.01, 0.02, 0.03],
+                "min_days_above_sma_pct": [0.75, 0.85, 0.9],
+                "require_reversal_candle": [true, false],
+                "max_candle_body_pct": [0.005, 0.01, 0.02],
+                "min_candle_range_pct": [0.02, 0.03, 0.04]
+            },
+            "reclaim_strategy": {
+                "min_days_below_pct": [0.6, 0.7, 0.8, 0.9],
+                "below_lookback_days": [100, 150, 200, 250],
+                "cross_margin_pct": [0.005, 0.01, 0.02, 0.025],
+                "min_candle_body_pct": [0.0, 0.01, 0.02, 0.03],
+                "min_day_gain_pct": [null, 0.03, 0.05],
+                "volume_surge_multiplier": [1.0, 1.2, 1.5],
+                "sma_slope_lookback_days": [21, 30, 63],
+                "min_sma_slope_pct": [null, -0.2, -0.15, -0.1, -0.05]
+            }
+        },
+        "grid": {
+            "reclaim_strategy": ["min_sma_slope_pct", "min_candle_body_pct",
+                                 "cross_margin_pct"],
+            "breakout_strategy": ["max_consolidation_range_pct",
+                                  "min_candle_body_pct",
+                                  "volume_surge_multiplier"],
+            "pullback_strategy": ["touch_band_pct", "min_days_above_sma_pct",
+                                  "require_reversal_candle"]
         }
     },
     "fundamentals": {

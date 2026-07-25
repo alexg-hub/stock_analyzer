@@ -33,6 +33,8 @@ Current screens:
 | `charts.py` | Shared chart rendering (palette + per-screen chart builders) |
 | `backtest_breakout.py` / `backtest_pullback.py` / `backtest_reclaim.py` | Single-ticker historical validators |
 | `backtest_universe.py` | Universe-wide profit backtest: every screen × all history, buy the trigger / sell N days later |
+| `tune_screen.py` | Parameter tuning: sweep one screen's thresholds, scored against the baseline **and** against cases that must keep firing |
+| `tests/` | Invariant test suite + `run_all.py` runner (no test dependency; plain scripts) |
 
 Adding a new scanner = new module exposing `CONFIG_KEY`, `scan()`,
 `EMBED_COLOR` + `describe_hit()`, `plot_hit()` + one entry in
@@ -213,6 +215,8 @@ python backtest_breakout.py       # historical validation, breakout screen
 python backtest_pullback.py       # historical validation, pullback screen
 python backtest_reclaim.py        # historical validation, reclaim screen
 python backtest_universe.py       # universe-wide profit backtest (all screens)
+python tune_screen.py sensitivity reclaim_strategy   # which thresholds matter?
+python tests/run_all.py                              # the test suite
 ```
 
 ### Backtests
@@ -326,6 +330,70 @@ the run header):
   per-trade statistics are *not* independent samples (`distinct_dates` shows
   how concentrated a cohort is). Don't read a t-statistic off them.
 
+## Tests (`tests/`)
+
+```
+python tests/run_all.py              # offline + cache-backed tests
+python tests/run_all.py --network    # also the Yahoo round-trip test
+python tests/test_forward_trades.py  # or run one directly
+```
+
+Plain scripts, no test dependency — each prints `OK`/`FAIL` per check and exits
+`0` pass / `1` fail / `2` skipped, which is how the runner classifies them.
+
+| file | needs | asserts |
+|---|---|---|
+| `test_forward_trades.py` | nothing | Trade arithmetic on a synthetic panel: entry/exit offsets for both conventions and any delay, the excursion window, tail NaNs, `delay=0` identity, input rejection |
+| `test_signal_contract.py` | cached panel | `fires_mask` is `signal` or exactly `signal \| partial`; tiers disjoint; `Setup`/`Missing` agree; one card per signal with the grey bar + **Missing** line on partials; hand-off is a single list; `find_ticker` resolves either tier; an empty day doesn't crash |
+| `test_backtest_stats.py` | cached panel | `cohort_values` == the `collect_trades` path at several (wait, hold) cells; real rows re-derive from the panel at a nonzero delay; the trades CSV reconciles with the summary grid |
+| `test_path_equivalence.py` | **network** | Screening out of the bulk panel gives the same dates as the single-ticker download, plus the documented JNJ/MSFT/META cases |
+
+**They assert invariants, not recorded output.** Since `config.json` gets retuned
+constantly, any test comparing against saved counts would be stale within a
+session — so the checks are properties that hold at *any* thresholds. The one
+exception is the documented validation dates in `test_path_equivalence.py`, which
+are inherently config-dependent and are therefore reported as `INFO` if tuning
+moves them, not as failures.
+
+Tests **never download** (except the `--network` one) and never send to Discord:
+they read the panel `backtest_universe.py` already cached, and a missing cache is
+a skip with instructions rather than a two-minute surprise.
+
+## Tuning a screen (`tune_screen.py`)
+
+The backtest tells you how a screen performs *as configured*. This answers the
+next question — **which threshold should I change, and what does it cost me?**
+
+```
+python tune_screen.py sensitivity reclaim_strategy    # one knob at a time
+python tune_screen.py grid breakout_strategy --csv    # 2-3 knobs crossed
+python tune_screen.py delay reclaim_strategy          # wait x hold per candidate
+```
+
+It re-runs the screen over the **cached** panel (never downloads — run
+`backtest_universe.py` once first) through the production `compute_*` /
+`fires_mask` / `partial_mask`, and scores every candidate with
+`backtest_universe`'s own statistics. Each row reports both tiers (`full` and
+the alerted `fires` cohort), the excess over the random-entry baseline, and:
+
+**Protected cases.** `tuning.protected_cases` lists setups that must keep
+firing — e.g. META's 2023-02-02 reclaim. Every candidate shows `FULL`,
+`partial` or `MISSED` for each, because *a config that scores well by dropping
+the setups you wanted is not an improvement*. This is the column that decides
+acceptability; excess only ranks the survivors.
+
+Modes: **sensitivity** first (it shows which knobs matter at all), then
+**grid** for interactions one-at-a-time can't see — such as two thresholds that
+each independently block the same protected case. **delay** asks whether a
+config's edge depends on *not* buying the signal day; it dedupes candidates
+whose cohorts come out identical (a confirmation threshold often just moves the
+full/partial boundary and leaves the alerted set untouched).
+
+Every range, protected case and grid axis lives in `config.json` → `tuning`, so
+tuning is a config edit rather than a code edit. Results inherit the backtest's
+caveats — survivorship bias, no costs, no dividends, clustered trades — so treat
+small differences as noise.
+
 ## Configuration (`config.json`)
 
 | Key | Current | Meaning |
@@ -379,6 +447,11 @@ the run header):
 | `backtest.cache_max_age_days` | `1` | Reuse the cache only while it is younger than this |
 | `backtest.screens` | all three | Config keys of the screens to include |
 | `backtest.output.*` | — | Trades CSV, summary CSV, bar-chart path, `grid_chart_path` for the wait × hold heatmap, chart DPI |
+| `tuning.years` | `5` | Analysis window `tune_screen.py` scores over |
+| `tuning.holding_days` | `[30, 60]` | Holding periods; the first is the default scored in the tables, all are used by `delay` mode |
+| `tuning.protected_cases` | 3 cases | `{screen, ticker, date, note}` setups that must keep firing; every candidate is graded `FULL`/`partial`/`MISSED` against them |
+| `tuning.sweeps.<screen>` | per-screen | Parameter → list of values to try. Add a value here rather than editing the tool |
+| `tuning.grid.<screen>` | 3 names | Which parameters `grid` mode crosses (keep it to 2–3 — it is a full cross product) |
 | `fundamentals.enabled` | `true` | Fetch fundamentals for every signalling ticker |
 | `fundamentals.fields` | 6 fields | Yahoo `info` key → display label; add/remove entries to change what the alert shows |
 | `fundamentals.percent_fields` | `revenueGrowth`, `payoutRatio` | Fields Yahoo returns as fractions, converted to % (note: `dividendYield` is *not* here — Yahoo already returns it as a %) |
