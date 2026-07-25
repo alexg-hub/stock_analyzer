@@ -27,12 +27,13 @@ python backtest_breakout.py --ticker JNJ  --start 2025-01-01 --end 2025-10-31
 python backtest_pullback.py --ticker MSFT --start 2024-01-01 --end 2025-06-30
 python backtest_reclaim.py  --ticker META --start 2023-01-01 --end 2023-12-31
 
-# Universe-wide profit backtest: every screen x all history, buy the trigger /
-# sell N trading days later. No Discord. Caches the price panel, so re-runs
-# after a config tweak take ~5s; --refresh re-downloads.
+# Universe-wide profit backtest: every screen x all history, sweeping a grid of
+# "wait x trading days, then hold y". No Discord. Caches the price panel, so
+# re-runs after a config tweak take seconds; --refresh re-downloads.
 python backtest_universe.py
-python backtest_universe.py --holding-days 10,30,60
+python backtest_universe.py --entry-delay 0 --holding-days 30   # one cell
 python backtest_universe.py --screens breakout_strategy --entry signal_close
+python backtest_universe.py --split-by-tier                     # full vs partial
 ```
 
 To test alert formatting/sending without spamming the channel, monkeypatch
@@ -92,10 +93,24 @@ real send.
   each module with its compute function) — one cohort per screen, or `full`
   vs `partial` under `--split-by-tier`/`backtest.split_by_tier` — and reuses
   `scanner_common.download_price_data`/`warmup_months`; the simulation itself
-  is a few `shift()`s (`forward_trades`), never a loop. `holding_days` counts
-  trading days held *after* the entry day. Excursion (MFE/MAE) windows must
-  roll *then* shift — shifting first needs rows before the signal day and
-  silently NaNs out the start of the frame. Its price panel is cached to
+  is a few `shift()`s (`forward_trades`), never a loop. **Two timing knobs,
+  swept as a cross product**: `entry_delay_days` (x) = extra trading days to
+  wait *beyond the earliest tradeable bar* (x=0 buys as soon as possible, so
+  look-ahead is impossible by construction), `holding_days` (y) = trading days
+  held after the entry day. Excursion (MFE/MAE) windows must roll *then* shift —
+  shifting first needs rows before the signal day and silently NaNs out the
+  start of the frame — and span the bars the position is actually open (y+1 for
+  `next_open`, y for `signal_close`, whose entry bar's own range predates the
+  closing entry). Two things keep an 18-cell sweep fast and its outputs usable:
+  stats come from **`cohort_values`** (raw arrays at the mask's cells) rather
+  than `collect_trades`, because materializing the entry/exit *date* frames per
+  cell dominates the cost; and per-trade rows are written for the single
+  **`backtest.detail`** cell only (a full grid is ~1M rows). `detail` is an
+  explicit config pair, never "first in the list", so widening the swept lists
+  can't silently move the detailed table. The **baseline is computed once per
+  holding period** and reused across delays — a random entry has no signal to be
+  delayed from — which is what makes `excess_%` comparable down a grid column.
+  Its price panel is cached to
   `backtest_universe_cache.pkl` (gitignored); `--refresh` re-downloads. The
   caveats (survivorship bias from using today's index members, no costs, no
   dividends, clustered/overlapping trades) are printed in the run header and

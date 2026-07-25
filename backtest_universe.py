@@ -121,57 +121,75 @@ def load_panel(bt_cfg: dict, cfg: dict, years: int, warmup_days: int,
 # --------------------------------------------------------------------------
 
 def forward_trades(data: pd.DataFrame, holding: int, entry: str,
-                   excursions: bool) -> dict[str, pd.DataFrame]:
+                   excursions: bool, delay: int = 0,
+                   dates: bool = True) -> dict[str, pd.DataFrame]:
     """Entry/exit prices and returns for a trade opened on *every* day.
 
-    `holding` (h) is the number of TRADING days the position is held after the
-    entry day, so for a signal on index position i:
-      * `next_open`    -- buy Open[i+1] (earliest tradeable price: the signal
-                          is only known after the close), sell Close[i+1+h]
-      * `signal_close` -- buy Close[i] (the price shown in the alert),
-                          sell Close[i+h]
+    Two timing knobs, both in TRADING days:
+      * `delay` (x) -- how much longer to wait *beyond the earliest tradeable
+        bar* before buying. x=0 buys as soon as possible, so look-ahead is
+        impossible by construction whatever the entry convention.
+      * `holding` (y) -- how long the position is then held after the entry day.
+
+    For a signal on index position i, with `base` = 1 for `next_open` (the
+    signal is only known after the close, so the next open is the earliest
+    price you could actually pay) and 0 for `signal_close`:
+
+        entry bar = i + base + x        exit bar = entry bar + y
+
+      * `next_open`    -- buy Open[i+1+x], sell Close[i+1+x+y]
+      * `signal_close` -- buy Close[i+x],  sell Close[i+x+y]
 
     Prices are raw Open/Close (split-adjusted by yfinance; dividends ignored).
     A window running past the end of the data yields NaN -- those signals are
     reported as unevaluable, never as a 0% trade.
+
+    `dates=False` skips building the entry/exit date frames, which is the
+    expensive part and is only needed when writing per-trade rows.
     """
     if holding < 1:
         raise SystemExit(f"holding period must be >= 1 trading day, got {holding}")
+    if delay < 0:
+        raise SystemExit(f"entry delay must be >= 0 trading days, got {delay}")
     close, open_ = data["Close"], data["Open"]
     high, low = data["High"], data["Low"]
 
     if entry == "next_open":
-        entry_price = open_.shift(-1)
-        exit_price = close.shift(-(1 + holding))
-        # Position is open across positions i+1 .. i+1+h (entry day's open
-        # through the exit day's close), so h+1 bars.
-        offset, span = 1 + holding, holding + 1
+        base, price_at_entry = 1, open_
+        # Position is open across the entry bar (bought at its open) through
+        # the exit bar, so y+1 bars.
+        span = holding + 1
     elif entry == "signal_close":
-        entry_price = close
-        exit_price = close.shift(-holding)
-        # Bought at day i's close, so day i's own high/low happened *before*
-        # entry: the excursion window is i+1 .. i+h, h bars.
-        offset, span = holding, holding
+        base, price_at_entry = 0, close
+        # Bought at the entry bar's *close*, so that bar's own high/low
+        # happened before entry: the excursion window is y bars.
+        span = holding
     else:
         raise SystemExit(f"unknown backtest.entry {entry!r} "
                          f"(expected 'next_open' or 'signal_close')")
+
+    entry_offset = base + delay
+    exit_offset = entry_offset + holding
+    entry_price = price_at_entry.shift(-entry_offset)
+    exit_price = close.shift(-exit_offset)
 
     out = {
         "entry_price": entry_price,
         "exit_price": exit_price,
         "return_pct": 100 * (exit_price / entry_price - 1),
-        # Dates carried along so each trade row can show what it actually did.
-        "entry_date": _shifted_dates(data, 1 if entry == "next_open" else 0),
-        "exit_date": _shifted_dates(data, offset),
     }
+    if dates:
+        # Carried along so each trade row can show what it actually did.
+        out["entry_date"] = _shifted_dates(data, entry_offset)
+        out["exit_date"] = _shifted_dates(data, exit_offset)
     if excursions:
         # Roll first, then shift back: the trailing `span`-bar extreme ending
-        # at the exit day, moved onto the signal day. (Shifting first and then
+        # at the exit bar, moved onto the signal day. (Shifting first and then
         # rolling would need `span`-1 rows *before* the signal day and so would
         # silently NaN out the start of the frame.)
-        out["mfe_pct"] = 100 * (high.rolling(span).max().shift(-offset)
+        out["mfe_pct"] = 100 * (high.rolling(span).max().shift(-exit_offset)
                                 / entry_price - 1)
-        out["mae_pct"] = 100 * (low.rolling(span).min().shift(-offset)
+        out["mae_pct"] = 100 * (low.rolling(span).min().shift(-exit_offset)
                                 / entry_price - 1)
     return out
 
@@ -181,6 +199,32 @@ def _shifted_dates(data: pd.DataFrame, offset: int) -> pd.DataFrame:
     frame so it can be reindexed alongside the price frames."""
     dates = pd.Series(data.index, index=data.index).shift(-offset)
     return pd.DataFrame({col: dates for col in data["Close"].columns})
+
+
+def cohort_values(mask: pd.DataFrame, trades: dict,
+                  start: pd.Timestamp) -> dict:
+    """The distribution behind one cohort, without building any trade rows.
+
+    Returns the raw 1-D arrays of return/MFE/MAE at the cells where the mask
+    fired, plus the counts `describe()` needs. This is the sweep's hot path:
+    a delay x holding grid re-simulates many times, and materializing the
+    entry/exit *date* frames (see `_shifted_dates`) for each cell would cost
+    far more than the statistics themselves. `collect_trades` below still
+    builds full rows, but only for the one cell that gets a trades CSV.
+    """
+    mask = mask.loc[mask.index >= start]
+    picked = mask.to_numpy()
+    out = {
+        "signals": int(picked.sum()),
+        "distinct_dates": int(mask.any(axis=1).sum()),
+    }
+    for name in ("return_pct", "mfe_pct", "mae_pct"):
+        if name in trades:
+            # Align on the mask's own rows AND columns -- the trade frames still
+            # carry the benchmark ticker, which no mask ever selects.
+            aligned = trades[name].loc[mask.index, mask.columns]
+            out[name] = aligned.to_numpy()[picked]
+    return out
 
 
 def collect_trades(masks: dict, trades: dict, start: pd.Timestamp) -> pd.DataFrame:
@@ -209,10 +253,10 @@ def collect_trades(masks: dict, trades: dict, start: pd.Timestamp) -> pd.DataFra
 # Statistics
 # --------------------------------------------------------------------------
 
-def describe(returns: pd.Series, n_signals: int, n_dates: int,
-             mfe: pd.Series = None, mae: pd.Series = None) -> dict:
-    """The stats block for one cohort at one horizon."""
-    r = returns.dropna()
+def describe(returns, n_signals: int, n_dates: int,
+             mfe=None, mae=None) -> dict:
+    """The stats block for one cohort at one (delay, holding) cell."""
+    r = pd.Series(returns, dtype=float).dropna()
     row = {
         "signals": n_signals,
         "evaluable": len(r),
@@ -227,22 +271,37 @@ def describe(returns: pd.Series, n_signals: int, n_dates: int,
         "worst": r.min() if len(r) else np.nan,
     }
     if mfe is not None:
-        row["mean_MFE_%"] = mfe.dropna().mean()
-        row["mean_MAE_%"] = mae.dropna().mean()
+        row["mean_MFE_%"] = pd.Series(mfe, dtype=float).dropna().mean()
+        row["mean_MAE_%"] = pd.Series(mae, dtype=float).dropna().mean()
     return row
+
+
+def stats_from(vals: dict) -> dict:
+    """`describe()` over a `cohort_values()` result."""
+    return describe(vals.get("return_pct", []),
+                    n_signals=vals["signals"], n_dates=vals["distinct_dates"],
+                    mfe=vals.get("mfe_pct"), mae=vals.get("mae_pct"))
 
 
 def baseline_stats(trades: dict, start: pd.Timestamp, universe: list[str],
                    excursions: bool) -> dict:
     """The random-entry bar every screen has to clear: the same forward-return
-    matrix over *all* stock-days in the window, unconditionally."""
-    ret = trades["return_pct"].loc[start:, universe]
-    flat = ret.stack()
-    row = describe(flat, n_signals=int(ret.notna().sum().sum()),
-                   n_dates=len(ret.index))
+    matrix over *all* stock-days in the window, unconditionally.
+
+    Depends only on the holding period: a random entry has no signal to be
+    delayed from, and the distribution of y-day returns over every stock-day is
+    the same whatever `delay` a screen used. So one baseline per holding
+    period is reused down a whole grid column, which also makes `excess_%`
+    comparable across delays.
+    """
+    ret = trades["return_pct"].loc[start:, universe].to_numpy().ravel()
+    row = describe(ret, n_signals=int(np.isfinite(ret).sum()),
+                   n_dates=len(trades["return_pct"].loc[start:].index))
     if excursions:
-        row["mean_MFE_%"] = trades["mfe_pct"].loc[start:, universe].stack().mean()
-        row["mean_MAE_%"] = trades["mae_pct"].loc[start:, universe].stack().mean()
+        row["mean_MFE_%"] = np.nanmean(
+            trades["mfe_pct"].loc[start:, universe].to_numpy())
+        row["mean_MAE_%"] = np.nanmean(
+            trades["mae_pct"].loc[start:, universe].to_numpy())
     return row
 
 
@@ -262,13 +321,32 @@ FMT = {c: "{:.2f}" for c in ("mean_%", "median_%", "win_rate_%", "std", "p10",
 
 
 def print_table(summary: pd.DataFrame) -> None:
-    cols = [c for c in summary.columns if c != "horizon"]
+    cols = [c for c in summary.columns if c not in ("horizon", "delay")]
     shown = summary[cols].copy()
     for col, fmt in FMT.items():
         if col in shown:
             shown[col] = shown[col].map(lambda v: fmt.format(v)
                                         if pd.notna(v) else "n/a")
     print(shown.to_string(index=False))
+
+
+def print_grids(summary: pd.DataFrame, baseline_label: str) -> None:
+    """One wait x hold matrix per screen/cohort: does waiting before buying
+    help, and does the answer depend on how long you then hold?"""
+    cohorts = summary[summary["cohort"] != "-"]
+    base = (summary[summary["screen"] == baseline_label]
+            .set_index("horizon")["mean_%"])
+    for (screen, cohort), sub in cohorts.groupby(["screen", "cohort"], sort=False):
+        print(f"\n{screen} / {cohort}")
+        for metric, label in (("mean_%", "mean return %"),
+                              ("win_rate_%", "win rate %")):
+            grid = sub.pivot_table(index="delay", columns="horizon",
+                                   values=metric)
+            grid.index.name = "wait\\hold"
+            print(f"  {label}:")
+            print("    " + grid.round(2).to_string().replace("\n", "\n    "))
+    print(f"\n  (random entry for reference: "
+          + ", ".join(f"hold {h} = {v:+.2f}%" for h, v in base.items()) + ")")
 
 
 def year_breakdown(trades: pd.DataFrame, horizon: int) -> None:
@@ -296,7 +374,13 @@ def parse_args(bt_cfg: dict) -> argparse.Namespace:
                    help="length of the analysis window")
     p.add_argument("--holding-days",
                    default=",".join(str(h) for h in bt_cfg.get("holding_days", [30])),
-                   help="comma-separated holding periods in TRADING days")
+                   help="comma-separated holding periods in TRADING days (y)")
+    p.add_argument("--entry-delay",
+                   default=",".join(str(d) for d in
+                                    bt_cfg.get("entry_delay_days", [0])),
+                   help="comma-separated extra TRADING days to wait before "
+                        "buying, beyond the earliest tradeable bar (x); 0 = buy "
+                        "as soon as possible")
     p.add_argument("--entry", default=bt_cfg.get("entry", "next_open"),
                    choices=["next_open", "signal_close"])
     p.add_argument("--screens", default=",".join(bt_cfg.get("screens", [])),
@@ -320,11 +404,24 @@ def main() -> int:
     bt_cfg = cfg.get("backtest", {})
     args = parse_args(bt_cfg)
 
-    horizons = [int(h) for h in args.holding_days.split(",") if h.strip()]
+    horizons = sorted({int(h) for h in args.holding_days.split(",") if h.strip()})
+    delays = sorted({int(d) for d in args.entry_delay.split(",") if d.strip()})
     wanted = [s.strip() for s in args.screens.split(",") if s.strip()]
     split_tiers = bt_cfg.get("split_by_tier", False) or args.split_by_tier
     excursions = bt_cfg.get("measure_excursions", True)
     benchmark = bt_cfg.get("benchmark_ticker")
+
+    # The one (wait, hold) cell that gets the detailed table, the per-trade CSV,
+    # the year breakdown and the bar chart. Explicit in config rather than
+    # "first in the list", so widening the swept lists never silently moves it.
+    detail_cfg = bt_cfg.get("detail", {})
+    detail = (detail_cfg.get("entry_delay_days", delays[0]),
+              detail_cfg.get("holding_days", horizons[0]))
+    if detail[0] not in delays or detail[1] not in horizons:
+        fallback = (delays[0], horizons[0])
+        print(f"backtest.detail {detail} is not in the swept grid "
+              f"(waits {delays}, holds {horizons}) -- using {fallback}.")
+        detail = fallback
 
     # -- which screens run: enabled in config AND requested --
     known = {module.CONFIG_KEY for module, _ in SCREENS}
@@ -358,8 +455,14 @@ def main() -> int:
     print(f"Analysis window {start.date()} .. {data.index[-1].date()} "
           f"({analysis_days} trading days); {len(data) - analysis_days} earlier "
           f"days used only to warm up the {warmup_days}-day longest lookback.")
-    print(f"Entry: {args.entry}; exits at the Close after "
-          f"{', '.join(str(h) for h in horizons)} trading day(s).")
+    base_bar = "the open after the signal" if args.entry == "next_open" \
+        else "the signal's own close"
+    print(f"Entry: {args.entry} -- buy at {base_bar}, plus a wait of "
+          f"{', '.join(str(d) for d in delays)} extra trading day(s).")
+    print(f"Exit: the Close {', '.join(str(h) for h in horizons)} trading "
+          f"day(s) after entry. Grid = {len(delays)}x{len(horizons)} = "
+          f"{len(delays) * len(horizons)} cell(s); detailed table for "
+          f"wait={detail[0]}, hold={detail[1]}.")
     print("\nCAVEATS -- this is a screen-comparison tool, not a tradeable backtest:")
     print("  * Survivorship bias: the universe is TODAY's S&P 500, so companies")
     print("    dropped/acquired/delisted during the window are absent. Biased up.")
@@ -398,52 +501,64 @@ def main() -> int:
         print(f"{module.CONFIG_KEY}: {n_fires} alerted signal(s) = {n_full} full "
               f"+ {n_partial} partial{note}, in the analysis window")
 
-    # -- STEP 3: simulate, per horizon --
+    # -- STEP 3: simulate every (wait, hold) cell of the grid --
     section("STEP 3 -- Trade simulation")
-    all_trades, summary_rows = [], []
+    summary_rows, trades = [], pd.DataFrame()
     for h in horizons:
-        fwd = forward_trades(data, h, args.entry, excursions)
-        frame = collect_trades(masks, fwd, start)
-        if not frame.empty:
-            all_trades.append(frame.assign(horizon=h))
+        # One baseline per holding period, reused across every delay (see
+        # baseline_stats) -- so excess_% is comparable down a grid column.
+        base = None
+        for d in delays:
+            is_detail = (d, h) == detail
+            fwd = forward_trades(data, h, args.entry, excursions, delay=d,
+                                 dates=is_detail)
+            if base is None:
+                base = baseline_stats(fwd, start, universe, excursions)
+                rows = [{"delay": d, "horizon": h, "screen": BASELINE_LABEL,
+                         "cohort": "-", **base}]
+                if benchmark:
+                    rows.append({"delay": d, "horizon": h, "cohort": "-",
+                                 "screen": f"{benchmark} buy-and-hold",
+                                 **benchmark_stats(fwd, start, benchmark)})
+            else:
+                rows = []
 
-        base = baseline_stats(fwd, start, universe, excursions)
-        rows = [{"horizon": h, "screen": BASELINE_LABEL, "cohort": "-", **base}]
-        if benchmark:
-            rows.append({"horizon": h, "screen": f"{benchmark} buy-and-hold",
-                         "cohort": "-", **benchmark_stats(fwd, start, benchmark)})
-        for (screen, cohort), mask in masks.items():
-            sub = frame[(frame["screen"] == screen) & (frame["cohort"] == cohort)] \
-                if not frame.empty else pd.DataFrame(columns=["return_pct"])
-            n_dates = sub["signal_date"].nunique() if not sub.empty else 0
-            stats = describe(
-                sub["return_pct"] if not sub.empty else pd.Series(dtype=float),
-                n_signals=len(sub), n_dates=n_dates,
-                mfe=sub.get("mfe_pct") if excursions and not sub.empty else None,
-                mae=sub.get("mae_pct") if excursions and not sub.empty else None,
-            )
-            stats["excess_%"] = stats["mean_%"] - base["mean_%"]
-            rows.append({"horizon": h, "screen": screen, "cohort": cohort, **stats})
-        summary_rows += rows
+            for (screen, cohort), mask in masks.items():
+                stats = stats_from(cohort_values(mask, fwd, start))
+                stats["excess_%"] = stats["mean_%"] - base["mean_%"]
+                rows.append({"delay": d, "horizon": h, "screen": screen,
+                             "cohort": cohort, **stats})
+            summary_rows += rows
 
-        print(f"\n--- Holding period: {h} trading days "
-              f"(entry {args.entry}) ---")
-        print_table(pd.DataFrame(rows))
+            # Per-trade rows only for the detail cell: a full grid would be
+            # ~1M rows, and building the date frames is the expensive part.
+            if is_detail:
+                trades = collect_trades(masks, fwd, start)
+                if not trades.empty:
+                    trades = trades.assign(delay=d, horizon=h)
+                print(f"\n--- Detailed table: wait {d}, hold {h} trading days "
+                      f"(entry {args.entry}) ---")
+                print_table(pd.DataFrame(rows))
 
     summary = pd.DataFrame(summary_rows)
-    trades = pd.concat(all_trades, ignore_index=True) if all_trades \
-        else pd.DataFrame()
 
-    section("STEP 4 -- Regime check")
-    for h in horizons:
-        if not trades.empty:
-            year_breakdown(trades, h)
+    section("STEP 4 -- Wait x hold grid")
+    if len(delays) > 1 or len(horizons) > 1:
+        print_grids(summary, BASELINE_LABEL)
+    else:
+        print("Single (wait, hold) cell -- nothing to compare. Widen "
+              "backtest.entry_delay_days / holding_days for a grid.")
 
-    # -- STEP 5: outputs --
-    section("STEP 5 -- Outputs")
+    section("STEP 5 -- Regime check")
+    if not trades.empty:
+        year_breakdown(trades, detail[1])
+
+    # -- STEP 6: outputs --
+    section("STEP 6 -- Outputs")
     out_dir = Path(__file__).parent
-    cols = ["screen", "cohort", "horizon", "ticker", "signal_date", "status",
-            "entry_date", "entry_price", "exit_date", "exit_price", "return_pct"]
+    cols = ["screen", "cohort", "delay", "horizon", "ticker", "signal_date",
+            "status", "entry_date", "entry_price", "exit_date", "exit_price",
+            "return_pct"]
     if excursions:
         cols += ["mfe_pct", "mae_pct"]
     if not trades.empty:
@@ -456,7 +571,8 @@ def main() -> int:
         num = out.select_dtypes("number").columns  # dates must not be rounded
         out[num] = out[num].round(4)
         out.to_csv(trades_path, index=False)
-        print(f"{len(trades)} trade(s) -> {trades_path}")
+        print(f"{len(trades)} trade(s) for the detail cell "
+              f"(wait {detail[0]}, hold {detail[1]}) -> {trades_path}")
         if n_open:
             print(f"  ({n_open} still 'open': the signal fired too recently for a "
                   f"full holding period, so they have no return and are excluded "
@@ -470,15 +586,18 @@ def main() -> int:
 
     chart_cfg = bt_cfg.get("output", {})
     if not args.no_chart:
+        dpi = chart_cfg.get("chart_dpi", 120)
+        # Bar chart of the detail cell -- the one combination with per-trade rows.
         base_path = out_dir / chart_cfg.get("chart_path", "backtest_universe.png")
-        for h in horizons:
-            # One chart per horizon; the configured name is used as-is for a
-            # single horizon, suffixed when there are several.
-            path = base_path if len(horizons) == 1 else \
-                base_path.with_name(f"{base_path.stem}_h{h}{base_path.suffix}")
-            charts.plot_backtest_summary(
-                summary, h, args.entry, BASELINE_LABEL, path,
-                dpi=chart_cfg.get("chart_dpi", 120))
+        charts.plot_backtest_summary(
+            summary[summary["delay"] == detail[0]], detail[1], args.entry,
+            BASELINE_LABEL, base_path, dpi=dpi)
+        # Heatmap of the whole grid -- only meaningful with something to compare.
+        if len(delays) > 1 or len(horizons) > 1:
+            grid_path = out_dir / chart_cfg.get("grid_chart_path",
+                                                "backtest_universe_grid.png")
+            charts.plot_delay_grid(summary, args.entry, BASELINE_LABEL,
+                                   grid_path, dpi=dpi)
 
     print(f"\nDone in {time.time() - started:.1f}s.")
     return 0

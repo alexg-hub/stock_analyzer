@@ -53,8 +53,10 @@
     },
     "backtest": {
         "years": 3,
-        "holding_days": [30],
+        "holding_days": [10, 30, 60],
+        "entry_delay_days": [0, 1, 2, 3, 4, 5],
         "entry": "next_open",
+        "detail": {"entry_delay_days": 0, "holding_days": 30},
         "split_by_tier": false,
         "measure_excursions": true,
         "benchmark_ticker": "SPY",
@@ -65,6 +67,7 @@
             "trades_csv": "backtest_universe_trades.csv",
             "summary_csv": "backtest_universe_summary.csv",
             "chart_path": "backtest_universe.png",
+            "grid_chart_path": "backtest_universe_grid.png",
             "chart_dpi": 120
         }
     },

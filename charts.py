@@ -16,6 +16,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
+from matplotlib.colors import LinearSegmentedColormap
 
 # Validated light-mode palette (dataviz reference instance).
 C = {
@@ -331,6 +332,97 @@ def plot_backtest_summary(summary: pd.DataFrame, horizon: int, entry: str,
            f"sell {horizon} trading days later",
            "S&P 500, price-only returns, no costs; survivorship-biased "
            "(today's index members only)")
+    fig.savefig(out_path, dpi=dpi, bbox_inches="tight", facecolor=C["surface"])
+    plt.close(fig)
+    print(f"Chart saved to {out_path}")
+
+
+# --------------------------------------------------------------------------
+# Wait x hold sweep grid
+# --------------------------------------------------------------------------
+
+def _diverging_cmap():
+    """Two hues from the palette with a neutral midpoint -- the diverging ramp
+    for a value whose sign is the point (above/below the baseline). Never a
+    rainbow, and never a hue at the middle."""
+    return LinearSegmentedColormap.from_list(
+        "excess", [C["event"], C["grid"], C["close"]])
+
+
+def plot_delay_grid(summary: pd.DataFrame, entry: str, baseline_label: str,
+                    out_path: Path, dpi: int = 120) -> None:
+    """Small-multiple heatmaps: does waiting before buying help?
+
+    One panel per screen/cohort, x = holding period, y = extra days waited,
+    each cell annotated with its mean return and coloured by *excess over the
+    random-entry baseline* on a diverging scale whose neutral point is exactly
+    zero -- so blue means "beat buying at random", orange means "worse".
+    """
+    cohorts = summary[summary["cohort"] != "-"]
+    if cohorts.empty:
+        print("No cohort to grid -- skipping the sweep chart.")
+        return
+    groups = list(cohorts.groupby(["screen", "cohort"], sort=False))
+    delays = sorted(cohorts["delay"].unique())
+    holds = sorted(cohorts["horizon"].unique())
+
+    # Symmetric limits so the neutral colour lands on true zero.
+    limit = max(abs(cohorts["excess_%"].min()), abs(cohorts["excess_%"].max()), 0.5)
+    cmap = _diverging_cmap()
+
+    fig, axes = plt.subplots(
+        1, len(groups), figsize=(1.6 + 2.1 * len(holds) * len(groups),
+                                 1.9 + 0.42 * len(delays)),
+        squeeze=False)
+    fig.patch.set_facecolor(C["surface"])
+    mesh = None
+    for ax, ((screen, cohort), sub) in zip(axes[0], groups):
+        excess = sub.pivot_table(index="delay", columns="horizon",
+                                 values="excess_%").reindex(
+                                     index=delays, columns=holds)
+        mean = sub.pivot_table(index="delay", columns="horizon",
+                               values="mean_%").reindex(
+                                   index=delays, columns=holds)
+        ax.set_facecolor(C["surface"])
+        mesh = ax.imshow(excess.to_numpy(), cmap=cmap, vmin=-limit, vmax=limit,
+                         aspect="auto")
+        ax.set_xticks(range(len(holds)), [str(h) for h in holds])
+        ax.set_yticks(range(len(delays)), [str(d) for d in delays])
+        ax.tick_params(colors=C["muted"], labelsize=9, length=0)
+        for side in ax.spines.values():
+            side.set_visible(False)
+        # Surface-coloured gap between adjacent cells, so the fills read as
+        # discrete values rather than one continuous wash.
+        ax.set_xticks([x - 0.5 for x in range(1, len(holds))], minor=True)
+        ax.set_yticks([y - 0.5 for y in range(1, len(delays))], minor=True)
+        ax.grid(which="minor", color=C["surface"], linewidth=2)
+        ax.tick_params(which="minor", length=0)
+        ax.set_xlabel("hold (trading days)", color=C["ink2"], fontsize=9.5)
+        ax.set_title(f"{screen.replace('_strategy', '')} · {cohort}",
+                     fontsize=10.5, color=C["ink"], pad=8)
+        if ax is axes[0][0]:
+            ax.set_ylabel("extra days waited", color=C["ink2"], fontsize=9.5)
+        # Value labels: ink on the pale middle of the ramp, surface on the
+        # saturated ends, so they stay readable either way.
+        for i in range(len(delays)):
+            for j in range(len(holds)):
+                value, shade = mean.iat[i, j], excess.iat[i, j]
+                if pd.isna(value):
+                    continue
+                strong = abs(shade) > 0.55 * limit
+                ax.text(j, i, f"{value:+.2f}", ha="center", va="center",
+                        fontsize=9, color=C["surface"] if strong else C["ink"])
+
+    bar = fig.colorbar(mesh, ax=axes[0], fraction=0.025, pad=0.02)
+    bar.set_label("excess vs random entry (percentage points)",
+                  color=C["ink2"], fontsize=9.5)
+    bar.ax.tick_params(colors=C["muted"], labelsize=9)
+    bar.outline.set_visible(False)
+
+    fig.suptitle(f"Does waiting help?  entry = {entry.replace('_', ' ')} + x days"
+                 f"  ·  cells show mean return %",
+                 fontsize=12.5, color=C["ink"], fontweight="bold", x=0.02,
+                 ha="left", y=1.04)
     fig.savefig(out_path, dpi=dpi, bbox_inches="tight", facecolor=C["surface"])
     plt.close(fig)
     print(f"Chart saved to {out_path}")

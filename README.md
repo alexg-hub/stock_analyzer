@@ -231,10 +231,12 @@ The single-ticker backtests prove the *math* fires on a known case.
 been bought and sold `holding_days` later, what was the profit?**
 
 ```
-python backtest_universe.py                          # config defaults (3y, h=30)
-python backtest_universe.py --holding-days 10,30,60  # several horizons in one run
+python backtest_universe.py                            # config defaults: the wait x hold grid
+python backtest_universe.py --entry-delay 0 --holding-days 30   # a single cell
+python backtest_universe.py --entry-delay 0,2,5 --holding-days 10,30,60
 python backtest_universe.py --screens breakout_strategy --entry signal_close
-python backtest_universe.py --years 5 --refresh      # longer window, fresh download
+python backtest_universe.py --split-by-tier            # full vs partial setups
+python backtest_universe.py --years 5 --refresh        # longer window, fresh download
 ```
 
 It downloads the universe once (analysis window + the longest screen's
@@ -256,9 +258,39 @@ breakdown, `backtest_universe_trades.csv` (every trade, with `status`
 
 Entry conventions: `next_open` (default — the signal is only known after the
 close, so the earliest tradeable price is the next open) or `signal_close`
-(the price shown in the alert). `holding_days` counts **trading** days held
-*after* the entry day. `mfe_pct`/`mae_pct` are the best/worst excursion while
-the position was open — useful for judging whether a stop or target would help.
+(the price shown in the alert). `mfe_pct`/`mae_pct` are the best/worst excursion
+while the position was open — useful for judging whether a stop or target would
+help.
+
+### The wait × hold grid
+
+Two timing knobs, both in **trading** days, swept as a cross product:
+
+- **`entry_delay_days` (x)** — how much longer to wait *beyond the earliest
+  tradeable bar* before buying. `x=0` buys as soon as possible (so look-ahead is
+  impossible however the entry convention is set); `x=3` waits three more days
+  and buys that open.
+- **`holding_days` (y)** — how long the position is then held after the entry
+  day.
+
+```
+signal day i  (its close is only known after the bell)
+  x=0 -> buy Open[i+1]      x=1 -> buy Open[i+2]      x=2 -> buy Open[i+3]
+  then sell at the Close y trading days after entry
+```
+
+The run prints a wait × hold matrix of mean return and win rate per screen and
+writes `backtest_universe_grid.png` — one heatmap panel per screen, cells
+labelled with mean return and coloured by **excess over the random-entry
+baseline** on a diverging scale whose neutral point is exactly zero (blue beat
+buying at random, orange did worse).
+
+Because a full grid would be ~1M trade rows, **per-trade rows are written for
+one cell only** — `backtest.detail`, an explicit `{entry_delay_days,
+holding_days}` pair (not "first in the list", so widening the swept lists never
+silently moves it). That cell also gets the detailed stats table, the per-year
+breakdown and `backtest_universe.png`. Every cell still gets full aggregate
+stats in the summary CSV and the grid.
 
 **Read these caveats before believing any number** (they are also printed in
 the run header):
@@ -315,15 +347,17 @@ the run header):
 | `charts.lookback_days` | `250` | Trading days shown in alert charts |
 | `charts.dpi` | `120` | Alert-chart resolution |
 | `backtest.years` | `3` | Length of the analysis window; the download adds the warm-up the longest screen lookback needs |
-| `backtest.holding_days` | `[30]` | Holding periods in **trading** days, held after the entry day; a list runs several horizons in one pass |
+| `backtest.holding_days` | `[10, 30, 60]` | Holding periods (y) in **trading** days, held after the entry day |
+| `backtest.entry_delay_days` | `[0, …, 5]` | Extra **trading** days (x) to wait before buying, beyond the earliest tradeable bar; `0` = buy as soon as possible. Swept against `holding_days` as a grid |
 | `backtest.entry` | `next_open` | `next_open` (buy the open after the signal) or `signal_close` (buy the trigger close) |
+| `backtest.detail` | `{0, 30}` | The one (wait, hold) cell that gets per-trade rows, the detailed table, the year breakdown and the bar chart |
 | `backtest.split_by_tier` | `false` | Measure `full` and `partial` setups as separate cohorts instead of one combined signal cohort |
 | `backtest.measure_excursions` | `true` | Compute MFE/MAE (best/worst excursion while the trade was open) |
 | `backtest.benchmark_ticker` | `SPY` | Buy-and-hold benchmark, downloaded alongside the universe |
 | `backtest.cache_path` | `backtest_universe_cache.pkl` | Cached price panel (gitignored); `--refresh` re-downloads |
 | `backtest.cache_max_age_days` | `1` | Reuse the cache only while it is younger than this |
 | `backtest.screens` | all three | Config keys of the screens to include |
-| `backtest.output.*` | — | Trades CSV, summary CSV, chart path + DPI (chart names get an `_h<N>` suffix when several horizons run) |
+| `backtest.output.*` | — | Trades CSV, summary CSV, bar-chart path, `grid_chart_path` for the wait × hold heatmap, chart DPI |
 | `fundamentals.enabled` | `true` | Fetch fundamentals for every signalling ticker |
 | `fundamentals.fields` | 6 fields | Yahoo `info` key → display label; add/remove entries to change what the alert shows |
 | `fundamentals.percent_fields` | `revenueGrowth`, `payoutRatio` | Fields Yahoo returns as fractions, converted to % (note: `dividendYield` is *not* here — Yahoo already returns it as a %) |
