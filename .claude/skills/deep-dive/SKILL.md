@@ -6,7 +6,7 @@ description: Produce a graded investment-case deep-dive for a scanner signal —
 # Deep-dive stock analysis
 
 This skill is the **synthesis layer** of the stock_analyzer pipeline. The nightly
-scan (`run_scanners.py`) writes `latest_hits.json`; this skill turns a
+scan (`run_scanners.py`) writes `output/latest_hits.json`; this skill turns a
 signalling ticker into a full investment case. Each screen reports **one signal
 list** whose `Setup` is `full` (every condition held) or `partial` (breakout:
 3 of 4; reclaim: 1-2 confirmations failed, named in `Missing`). Treat a partial
@@ -23,7 +23,9 @@ disclaimer line (below) in every report and the Discord summary.
 
 ## Prerequisites
 
-- `latest_hits.json` exists (run `python run_scanners.py` first, or work ad-hoc).
+- `output/latest_hits.json` exists (run `python run_scanners.py` first, or work
+  ad-hoc). `research_report.load_hits` resolves it via
+  `scanner_common.output_dir()`.
 - IBKR MCP authenticated in this session (Tier B). If not, run `/mcp`.
 - SEC filings need only `research.sec.user_agent` (email-bearing, already in config) — no API key.
 - Confirm with the user before any **live** Discord send.

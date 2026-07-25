@@ -29,6 +29,7 @@ from scanner_common import (
     fetch_fundamentals,
     get_sp500_tickers,
     load_config,
+    output_dir,
     send_discord_alert,
     write_latest_hits,
 )
@@ -82,7 +83,7 @@ def main() -> int:
     research_cfg = cfg.get("research", {})
     hits_path = Path(research_cfg.get("latest_hits_path", "latest_hits.json"))
     if not hits_path.is_absolute():
-        hits_path = Path(__file__).with_name(str(hits_path))
+        hits_path = output_dir() / hits_path
     write_latest_hits(hits_path, scan_date, results)
 
     all_empty = all(r.hits.empty for _, r in results)

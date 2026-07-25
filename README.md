@@ -147,7 +147,7 @@ There is one signal list per screen. `Setup` grades it:
 | `partial` | exactly 3 of 4 (+ proximity guard when the breakout leg failed) | — never; this screen stays strict | fresh cross out of a downtrend, 1–2 confirmations failing |
 
 Both tiers are alerted together, sorted full-first, and both are carried into
-`latest_hits.json` for the deep-dive. A partial card uses the grey side bar and
+`output/latest_hits.json` for the deep-dive. A partial card uses the grey side bar and
 appends a **Missing:** line naming what failed.
 
 Why: the universe backtest measured the tiers separately and the *partial*
@@ -229,8 +229,19 @@ python backtest_reclaim.py  --ticker META --start 2023-01-01 --end 2023-12-31
 ```
 
 `run_backtests.bat` runs all three default validation cases in one go and
-writes their combined step-by-step output to `backtest_log.txt` (gitignored,
-overwritten each run) — separate from the nightly production `scanner_log.txt`.
+writes their combined step-by-step output to `output/backtest_log.txt`
+(overwritten each run) — separate from the nightly production
+`output/scanner_log.txt`.
+
+### Where generated files go
+
+Everything the project *generates* lands in **`output/`** (gitignored as a
+single directory): both logs, the `latest_hits.json` scan hand-off, the cached
+price panel, and every backtest table and chart. The project root holds only
+inputs — code, `config.json`, docs. `config.json` keeps storing bare filenames
+(`backtest_universe_cache.pkl`, …) and `scanner_common.output_dir()` resolves
+them; an absolute path in config still overrides. Deep-dive reports are the one
+exception: they go to the Google Drive folder instead.
 
 ### Universe backtest — did the screens make money?
 
@@ -248,7 +259,7 @@ python backtest_universe.py --years 5 --refresh        # longer window, fresh do
 ```
 
 It downloads the universe once (analysis window + the longest screen's
-rolling-window warm-up) and **caches it to `backtest_universe_cache.pkl`**, so
+rolling-window warm-up) and **caches it to `output/backtest_universe_cache.pkl`**, so
 re-running after a `config.json` tweak takes seconds; `--refresh` re-downloads.
 It adds no condition math — every screen's `compute_*` already returns
 `(days, tickers)` frames, so the whole `signal` frame is masked against a
@@ -261,8 +272,9 @@ alerted, that tier is a pure control group.
 Each cohort is compared against two baselines: **random entry** (the same
 forward-return matrix over *all* stock-days — the bar a screen must clear) and
 **SPY buy-and-hold**. Outputs: a console stats table + per-signal-year
-breakdown, `backtest_universe_trades.csv` (every trade, with `status`
-`closed`/`open`), `backtest_universe_summary.csv`, and `backtest_universe.png`.
+breakdown, plus (all under `output/`) `backtest_universe_trades.csv` (every
+trade, with `status` `closed`/`open`), `backtest_universe_summary.csv`, and
+`backtest_universe.png`.
 
 Entry conventions: `next_open` (default — the signal is only known after the
 close, so the earliest tradeable price is the next open) or `signal_close`
@@ -288,7 +300,7 @@ signal day i  (its close is only known after the bell)
 ```
 
 The run prints a wait × hold matrix of mean return and win rate per screen and
-writes `backtest_universe_grid.png` — one heatmap panel per screen, cells
+writes `output/backtest_universe_grid.png` — one heatmap panel per screen, cells
 labelled with mean return and coloured by **excess over the random-entry
 baseline** on a diverging scale whose neutral point is exactly zero (blue beat
 buying at random, orange did worse).
@@ -363,7 +375,7 @@ the run header):
 | `backtest.split_by_tier` | `false` | Measure `full` and `partial` setups as separate cohorts instead of one combined signal cohort |
 | `backtest.measure_excursions` | `true` | Compute MFE/MAE (best/worst excursion while the trade was open) |
 | `backtest.benchmark_ticker` | `SPY` | Buy-and-hold benchmark, downloaded alongside the universe |
-| `backtest.cache_path` | `backtest_universe_cache.pkl` | Cached price panel (gitignored); `--refresh` re-downloads |
+| `backtest.cache_path` | `backtest_universe_cache.pkl` | Cached price panel, resolved inside `output/`; `--refresh` re-downloads |
 | `backtest.cache_max_age_days` | `1` | Reuse the cache only while it is younger than this |
 | `backtest.screens` | all three | Config keys of the screens to include |
 | `backtest.output.*` | — | Trades CSV, summary CSV, bar-chart path, `grid_chart_path` for the wait × hold heatmap, chart DPI |
@@ -381,7 +393,7 @@ the run header):
 
 The scan runs Mon–Fri at **23:30 Israel time** (~30 min after the 16:00 ET US
 market close) via the task **"SP500 Breakout Scanner"**, which executes
-`run_scanner.bat` and appends all output to `scanner_log.txt`.
+`run_scanner.bat` and appends all output to `output/scanner_log.txt`.
 
 To (re)create the task, run in PowerShell:
 
@@ -397,7 +409,7 @@ Useful commands:
 ```powershell
 Get-ScheduledTaskInfo -TaskName "SP500 Breakout Scanner"   # last/next run + result code
 Start-ScheduledTask   -TaskName "SP500 Breakout Scanner"   # trigger a run right now
-Get-Content scanner_log.txt -Tail 20                       # inspect the last run's output
+Get-Content output\scanner_log.txt -Tail 20                # inspect the last run's output
 ```
 
 Notes:

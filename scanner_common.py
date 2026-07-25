@@ -20,7 +20,24 @@ import pandas as pd
 import requests
 import yfinance as yf
 
-CONFIG_PATH = Path(__file__).with_name("config.json")
+# The code lives flat in the project root; this is the one line to revisit if
+# it ever moves into a package directory.
+PROJECT_ROOT = Path(__file__).resolve().parent
+CONFIG_PATH = PROJECT_ROOT / "config.json"
+
+
+def output_dir(create: bool = True) -> Path:
+    """The single directory every *generated* artifact goes to.
+
+    Logs, the `latest_hits.json` scan hand-off, backtest tables and charts, and
+    the cached price panel -- all of it lands here, so the project root holds
+    only inputs (code, config.json, docs). Config keeps storing bare filenames
+    and this resolves them; an absolute path in config still wins.
+    """
+    out = PROJECT_ROOT / "output"
+    if create:
+        out.mkdir(parents=True, exist_ok=True)
+    return out
 
 # Discord hard limit is 2000 chars per message; stay under it so long
 # hit lists get split across several messages instead of being rejected.

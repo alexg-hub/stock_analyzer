@@ -1,9 +1,7 @@
 __pycache__/
 *.pyc
-scanner_log.txt
-backtest_log.txt
-latest_hits.json
-backtest_*.csv
-backtest_*.png
-backtest_*.pkl
 .venv/
+
+# Everything generated -- logs, the latest_hits.json scan hand-off, backtest
+# tables/charts and the cached price panel (see scanner_common.output_dir).
+output/

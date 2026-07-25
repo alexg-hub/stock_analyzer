@@ -45,6 +45,7 @@ from scanner_common import (
     download_price_data,
     get_sp500_tickers,
     load_config,
+    output_dir,
     warmup_months,
 )
 
@@ -71,7 +72,7 @@ def section(title: str) -> None:
 
 def _cache_path(bt_cfg: dict) -> Path:
     path = Path(bt_cfg.get("cache_path", "backtest_universe_cache.pkl"))
-    return path if path.is_absolute() else Path(__file__).with_name(str(path))
+    return path if path.is_absolute() else output_dir() / path
 
 
 def load_panel(bt_cfg: dict, cfg: dict, years: int, warmup_days: int,
@@ -555,7 +556,7 @@ def main() -> int:
 
     # -- STEP 6: outputs --
     section("STEP 6 -- Outputs")
-    out_dir = Path(__file__).parent
+    out_dir = output_dir()
     cols = ["screen", "cohort", "delay", "horizon", "ticker", "signal_date",
             "status", "entry_date", "entry_price", "exit_date", "exit_price",
             "return_pct"]

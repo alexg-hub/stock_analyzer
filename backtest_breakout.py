@@ -25,7 +25,7 @@ import pandas as pd
 
 import charts
 from breakout_scanner import build_calc_table, compute_signals, missing_reason
-from scanner_common import download_history, load_config
+from scanner_common import download_history, load_config, output_dir
 
 
 def section(title: str) -> None:
@@ -124,7 +124,7 @@ def main() -> int:
 
     log_run(table, strategy, ticker)
 
-    out_dir = Path(__file__).parent
+    out_dir = output_dir()
     csv_path = out_dir / f"backtest_{ticker}.csv"
     table.round(4).to_csv(csv_path)
     print(f"\nFull per-day calculation table saved to {csv_path}")

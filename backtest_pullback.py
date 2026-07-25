@@ -22,7 +22,7 @@ from pathlib import Path
 import pandas as pd
 
 import charts
-from scanner_common import download_history, load_config
+from scanner_common import download_history, load_config, output_dir
 from sma_pullback import build_calc_table, compute_pullback_signals, touch_miss_reason
 
 
@@ -122,7 +122,7 @@ def main() -> int:
 
     log_run(table, strategy, ticker)
 
-    out_dir = Path(__file__).parent
+    out_dir = output_dir()
     csv_path = out_dir / f"backtest_pullback_{ticker}.csv"
     table.round(4).to_csv(csv_path)
     print(f"\nFull per-day calculation table saved to {csv_path}")

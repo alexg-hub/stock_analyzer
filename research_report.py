@@ -28,7 +28,12 @@ from pathlib import Path
 
 import sec
 from research_collect import collect_yahoo
-from scanner_common import load_config, resolve_drive_dir, send_discord_alert
+from scanner_common import (
+    load_config,
+    output_dir,
+    resolve_drive_dir,
+    send_discord_alert,
+)
 
 VERDICT_COLOR = 0x2A78D6  # matches the charts' "close" blue
 
@@ -41,7 +46,7 @@ def load_hits(cfg: dict) -> dict:
     """Load latest_hits.json (the Stage-1 hand-off). Empty dict if absent."""
     path = Path(cfg.get("research", {}).get("latest_hits_path", "latest_hits.json"))
     if not path.is_absolute():
-        path = Path(__file__).with_name(str(path))
+        path = output_dir() / path
     if not path.exists():
         print(f"(no hand-off file at {path} -- run run_scanners.py first)")
         return {}

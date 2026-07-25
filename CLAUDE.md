@@ -22,7 +22,7 @@ pip install -r requirements.txt
 python run_scanners.py
 
 # Historical validation of the same logic on one ticker (no Discord send);
-# each writes a backtest_*.csv and backtest_*.png (gitignored)
+# each writes output/backtest_*.csv and output/backtest_*.png
 python backtest_breakout.py --ticker JNJ  --start 2025-01-01 --end 2025-10-31
 python backtest_pullback.py --ticker MSFT --start 2024-01-01 --end 2025-06-30
 python backtest_reclaim.py  --ticker META --start 2023-01-01 --end 2023-12-31
@@ -111,7 +111,7 @@ real send.
   holding period** and reused across delays — a random entry has no signal to be
   delayed from — which is what makes `excess_%` comparable down a grid column.
   Its price panel is cached to
-  `backtest_universe_cache.pkl` (gitignored); `--refresh` re-downloads. The
+  `output/backtest_universe_cache.pkl`; `--refresh` re-downloads. The
   caveats (survivorship bias from using today's index members, no costs, no
   dividends, clustered/overlapping trades) are printed in the run header and
   documented in the README — keep them there, don't quietly drop them.
@@ -121,6 +121,18 @@ real send.
   embed-char per-message limits) and **`charts.py`**
   (validated palette + the per-screen chart builders used by both the alert
   and the backtests).
+- **Every generated file goes to `output/`** via
+  `scanner_common.output_dir()` — both logs, `latest_hits.json`, the cached
+  price panel, and all backtest tables/charts. The project root holds only
+  inputs (code, `config.json`, docs); `output/` is gitignored as one directory.
+  Never write an artifact with `Path(__file__).parent` — that is exactly what
+  this replaced. `config.json` deliberately still stores **bare filenames**
+  (`backtest_universe_cache.pkl`, …) which `output_dir()` resolves, so an
+  absolute path in config keeps overriding it and no sub-paths leak into config.
+  `PROJECT_ROOT` assumes the code is flat in the repo root — the one line to
+  revisit if modules ever move into a package. The two `.bat` files must keep
+  their `if not exist output md output` guard: `cmd` expands `>>` before Python
+  runs, so `output_dir()`'s `mkdir` would be too late.
 - **Data layout contract**: `yf.download(..., group_by="column",
   auto_adjust=False)` giving a `(Field, Ticker)` column MultiIndex
   (`data["Close"]["AAPL"]`). Single-ticker frames must be normalized to this
@@ -210,8 +222,8 @@ real send.
 - `config.json` holds the **live Discord webhook URL** and is committed on
   purpose (private repo). Never paste it into issues/PRs or public output.
 - Nightly run: Task Scheduler task **"SP500 Breakout Scanner"**, Mon–Fri 23:30
-  Israel time → `run_scanner.bat` → output appended to `scanner_log.txt`
-  (gitignored). README's "Nightly schedule" section has the exact
+  Israel time → `run_scanner.bat` → output appended to
+  `output/scanner_log.txt`. README's "Nightly schedule" section has the exact
   `Register-ScheduledTask` command and diagnostics; keep it in sync if the
   schedule changes. Result code `3221225786` in `Get-ScheduledTaskInfo` means
   the run was killed mid-scan (usually PC shutdown), and that night's alert is
@@ -222,5 +234,5 @@ real send.
   the scan; Wikipedia scraping needs the browser-like User-Agent header;
   tickers use `-` not `.` (BRK-B).
 - Windows box, Microsoft Store Python 3.13 (`python` on PATH). yfinance's
-  progress bar is disabled for non-TTY output so `scanner_log.txt` stays
+  progress bar is disabled for non-TTY output so `output/scanner_log.txt` stays
   readable. matplotlib uses the Agg backend (set in `charts.py`).
