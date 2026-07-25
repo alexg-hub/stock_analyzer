@@ -51,6 +51,23 @@
         "lookback_days": 250,
         "dpi": 120
     },
+    "backtest": {
+        "years": 3,
+        "holding_days": [30],
+        "entry": "next_open",
+        "include_near_misses": true,
+        "measure_excursions": true,
+        "benchmark_ticker": "SPY",
+        "cache_path": "backtest_universe_cache.pkl",
+        "cache_max_age_days": 1,
+        "screens": ["breakout_strategy", "pullback_strategy", "reclaim_strategy"],
+        "output": {
+            "trades_csv": "backtest_universe_trades.csv",
+            "summary_csv": "backtest_universe_summary.csv",
+            "chart_path": "backtest_universe.png",
+            "chart_dpi": 120
+        }
+    },
     "fundamentals": {
         "enabled": true,
         "fields": {

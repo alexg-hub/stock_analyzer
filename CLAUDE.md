@@ -26,6 +26,13 @@ python run_scanners.py
 python backtest_breakout.py --ticker JNJ  --start 2025-01-01 --end 2025-10-31
 python backtest_pullback.py --ticker MSFT --start 2024-01-01 --end 2025-06-30
 python backtest_reclaim.py  --ticker META --start 2023-01-01 --end 2023-12-31
+
+# Universe-wide profit backtest: every screen x all history, buy the trigger /
+# sell N trading days later. No Discord. Caches the price panel, so re-runs
+# after a config tweak take ~5s; --refresh re-downloads.
+python backtest_universe.py
+python backtest_universe.py --holding-days 10,30,60
+python backtest_universe.py --screens breakout_strategy --entry signal_close
 ```
 
 To test alert formatting/sending without spamming the channel, monkeypatch
@@ -60,6 +67,28 @@ real send.
   (`backtest_breakout.py`, `backtest_pullback.py`, `backtest_reclaim.py`)
   evaluate every historical day for one ticker and import the compute
   functions — never reimplement the condition math there.
+- **Each screen module also exposes `required_history(strategy)`** (its total
+  lookback, used by its own "NO signal can ever fire" warning and by the
+  universe backtest's warm-up) and **`near_miss_mask(data, signals, strategy)`**
+  — the near-miss *combination* logic, vectorized over all days like the
+  `compute_*` functions. `find_breakouts`/`find_reclaims` take `.iloc[-1]` of
+  it, so production and the backtest share one definition. The pullback
+  screen's `near_miss_mask` is **backtest-only** (`is_touch & ~signal`, cohort
+  name `NEAR_COHORT = "touch-no-fire"`); that screen has no production
+  near-miss list.
+- **`backtest_universe.py` is the profit backtest** — the whole universe ×
+  all history, one fixed-horizon trade per signal. It reuses the production
+  `compute_*` + `near_miss_mask` unchanged (its own `SCREENS` registry pairs
+  each module with its compute function) and reuses
+  `scanner_common.download_price_data`/`warmup_months`; the simulation itself
+  is a few `shift()`s (`forward_trades`), never a loop. `holding_days` counts
+  trading days held *after* the entry day. Excursion (MFE/MAE) windows must
+  roll *then* shift — shifting first needs rows before the signal day and
+  silently NaNs out the start of the frame. Its price panel is cached to
+  `backtest_universe_cache.pkl` (gitignored); `--refresh` re-downloads. The
+  caveats (survivorship bias from using today's index members, no costs, no
+  dividends, clustered/overlapping trades) are printed in the run header and
+  documented in the README — keep them there, don't quietly drop them.
 - **Shared infra lives in `scanner_common.py`** (config, Wikipedia tickers,
   bulk/single downloads, fundamentals, Discord send — content text + embed
   cards, batched automatically under Discord's 10-embed / 10-file / ~6000
@@ -135,7 +164,8 @@ real send.
   trend_lookback_days`; reclaim: `sma_days + below_lookback_days`; ~21
   trading days per calendar month), or the rolling windows never fill and
   that screen can never fire (each prints a warning). Check this whenever
-  any of those values change.
+  any of those values change. `backtest_universe.py` is exempt: it derives its
+  own download length from `backtest.years` + `required_history()`.
 - The user frequently hand-tunes strategy values in `config.json` between
   sessions — read the file for current values; don't trust README's table or
   prior conversation, and don't revert their changes.

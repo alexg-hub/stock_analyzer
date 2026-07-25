@@ -27,6 +27,7 @@ Current screens:
 | `scanner_common.py` | Shared infra: config, tickers, downloads, fundamentals, Discord |
 | `charts.py` | Shared chart rendering (palette + per-screen chart builders) |
 | `backtest_breakout.py` / `backtest_pullback.py` / `backtest_reclaim.py` | Single-ticker historical validators |
+| `backtest_universe.py` | Universe-wide profit backtest: every screen × all history, buy the trigger / sell N days later |
 
 Adding a new scanner = new module exposing `CONFIG_KEY`, `scan()`,
 `EMBED_COLOR` + `describe_hit()`, `plot_hit()` + one entry in
@@ -175,6 +176,7 @@ python run_scanners.py            # full S&P 500 scan + Discord alert
 python backtest_breakout.py       # historical validation, breakout screen
 python backtest_pullback.py       # historical validation, pullback screen
 python backtest_reclaim.py        # historical validation, reclaim screen
+python backtest_universe.py       # universe-wide profit backtest (all screens)
 ```
 
 ### Backtests
@@ -193,6 +195,55 @@ python backtest_reclaim.py  --ticker META --start 2023-01-01 --end 2023-12-31
 `run_backtests.bat` runs all three default validation cases in one go and
 writes their combined step-by-step output to `backtest_log.txt` (gitignored,
 overwritten each run) — separate from the nightly production `scanner_log.txt`.
+
+### Universe backtest — did the screens make money?
+
+The single-ticker backtests prove the *math* fires on a known case.
+`backtest_universe.py` answers the different question: **if every signal had
+been bought and sold `holding_days` later, what was the profit?**
+
+```
+python backtest_universe.py                          # config defaults (3y, h=30)
+python backtest_universe.py --holding-days 10,30,60  # several horizons in one run
+python backtest_universe.py --screens breakout_strategy --entry signal_close
+python backtest_universe.py --years 5 --refresh      # longer window, fresh download
+```
+
+It downloads the universe once (analysis window + the longest screen's
+rolling-window warm-up) and **caches it to `backtest_universe_cache.pkl`**, so
+re-running after a `config.json` tweak takes seconds; `--refresh` re-downloads.
+It adds no condition math — every screen's `compute_*` already returns
+`(days, tickers)` frames, so the whole `signal` frame is masked against a
+vectorized forward-return matrix.
+
+Per screen it measures two cohorts: **hits** and the screen's non-firing
+comparison set (the production **near-miss** list for breakout/reclaim;
+**touch-no-fire** days for pullback, which has no production near-miss list).
+Each is compared against two baselines: **random entry** (the same
+forward-return matrix over *all* stock-days — the bar a screen must clear) and
+**SPY buy-and-hold**. Outputs: a console stats table + per-signal-year
+breakdown, `backtest_universe_trades.csv` (every trade, with `status`
+`closed`/`open`), `backtest_universe_summary.csv`, and `backtest_universe.png`.
+
+Entry conventions: `next_open` (default — the signal is only known after the
+close, so the earliest tradeable price is the next open) or `signal_close`
+(the price shown in the alert). `holding_days` counts **trading** days held
+*after* the entry day. `mfe_pct`/`mae_pct` are the best/worst excursion while
+the position was open — useful for judging whether a stop or target would help.
+
+**Read these caveats before believing any number** (they are also printed in
+the run header):
+
+- **Survivorship bias** — the universe is *today's* S&P 500, so companies
+  dropped, acquired or delisted during the window are absent. Results are
+  biased upward. This is a screen-*comparison* tool, not a tradeable backtest.
+- **No costs, no dividends** — no commission, spread or slippage; returns are
+  price-only (splits handled, dividends ignored).
+- **No position sizing or capital limit** — every signal is an independent
+  equal-weight trade, even when dozens fire on the same day.
+- **Signals cluster in time**, so trades overlap and share market beta:
+  per-trade statistics are *not* independent samples (`distinct_dates` shows
+  how concentrated a cohort is). Don't read a t-statistic off them.
 
 ## Configuration (`config.json`)
 
@@ -234,6 +285,16 @@ overwritten each run) — separate from the nightly production `scanner_log.txt`
 | `charts.near_miss_charts` | `true` | Also attach a chart to near-miss cards (set `false` for hits-only charts) |
 | `charts.lookback_days` | `250` | Trading days shown in alert charts |
 | `charts.dpi` | `120` | Alert-chart resolution |
+| `backtest.years` | `3` | Length of the analysis window; the download adds the warm-up the longest screen lookback needs |
+| `backtest.holding_days` | `[30]` | Holding periods in **trading** days, held after the entry day; a list runs several horizons in one pass |
+| `backtest.entry` | `next_open` | `next_open` (buy the open after the signal) or `signal_close` (buy the trigger close) |
+| `backtest.include_near_misses` | `true` | Also measure each screen's non-firing cohort (near-miss / touch-no-fire) |
+| `backtest.measure_excursions` | `true` | Compute MFE/MAE (best/worst excursion while the trade was open) |
+| `backtest.benchmark_ticker` | `SPY` | Buy-and-hold benchmark, downloaded alongside the universe |
+| `backtest.cache_path` | `backtest_universe_cache.pkl` | Cached price panel (gitignored); `--refresh` re-downloads |
+| `backtest.cache_max_age_days` | `1` | Reuse the cache only while it is younger than this |
+| `backtest.screens` | all three | Config keys of the screens to include |
+| `backtest.output.*` | — | Trades CSV, summary CSV, chart path + DPI (chart names get an `_h<N>` suffix when several horizons run) |
 | `fundamentals.enabled` | `true` | Fetch fundamentals for hits and near-misses |
 | `fundamentals.fields` | 6 fields | Yahoo `info` key → display label; add/remove entries to change what the alert shows |
 | `fundamentals.percent_fields` | `revenueGrowth`, `payoutRatio` | Fields Yahoo returns as fractions, converted to % (note: `dividendYield` is *not* here — Yahoo already returns it as a %) |

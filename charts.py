@@ -222,3 +222,113 @@ def plot_pullback(table: pd.DataFrame, strategy: dict, ticker: str,
     fig.savefig(out_path, dpi=dpi, bbox_inches="tight", facecolor=C["surface"])
     plt.close(fig)
     print(f"Chart saved to {out_path}")
+
+
+# --------------------------------------------------------------------------
+# Universe-backtest summary
+# --------------------------------------------------------------------------
+
+# Cohort -> hue, assigned in fixed order (never cycled): hits are the primary
+# series, the non-firing cohorts the secondary one.
+COHORT_COLOR = {"hit": C["close"], "near": C["event"],
+                "touch-no-fire": C["event"]}
+
+
+def plot_backtest_summary(summary: pd.DataFrame, horizon: int, entry: str,
+                          baseline_label: str, out_path: Path,
+                          dpi: int = 120) -> None:
+    """Mean return and win rate per screen/cohort for one holding period.
+
+    `summary` is the stats table backtest_universe.py builds (one row per
+    horizon x screen x cohort, plus the baseline/benchmark reference rows).
+    Two panels, both horizontal bars on one axis each -- the baseline's mean
+    return and win rate are drawn as reference lines rather than bars, since
+    they are the bar every screen has to clear.
+    """
+    rows = summary[summary["horizon"] == horizon]
+    base = rows[rows["screen"] == baseline_label]
+    bars = rows[(rows["screen"] != baseline_label)
+                & ~rows["screen"].str.contains("buy-and-hold")]
+    bars = bars[bars["evaluable"] > 0]
+    if bars.empty:
+        print("No cohort had an evaluable trade -- skipping the summary chart.")
+        return
+
+    labels = [f"{s.replace('_strategy', '')} · {c}  (n={int(n)})"
+              for s, c, n in zip(bars["screen"], bars["cohort"], bars["evaluable"])]
+    colors = [COHORT_COLOR.get(c, C["muted"]) for c in bars["cohort"]]
+    y = range(len(bars))
+
+    fig, (ax_ret, ax_win) = plt.subplots(
+        2, 1, figsize=(11, 2.0 + 0.95 * len(bars)),
+        gridspec_kw={"hspace": 0.5})
+    fig.patch.set_facecolor(C["surface"])
+    for ax in (ax_ret, ax_win):
+        ax.set_facecolor(C["surface"])
+        for side in ("top", "right", "left"):
+            ax.spines[side].set_visible(False)
+        ax.spines["bottom"].set_color(C["axis"])
+        ax.tick_params(colors=C["muted"], labelsize=9)
+        ax.grid(axis="x", color=C["grid"], linewidth=0.8)
+        ax.set_axisbelow(True)
+        ax.set_yticks(list(y))
+        ax.set_yticklabels(labels, color=C["ink2"], fontsize=9.5)
+        ax.invert_yaxis()
+
+    def draw(ax, values, ref, xlabel, fmt, from_zero: bool):
+        """Horizontal bars + a dashed reference line for the random-entry bar.
+
+        The reference value goes in the axis label rather than a legend: with
+        bars this close to the line, a legend box lands on top of them.
+        """
+        ax.barh(list(y), values, color=colors, height=0.62)
+        if pd.notna(ref):
+            ax.axvline(ref, color=C["ink2"], linewidth=1.2, linestyle="--")
+            xlabel += f"      - - - random entry {fmt.format(ref)}"
+        ax.axvline(0, color=C["axis"], linewidth=1.0)
+        ax.set_xlabel(xlabel, color=C["ink2"], fontsize=10)
+
+        lo = 0 if from_zero else min(0, min(values))
+        hi = max(0, max(values), ref if pd.notna(ref) else 0)
+        span = (hi - lo) or 1
+        for i, v in enumerate(values):
+            # Label just outside the bar end, on the side the bar points to --
+            # but flipped inside when the outside spot would sit on the
+            # reference line.
+            near_ref = pd.notna(ref) and abs(v - ref) < 0.08 * span
+            inside = near_ref and abs(v) > 0.12 * span
+            sign = 1 if v >= 0 else -1
+            offset = 0.015 * span * (-sign if inside else sign)
+            ax.text(v + offset, i, fmt.format(v), va="center",
+                    ha=("right" if v >= 0 else "left") if inside
+                    else ("left" if v >= 0 else "right"),
+                    fontsize=9, color=C["surface"] if inside else C["ink"])
+        # Headroom on the right for the longest value label.
+        ax.set_xlim(lo - (0 if from_zero else 0.10 * span), hi + 0.18 * span)
+
+    draw(ax_ret, bars["mean_%"].tolist(), base["mean_%"].squeeze(),
+         f"Mean return after {horizon} trading days (%)", "{:+.2f}%",
+         from_zero=False)
+    draw(ax_win, bars["win_rate_%"].tolist(), base["win_rate_%"].squeeze(),
+         "Win rate (%)", "{:.1f}%", from_zero=True)
+
+    # Cohort legend once, below both panels, where it can't cover a bar.
+    # Grouped by hue, so the cohorts that share one (every "did not fire"
+    # flavour) become a single entry instead of two identical swatches.
+    by_hue = {}
+    for cohort in bars["cohort"]:
+        by_hue.setdefault(COHORT_COLOR.get(cohort, C["muted"]), []).append(cohort)
+    fig.legend(
+        handles=[plt.Rectangle((0, 0), 1, 1, color=hue) for hue in by_hue],
+        labels=[" / ".join(dict.fromkeys(cs)) for cs in by_hue.values()],
+        loc="lower center", ncol=len(by_hue), frameon=False, fontsize=9.5,
+        labelcolor=C["ink2"], bbox_to_anchor=(0.5, -0.02))
+
+    _title(ax_ret,
+           f"Screen performance -- buy at {entry.replace('_', ' ')}, "
+           f"sell {horizon} trading days later",
+           "S&P 500, price-only returns, no costs; survivorship-biased "
+           "(today's index members only)")
+    fig.savefig(out_path, dpi=dpi, bbox_inches="tight", facecolor=C["surface"])
+    plt.close(fig)
+    print(f"Chart saved to {out_path}")

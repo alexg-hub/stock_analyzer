@@ -31,6 +31,15 @@ CONFIG_KEY = "breakout_strategy"
 # Side-bar color of this screen's Discord embed cards (palette orange).
 EMBED_COLOR = 0xEB6834
 
+# The four conditions, in C1..C4 order (near-miss = exactly 3 of these).
+CONDITIONS = ("is_consolidating", "is_breakout", "is_volume_surge",
+              "is_long_green_candle")
+
+
+def required_history(strategy: dict) -> int:
+    """Trading days of history needed before this screen can ever fire."""
+    return strategy["consolidation_window_days"]
+
 
 # --------------------------------------------------------------------------
 # Vectorized breakout screen
@@ -100,6 +109,26 @@ def compute_signals(data: pd.DataFrame, strategy: dict) -> dict[str, pd.DataFram
     }
 
 
+def near_miss_mask(data: pd.DataFrame, signals: dict, strategy: dict) -> pd.DataFrame:
+    """(days, tickers) mask of near-misses: exactly 3 of the 4 conditions true.
+
+    C2 (breakout) failures are additionally required to close within
+    `near_miss_max_gap_pct` of the breakout level, so a volume spike deep
+    inside the range doesn't spam the alert.
+
+    Vectorized over every day like the compute_* functions: the nightly scan
+    takes `.iloc[-1]`, the universe backtest uses the whole frame.
+    """
+    n_true = sum(signals[c].fillna(False).astype(int) for c in CONDITIONS)
+    near = (n_true == 3) & ~signals["signal"].fillna(False)
+
+    gap = strategy.get("near_miss_max_gap_pct", 0.05)
+    brk_level = strategy.get("breakout_multiplier", 1.0) * signals["prior_high"]
+    # NaN prior_high (warm-up) compares as False, so those days drop out.
+    return near & (signals["is_breakout"].fillna(False)
+                   | (data["Close"] >= (1 - gap) * brk_level))
+
+
 def near_miss_reason(close, prior_high, range_pct, vol_ratio, body_pct,
                      strategy: dict) -> str:
     """Explain which single condition a 3-of-4 near-miss failed.
@@ -133,9 +162,9 @@ def find_breakouts(data: pd.DataFrame, strategy: dict) -> tuple[pd.DataFrame, pd
         `near_miss_max_gap_pct` of the required breakout level, so a
         volume spike deep inside a range doesn't spam the alert).
     """
-    window = strategy["consolidation_window_days"]
-    if len(data) <= window:
-        print(f"WARNING: only {len(data)} rows of history for a {window}-day "
+    needed = required_history(strategy)
+    if len(data) <= needed:
+        print(f"WARNING: only {len(data)} rows of history for a {needed}-day "
               f"consolidation window -- the rolling window never fills, so NO "
               f"signal can ever fire. Increase data.download_period in config.json.")
 
@@ -157,18 +186,9 @@ def find_breakouts(data: pd.DataFrame, strategy: dict) -> tuple[pd.DataFrame, pd
     signal_today = last["signal"].fillna(False)
     hits = day_stats(signal_today[signal_today].index.tolist())
 
-    # Near-misses: exactly three of the four conditions true today.
-    conds = pd.DataFrame(
-        {c: last[c].fillna(False)
-         for c in ("is_consolidating", "is_breakout", "is_volume_surge",
-                   "is_long_green_candle")}
-    )
-    near_mask = (conds.sum(axis=1) == 3) & ~signal_today
-    # For C2 failures, require the close to be near the breakout level.
-    gap = strategy.get("near_miss_max_gap_pct", 0.05)
-    brk_level = strategy.get("breakout_multiplier", 1.0) * last["prior_high"]
-    near_mask &= conds["is_breakout"] | (data["Close"].iloc[-1] >= (1 - gap) * brk_level)
-
+    # Near-misses: exactly three of the four conditions true today (the mask
+    # is computed for every day; the scan only needs the last one).
+    near_mask = near_miss_mask(data, signals, strategy).iloc[-1]
     near = day_stats(near_mask[near_mask].index.tolist())
     near["Reason"] = [
         near_miss_reason(row["Close"], row["Range High"], row["Range %"] / 100,

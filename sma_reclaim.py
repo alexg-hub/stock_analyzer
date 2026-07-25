@@ -50,6 +50,11 @@ CONFIG_KEY = "reclaim_strategy"
 EMBED_COLOR = 0x2E9C6B
 
 
+def required_history(strategy: dict) -> int:
+    """Trading days of history needed before this screen can ever fire."""
+    return strategy["sma_days"] + strategy["below_lookback_days"]
+
+
 # --------------------------------------------------------------------------
 # Vectorized reclaim screen
 # --------------------------------------------------------------------------
@@ -129,6 +134,29 @@ def compute_reclaim_signals(data: pd.DataFrame, strategy: dict) -> dict[str, pd.
     }
 
 
+def near_miss_mask(data: pd.DataFrame, signals: dict, strategy: dict) -> pd.DataFrame:
+    """(days, tickers) mask of reclaim near-misses.
+
+    A genuine fresh cross above the level *out of a real downtrend* (R1+R2,
+    both mandatory exactly as for a hit) where **one or two** of the remaining
+    confirmations -- R3 volume, R5 candle, and R4 slope when enabled -- fail.
+    Zero failing = a hit; three or more = too far off, dropped.
+
+    Vectorized over every day like the compute_* functions: the nightly scan
+    takes `.iloc[-1]`, the universe backtest uses the whole frame.
+    """
+    fresh = signals["is_fresh_cross"].fillna(False)
+    downtrend = signals["is_downtrend"].fillna(False)
+    fails = ((~signals["is_volume_surge"].fillna(False)).astype(int)
+             + (~signals["is_long_green_candle"].fillna(False)).astype(int))
+    min_slope = strategy.get("min_sma_slope_pct")
+    if min_slope is not None:
+        is_slope_ok = signals["sma_slope_pct"] >= min_slope
+        fails += (~is_slope_ok.fillna(False)).astype(int)
+    return (fresh & downtrend & (fails >= 1) & (fails <= 2)
+            & ~signals["signal"].fillna(False))
+
+
 def cross_miss_reasons(row: pd.Series, strategy: dict) -> list[str]:
     """Every confirmation test a fresh-cross day failed, in condition order.
 
@@ -174,7 +202,7 @@ def find_reclaims(data: pd.DataFrame, strategy: dict) -> tuple[pd.DataFrame, pd.
         real downtrend but had one or two of the remaining confirmations
         (volume, candle, slope) fail, with the failure(s) explained.
     """
-    needed = strategy["sma_days"] + strategy["below_lookback_days"]
+    needed = required_history(strategy)
     if len(data) <= needed:
         print(f"WARNING: only {len(data)} rows of history but the reclaim "
               f"screen needs > {needed} ({strategy['sma_days']}d SMA + "
@@ -201,20 +229,10 @@ def find_reclaims(data: pd.DataFrame, strategy: dict) -> tuple[pd.DataFrame, pd.
     signal_today = last["signal"].fillna(False)
     hits = day_stats(signal_today[signal_today].index.tolist())
 
-    # Near-misses: a genuine fresh cross OUT OF A DOWNTREND today (both
-    # mandatory), where 1 or 2 of the remaining confirmations -- volume,
-    # candle, and the slope floor when enabled -- fail.
-    fresh = last["is_fresh_cross"].fillna(False)
-    downtrend = last["is_downtrend"].fillna(False)
-    fails = (
-        (~last["is_volume_surge"].fillna(False)).astype(int)
-        + (~last["is_long_green_candle"].fillna(False)).astype(int)
-    )
-    if strategy.get("min_sma_slope_pct") is not None:
-        is_slope_ok = last["sma_slope_pct"] >= strategy["min_sma_slope_pct"]
-        fails += (~is_slope_ok.fillna(False)).astype(int)
-    near_mask = fresh & downtrend & (fails >= 1) & (fails <= 2) & ~signal_today
-
+    # Near-misses: a genuine fresh cross OUT OF A DOWNTREND today with 1 or 2
+    # confirmations failing (the mask is computed for every day; the scan only
+    # needs the last one).
+    near_mask = near_miss_mask(data, signals, strategy).iloc[-1]
     near = day_stats(near_mask[near_mask].index.tolist())
     if not near.empty:
         near["Reason"] = [

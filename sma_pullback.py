@@ -40,6 +40,16 @@ CONFIG_KEY = "pullback_strategy"
 EMBED_COLOR = 0x2A78D6
 
 
+# Name of this screen's backtest cohort of non-firing days. It is NOT a
+# near-miss list (this screen has none in production) -- see near_miss_mask.
+NEAR_COHORT = "touch-no-fire"
+
+
+def required_history(strategy: dict) -> int:
+    """Trading days of history needed before this screen can ever fire."""
+    return strategy["sma_days"] + strategy["trend_lookback_days"]
+
+
 # --------------------------------------------------------------------------
 # Vectorized pullback screen
 # --------------------------------------------------------------------------
@@ -113,6 +123,18 @@ def compute_pullback_signals(data: pd.DataFrame, strategy: dict) -> dict[str, pd
     }
 
 
+def near_miss_mask(data: pd.DataFrame, signals: dict, strategy: dict) -> pd.DataFrame:
+    """(days, tickers) mask of touch days that did NOT fire -- **backtest only**.
+
+    This screen has no production near-miss list (the nightly alert never
+    sends pullback near-misses); this is the "touch but no signal" cohort the
+    single-ticker backtest already logs in its STEP 5, exposed as a frame so
+    the universe backtest can measure whether those days were worth trading.
+    `touch_miss_reason` explains an individual one.
+    """
+    return signals["is_touch"].fillna(False) & ~signals["signal"].fillna(False)
+
+
 def touch_miss_reason(row: pd.Series, strategy: dict) -> str:
     """Explain why a touch day (T3 true) did not fire the signal.
 
@@ -141,7 +163,7 @@ def find_pullbacks(data: pd.DataFrame, strategy: dict) -> pd.DataFrame:
     Returns a ticker-indexed DataFrame of the tickers whose close touched
     their rising SMA today after a sustained uptrend.
     """
-    needed = strategy["sma_days"] + strategy["trend_lookback_days"]
+    needed = required_history(strategy)
     if len(data) <= needed:
         print(f"WARNING: only {len(data)} rows of history but the pullback "
               f"screen needs > {needed} ({strategy['sma_days']}d SMA + "

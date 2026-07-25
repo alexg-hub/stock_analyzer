@@ -5,4 +5,5 @@ backtest_log.txt
 latest_hits.json
 backtest_*.csv
 backtest_*.png
+backtest_*.pkl
 .venv/
