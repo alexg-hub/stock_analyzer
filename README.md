@@ -18,8 +18,9 @@ Current screens:
 2. **SMA pullback** — a stock in a year-long uptrend pulling back to its
    rising 150-day SMA.
 3. **SMA reclaim** — a stock that spent most of the last year *below* its
-   200-day SMA crossing back above it on volume (trend-reversal /
-   Weinstein "Stage 2" entry).
+   long-term SMA (`sma_days`) crossing back above it on volume
+   (trend-reversal / Weinstein "Stage 2" entry). *Currently disabled in the
+   nightly alert — see [Screen 3](#screen-3-reclaim-of-a-long-term-sma-after-a-downtrend).*
 
 ## Code layout
 
@@ -95,9 +96,18 @@ the 150-day line" refers to.
 
 ## Screen 3: reclaim of a long-term SMA after a downtrend
 
+> **Currently disabled** (`reclaim_strategy.enabled: false`, since 2026-07-26).
+> The universe backtest measures it *below* a random entry — excess **−1.65**
+> (mean +0.45% over 30 days against a +2.10% baseline), and the tuner found no
+> threshold combination that lifts it (see [Tuning a screen](#tuning-a-screen-tune_screenpy)).
+> It is switched off in the nightly alert while it is reworked. **`enabled`
+> silences the alert only** — `backtest_universe.py` and `tune_screen.py`
+> deliberately still run it, since a screen is switched off exactly when it
+> most needs measuring.
+
 The mirror image of screen 2 — instead of a dip in an uptrend, it catches
-the *birth* of a new uptrend: a stock that lived below its 200-day SMA for
-most of a year crossing back above it. All conditions must be true on the
+the *birth* of a new uptrend: a stock that lived below its long-term SMA
+(`sma_days`) for most of a year crossing back above it. All conditions must be true on the
 most recent trading day (parameter names refer to the `reclaim_strategy`
 section):
 
@@ -419,8 +429,8 @@ small differences as noise.
 | `pullback_strategy.min_candle_range_pct` | `0.03` | Touch day's range `High−Low` must be ≥ this fraction of the Open (long tails) |
 | `pullback_strategy.require_reversal_candle` | `true` | Require the small-body/long-tailed touch candle; `false` disables it |
 | `pullback_strategy.alert_only_on_band_entry` | `true` | Alert only on the day the close enters the band from above |
-| `reclaim_strategy.enabled` | `true` | Run the SMA-reclaim screen |
-| `reclaim_strategy.sma_days` | `200` | SMA length (trading days) |
+| `reclaim_strategy.enabled` | `false` | Run the SMA-reclaim screen **in the nightly alert**; off since 2026-07-26 (underperforms — see Screen 3). The backtest and tuner ignore this flag |
+| `reclaim_strategy.sma_days` | `180` | SMA length (trading days) |
 | `reclaim_strategy.below_lookback_days` | `200` | Downtrend-persistence lookback |
 | `reclaim_strategy.min_days_below_pct` | `0.8` | Min fraction of the lookback the close spent below the SMA |
 | `reclaim_strategy.cross_margin_pct` | `0.01` | Close must exceed the SMA by this fraction (1.01 × SMA) |

@@ -66,7 +66,13 @@ real send.
   module in its `SCANNERS` registry. Each screen module implements the same
   contract, consumed by the registry loop:
   - `CONFIG_KEY` — its section name in `config.json`; the section's
-    `enabled` flag skips the screen.
+    `enabled` flag skips the screen. **`enabled` gates the nightly alert
+    only** — `backtest_universe.py` and `tune_screen.py` deliberately ignore
+    it (their own selectors are `backtest.screens`/`--screens` and the screen
+    argument), because a screen gets switched off precisely when it is
+    underperforming, which is when you most need to measure it. Reclaim has
+    been off since 2026-07-26 for exactly that reason (excess −1.65 vs the
+    random-entry baseline) and must stay measurable.
   - `scan(data, strategy) -> ScanResult` (dataclass in `scanner_common.py`:
     title, one ticker-indexed `hits` DataFrame, the strategy dict).
   - `EMBED_COLOR` + `describe_hit(row, strategy)` — the screen-specific parts

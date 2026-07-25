@@ -11,6 +11,12 @@ being pinned are the ones the hits/near-miss unification introduced:
   * the hand-off is a single list and the deep-dive can resolve either tier
   * an unsettled trailing bar (Yahoo's null-close row) is dropped rather than
     scanned as a silent zero
+  * `enabled: false` silences a screen's alert without disturbing any other
+
+Note the split: the mask/hits invariants run over **every configured screen**,
+enabled or not (a screen is usually switched off while it is being reworked, so
+that is when its contract most needs checking), while the alert and hand-off
+expectations are built from the **enabled** ones, mirroring `run_scanners.main`.
 
 Uses the cached price panel; never downloads. Discord is stubbed -- this test
 must never send.
@@ -81,6 +87,14 @@ for module, compute, strategy in screens(cfg):
     c.ok(f"{key}: full setups sort before partials", setups == sorted(setups))
 
 # --------------------------------------------------------------------------
+# `enabled` gates the nightly alert only, so the alert's expectations come from
+# the enabled screens while the invariants above keep covering every configured
+# screen -- a screen is normally switched off while it is being reworked, which
+# is when its contract most needs to stay verified.
+alerted = {k: f for k, f in frames.items() if cfg[k].get("enabled", True)}
+silenced = sorted(set(frames) - set(alerted))
+
+# --------------------------------------------------------------------------
 c.section("Discord cards: one per signal, tier visible, no near-miss wording")
 captured = {}
 handoff = Path(tempfile.mkdtemp(prefix="test_handoff_")) / "latest_hits.json"
@@ -102,8 +116,8 @@ rc = run_scanners.main()
 builtins.print = _print
 
 embeds = captured.get("embeds", [])
-n_rows = sum(len(f) for f in frames.values())
-n_partial = sum(int((f["Setup"] == "partial").sum()) for f in frames.values()
+n_rows = sum(len(f) for f in alerted.values())
+n_partial = sum(int((f["Setup"] == "partial").sum()) for f in alerted.values()
                 if not f.empty)
 partial_cards = [e for e in embeds if "(partial)" in e["title"]]
 full_cards = [e for e in embeds if "(partial)" not in e["title"]]
@@ -125,6 +139,10 @@ c.ok("no 'near miss' vocabulary anywhere in the payload",
      not any("near miss" in e["title"].lower()
              or "near-miss" in e["description"].lower() for e in embeds)
      and "near-miss" not in captured.get("content", "").lower())
+suppressed = sum(len(frames[k]) for k in silenced)
+c.ok("a disabled screen's signals are held back, every other card kept",
+     len(embeds) + suppressed == sum(len(f) for f in frames.values()),
+     f"disabled={silenced or 'none'}, {suppressed} row(s) held back")
 
 # --------------------------------------------------------------------------
 c.section("hand-off file and deep-dive lookup")
@@ -132,6 +150,9 @@ payload = json.loads(handoff.read_text(encoding="utf-8"))
 rows = [(t, r) for s in payload["screens"] for t, r in s["hits"].items()]
 c.ok("no 'near' key survives in any screen",
      all("near" not in s for s in payload["screens"]))
+c.ok("the hand-off lists exactly the enabled screens",
+     [s["config_key"] for s in payload["screens"]] == list(alerted),
+     f"{[s['config_key'] for s in payload['screens']]}")
 c.ok("row count matches the frames", len(rows) == n_rows,
      f"{len(rows)} vs {n_rows}")
 c.ok("every row carries a Setup tier",

@@ -450,7 +450,12 @@ def main() -> int:
               f"(waits {delays}, holds {horizons}) -- using {fallback}.")
         detail = fallback
 
-    # -- which screens run: enabled in config AND requested --
+    # -- which screens run: whatever backtest.screens/--screens asks for.
+    # Deliberately NOT filtered by the strategy's `enabled` flag: that switch
+    # governs the nightly *alert*, and a screen is usually switched off exactly
+    # when it is underperforming -- which is when you most need to measure it.
+    # `backtest.screens` is this tool's own selector. (tune_screen.py ignores
+    # `enabled` for the same reason.)
     known = {module.CONFIG_KEY for module, _ in SCREENS}
     for key in wanted:
         if key not in known:
@@ -460,11 +465,12 @@ def main() -> int:
         strategy = cfg.get(module.CONFIG_KEY)
         if not strategy:
             print(f"No '{module.CONFIG_KEY}' section in config.json -- skipping.")
-        elif not strategy.get("enabled", True):
-            print(f"'{module.CONFIG_KEY}' is disabled -- skipping.")
         elif module.CONFIG_KEY not in wanted:
             print(f"'{module.CONFIG_KEY}' not in backtest.screens -- skipping.")
         else:
+            if not strategy.get("enabled", True):
+                print(f"note: '{module.CONFIG_KEY}' is disabled for the nightly "
+                      f"alert -- backtesting it anyway.")
             active.append((module, compute, strategy))
     if not active:
         raise SystemExit("No screens to run.")
