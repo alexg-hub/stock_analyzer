@@ -18,6 +18,8 @@ import matplotlib.pyplot as plt
 import pandas as pd
 from matplotlib.colors import LinearSegmentedColormap
 
+from scanner_common import fmt_compact
+
 # Validated light-mode palette (dataviz reference instance).
 C = {
     "surface": "#fcfcfb",
@@ -48,6 +50,27 @@ def _two_panel_figure():
         ax.grid(axis="y", color=C["grid"], linewidth=0.8)
         ax.set_axisbelow(True)
     return fig, ax_top, ax_bot
+
+
+def _grid_figure(rows: int, cols: int, figsize, **kwargs):
+    """A styled rows x cols panel grid on the shared surface.
+
+    The multi-panel sibling of `_two_panel_figure` (which is fixed at two
+    panels in a 3:1 split). Applies the same five styling steps every builder
+    in this module repeats by hand.
+    """
+    fig, axes = plt.subplots(rows, cols, figsize=figsize, **kwargs)
+    fig.patch.set_facecolor(C["surface"])
+    for ax in fig.axes:
+        ax.set_facecolor(C["surface"])
+        for side in ("top", "right"):
+            ax.spines[side].set_visible(False)
+        for side in ("left", "bottom"):
+            ax.spines[side].set_color(C["axis"])
+        ax.tick_params(colors=C["muted"], labelsize=9)
+        ax.grid(axis="y", color=C["grid"], linewidth=0.8)
+        ax.set_axisbelow(True)
+    return fig, axes
 
 
 def _title(ax, main: str, subtitle: str) -> None:
@@ -427,6 +450,135 @@ def plot_delay_grid(summary: pd.DataFrame, entry: str, baseline_label: str,
                  f"  ·  cells show mean return %",
                  fontsize=12.5, color=C["ink"], fontweight="bold", x=0.02,
                  ha="left", y=1.04)
+    fig.savefig(out_path, dpi=dpi, bbox_inches="tight", facecolor=C["surface"])
+    plt.close(fig)
+    print(f"Chart saved to {out_path}")
+
+
+# --------------------------------------------------------------------------
+# Tier-3 financial trend
+# --------------------------------------------------------------------------
+# Small multiples, one metric per row: revenue dwarfs everything else (PGR is
+# ~$88B revenue against ~$11B earnings), so a shared axis would flatten the
+# other four into invisible slivers. Each panel gets its own scale, and the
+# latest period is highlighted -- "where is it now" is the whole question.
+
+# (key, label, kind) -- the row order of the grid.
+FINANCIAL_ROWS = [
+    ("revenue",        "Revenue",       "currency"),
+    ("earnings",       "Earnings",      "currency"),
+    ("margin_pct",     "Margin",        "percent"),
+    ("fcf",            "Free cash flow", "currency"),
+    ("debt_to_equity", "Debt / equity", "percent"),
+]
+
+
+def _pct_label(value) -> str:
+    return f"{value:.1f}%"
+
+
+def _margin_label(rows: list[dict]) -> str:
+    """Name the margin actually plotted -- it is issuer-dependent.
+
+    Yahoo reports no Operating Income for banks or insurers, so the collector
+    falls back to pretax. Saying which one is on screen keeps the panel from
+    silently comparing unlike things across tickers.
+    """
+    kinds = {r.get("margin_kind") for r in rows if r.get("margin_kind")}
+    if kinds == {"pretax"}:
+        return "Pretax margin\n(no Operating Income)"
+    if kinds == {"operating"}:
+        return "Operating margin"
+    if not kinds:                    # nothing computed at all -- don't imply a basis
+        return "Margin"
+    return "Margin (mixed basis)"
+
+
+def _draw_metric(ax, rows: list[dict], key: str, kind: str) -> None:
+    """One panel: bars for currency, line+markers for a ratio, latest hot."""
+    values = [r.get(key) for r in rows]
+    labels = [r.get("period", "") for r in rows]
+
+    def set_x() -> None:
+        """Tick labels plus side padding, so the first/last never sit on the
+        spine (a one-point series otherwise hangs its label off the panel)."""
+        if labels:
+            ax.set_xticks(range(len(labels)))
+            ax.set_xticklabels(labels)
+            ax.set_xlim(-0.6, len(labels) - 0.4)
+        else:
+            ax.set_xticks([])
+
+    if not any(v is not None for v in values):
+        ax.text(0.5, 0.5, "n/a", transform=ax.transAxes, ha="center",
+                va="center", fontsize=11, color=C["muted"])
+        set_x()
+        ax.set_yticks([])
+        return
+
+    x = range(len(values))
+    plot = [v if v is not None else float("nan") for v in values]
+    fmt = fmt_compact if kind == "currency" else _pct_label
+    # The latest period carries the read, so it gets the accent hue.
+    colors = [C["close"]] * len(plot)
+    if colors:
+        colors[-1] = C["event"]
+
+    if kind == "currency":
+        ax.bar(x, plot, color=colors, width=0.62)
+    else:
+        ax.plot(x, plot, color=C["close"], linewidth=1.8, marker="o",
+                markersize=5, markerfacecolor=C["close"],
+                markeredgecolor=C["surface"])
+        ax.plot([len(plot) - 1], [plot[-1]], marker="o", markersize=7,
+                color=C["event"], markeredgecolor=C["surface"])
+
+    finite = [v for v in plot if v == v]
+    if any(v < 0 for v in finite):
+        ax.axhline(0, color=C["axis"], linewidth=1.0)
+
+    for xi, v in zip(x, plot):
+        if v != v:
+            continue
+        ax.annotate(fmt(v), (xi, v), textcoords="offset points",
+                    xytext=(0, 5 if v >= 0 else -12), ha="center",
+                    fontsize=8.5, color=C["ink"])
+    ax.margins(y=0.28)
+    set_x()
+    ax.tick_params(axis="y", labelleft=False)   # every point is labelled
+
+
+def plot_financials(fin: dict, ticker: str, out_path: Path,
+                    dpi: int = 120) -> None:
+    """The tier-3 financial trend: five metrics x (annual | quarterly).
+
+    `fin` is `research_collect._financials` output -- {"annual": [...],
+    "quarterly": [...]}, each a list of period dicts oldest -> newest. Panels
+    with no data anywhere render `n/a` rather than an empty box.
+    """
+    annual = fin.get("annual") or []
+    quarterly = fin.get("quarterly") or []
+    columns = [("Annual", annual), ("Quarterly", quarterly)]
+
+    fig, axes = _grid_figure(len(FINANCIAL_ROWS), 2, figsize=(11.5, 11.5))
+    for r, (key, label, kind) in enumerate(FINANCIAL_ROWS):
+        for c, (heading, rows) in enumerate(columns):
+            ax = axes[r][c]
+            _draw_metric(ax, rows, key, kind)
+            if r == 0:
+                ax.set_title(heading, loc="left", fontsize=10.5,
+                             color=C["ink"], pad=8)
+            if c == 0:
+                text = _margin_label(annual + quarterly) if key == "margin_pct" else label
+                ax.set_ylabel(text, color=C["ink2"], fontsize=9.5)
+
+    subtitle = (f"{annual[0]['period']}-{annual[-1]['period']}" if annual else "no annual data")
+    subtitle += (f"  ·  {quarterly[0]['period']}-{quarterly[-1]['period']}"
+                 if quarterly else "  ·  no quarterly data")
+    fig.suptitle(f"{ticker} -- financial trend  ·  {subtitle}",
+                 fontsize=12.5, color=C["ink"], fontweight="bold", x=0.02,
+                 ha="left", y=1.0)
+    fig.tight_layout()
     fig.savefig(out_path, dpi=dpi, bbox_inches="tight", facecolor=C["surface"])
     plt.close(fig)
     print(f"Chart saved to {out_path}")

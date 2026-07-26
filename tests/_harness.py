@@ -19,6 +19,14 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+# `run_all.py` runs each script as a subprocess with piped output, so Windows
+# hands them the locale codepage -- which cannot encode the quality badge a
+# check may want to print. Test scripts are entry points, so they get the same
+# treatment the production ones do.
+from scanner_common import enable_utf8_output  # noqa: E402
+
+enable_utf8_output()
+
 SKIP = 2
 
 

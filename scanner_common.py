@@ -72,6 +72,26 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
         return json.load(f)
 
 
+def enable_utf8_output() -> None:
+    """Make stdout/stderr able to carry the text this project actually prints.
+
+    Windows picks the locale codepage when output is redirected (cp1255 on this
+    box), and the quality badge -- a real character in the Discord payload --
+    has no mapping there, so a dry-run print of a passing ticker raises
+    UnicodeEncodeError. That would take down `run_deepdive.bat` in exactly the
+    `discord_send: false` configuration used to shake the nightly run down.
+    `errors="replace"` keeps it non-fatal even if reconfigure is unavailable.
+
+    Called from entry-point `__main__` blocks rather than at import, so
+    importing this module never mutates global streams.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):   # not a reconfigurable stream
+            pass
+
+
 # --------------------------------------------------------------------------
 # Scan result contract (what every screen module's scan() returns)
 # --------------------------------------------------------------------------
@@ -218,9 +238,15 @@ def single_ticker_panel(data: pd.DataFrame, ticker: str) -> pd.DataFrame:
 # Fundamentals for the hits
 # --------------------------------------------------------------------------
 
-def _stmt_value(df: pd.DataFrame, row_name: str, column) -> float | None:
-    """One cell of an annual statement, or None when the row is missing
-    (banks have no Operating Income, negative-equity companies etc.)."""
+def stmt_value(df: pd.DataFrame, row_name: str, column) -> float | None:
+    """One cell of a financial statement, or None when it isn't there.
+
+    Tolerant by design -- a missing row, a missing column and a NaN cell all
+    come back as None, because Yahoo genuinely omits rows per issuer (banks
+    have no Operating Income, negative-equity companies no Debt/Equity).
+    Shared with `research_collect._financials`, which reads the same frames
+    for the tier-3 chart.
+    """
     if df.empty or row_name not in df.index or column not in df.columns:
         return None
     value = df.loc[row_name, column]
@@ -262,14 +288,14 @@ def _statement_metrics(tk: "yf.Ticker", stmt_cfg: dict, info: dict) -> dict:
     row = {}
     if "fcf" in metrics:
         row[metrics["fcf"]] = _yearly_series(
-            [(c.year, _stmt_value(cashflow, "Free Cash Flow", c)) for c in cf_cols]
+            [(c.year, stmt_value(cashflow, "Free Cash Flow", c)) for c in cf_cols]
         )
     if "operating_margin" in metrics or "profit_margin" in metrics:
         def margin(numerator_row):
             series = []
             for c in inc_cols:
-                num = _stmt_value(income, numerator_row, c)
-                rev = _stmt_value(income, "Total Revenue", c)
+                num = stmt_value(income, numerator_row, c)
+                rev = stmt_value(income, "Total Revenue", c)
                 series.append((c.year, 100 * num / rev if num is not None and rev else None))
             return _yearly_series(series)
 
@@ -281,8 +307,8 @@ def _statement_metrics(tk: "yf.Ticker", stmt_cfg: dict, info: dict) -> dict:
     if "roe" in metrics:
         roe = None
         for c in reversed(inc_cols):  # latest year with both rows present
-            net = _stmt_value(income, "Net Income", c)
-            equity = _stmt_value(balance, "Stockholders Equity", c)
+            net = stmt_value(income, "Net Income", c)
+            equity = stmt_value(balance, "Stockholders Equity", c)
             if net is not None and equity:
                 roe = 100 * net / equity
                 break
@@ -293,10 +319,10 @@ def _statement_metrics(tk: "yf.Ticker", stmt_cfg: dict, info: dict) -> dict:
     if "roic" in metrics:
         roic = None
         for c in reversed(inc_cols):
-            ebit = _stmt_value(income, "EBIT", c)
-            tax = _stmt_value(income, "Tax Provision", c)
-            pretax = _stmt_value(income, "Pretax Income", c)
-            invested = _stmt_value(balance, "Invested Capital", c)
+            ebit = stmt_value(income, "EBIT", c)
+            tax = stmt_value(income, "Tax Provision", c)
+            pretax = stmt_value(income, "Pretax Income", c)
+            invested = stmt_value(balance, "Invested Capital", c)
             if None in (ebit, tax, pretax) or not invested or pretax <= 0:
                 continue
             nopat = ebit * (1 - tax / pretax)

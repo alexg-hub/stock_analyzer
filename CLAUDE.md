@@ -128,8 +128,11 @@ real send.
   bulk/single downloads, fundamentals, Discord send — content text + embed
   cards, batched automatically under Discord's 10-embed / 10-file / ~6000
   embed-char per-message limits) and **`charts.py`**
-  (validated palette + the per-screen chart builders used by both the alert
-  and the backtests).
+  (validated palette + the chart builders used by the alert, the backtests and
+  the tier-3 report). `charts.py` never reads config or fetches data — the
+  caller shapes a frame and passes the config section down; keep it that way.
+  Its palette has only two hues, so a multi-series chart either groups by hue
+  role or, like `plot_financials`, uses small multiples with one series each.
 - **`tests/` asserts invariants, never snapshots** — see `tests/CLAUDE.md`,
   which loads whenever you work under that directory.
 - **`tune_screen.py` is the threshold tuner** — see the `tune-thresholds`
@@ -144,16 +147,46 @@ real send.
   `write_latest_hits`, so the hand-off never carried it and tier 3 was blind to
   tier 2. **Absent quality columns mean "not evaluated", not "failed"** — the
   helper is a deliberate no-op when the quality layer is off.
+- **Tier 3's figures and charts are programmatic — a model-made one is a bug.**
+  `assemble_context` renders `output/reports/<TICKER>_<date>_financials.png`
+  (via `charts.plot_financials`) and writes `..._facts.json` *before it
+  returns*, and also hands back `financials_table_md`. The skill embeds the
+  path and pastes the table; it never draws a chart or retypes a figure, and
+  `SKILL.md` says so explicitly. Same reason the Discord card reads its numbers
+  from `_facts.json` rather than from the verdict dict: the model contributes
+  only `tier`/`conviction`/`narrative_adj`/`thesis`. This is load-bearing
+  because tier 3 *is* an LLM — left unconstrained it will happily invent a
+  plot or mistype a percentage.
+- **The pretax-margin fallback lives only in `research_collect._financials`.**
+  Yahoo publishes no `Operating Income` (nor `Gross Profit`) for banks and
+  insurers, so the tier-3 chart falls back to `Pretax Income / Revenue` and
+  records `margin_kind` so the panel and table can name the basis. Never port
+  that fallback into `scanner_common._statement_metrics`: its `operating_margin`
+  feeds `fundamentals.quality.rules`, so a fallback there would silently change
+  the ⭐ badge and the tier-3 gate for every financial. A test pins the split.
 - **`research_report.py` is tier 3's deterministic half** (`list_candidates` +
-  the gate, the quant score, `report_dir`/`write_report`, the Discord verdict
-  posts); the synthesis itself is the `deep-dive` skill, i.e. Claude reasoning,
-  not a function — which is why the nightly run invokes `claude -p` from
-  `run_deepdive.bat` rather than calling Python. `research_collect.py` (Yahoo)
+  the gate, the quant score, the financials chart/table/facts, `report_dir`/
+  `write_report`, the Discord verdict cards); the synthesis itself is the
+  `deep-dive` skill, i.e. Claude reasoning, not a function — which is why the
+  nightly run invokes `claude -p` from `run_deepdive.bat` rather than calling
+  Python. `research_collect.py` (Yahoo)
   and `sec.py` (EDGAR) are its collectors; `RESEARCH_DATA.md` maps what each
   source can and cannot supply. **The IBKR MCP tools must stay in
   `run_deepdive.bat`'s `--allowedTools`** — under `--permission-mode dontAsk` an
   un-allowed tool is refused *silently*, which would drop the moat/competitor
   section from every report with no error to explain it.
+- **The unattended run only speaks in subcommands.** `Bash(python
+  research_report.py *)` is a prefix rule, and Claude Code requires *every*
+  segment of a compound command to be allowed — so `cmd > file`, `cmd; echo $?`,
+  `python -c "..."`, a scratch `.py`, and any `PowerShell(...)` are refused, and
+  refused *silently*. The 2026-07-26 shakedown wrote a full RL report and then
+  never posted the verdict for exactly that reason, at no visible cost but a
+  couple of wasted turns. `post-verdicts <file.json> [--send]` exists so the
+  skill never needs `python -c`. When the skill needs something new, add a
+  subcommand — never widen this to `Bash(python *)`, which is arbitrary code
+  execution. Verify a shakedown by grepping `output/deepdive_log.txt` for
+  `permission_denials` in the result JSON, not just the exit code: the run exits
+  **0** with denials in it.
 - **The signal history CSV is rewritten, not appended** (`archive_scan`).
   The fundamentals columns are config-driven display labels, so retuning
   `config.json` changes the schema and a blind append would misalign every later
@@ -256,12 +289,20 @@ real send.
   `Quality`/`Quality Missing` (tier 2), `Company`, and the joined fundamentals
   under their **display labels**. `_json_safe` makes it JSON-native: NaN→`null`,
   numpy scalars→Python, and the `[(year, value)]` series→nested arrays.
-  `research_report.quality_failures` still grades a round-tripped row because it
-  looks values up by label and indexes the series positionally — that is what
-  keeps *archived* scans readable after the format moves on, and
-  `list_candidates` relies on it to recompute a verdict a pre-2026-07-26
-  hand-off never recorded. Only **enabled** screens appear: the hand-off follows
-  the alert, unlike the backtest and tuner.
+  `quality_failures` still grades a round-tripped row because it looks values up
+  by label and indexes the series positionally — that is what keeps *archived*
+  scans readable after the format moves on. Only **enabled** screens appear: the
+  hand-off follows the alert, unlike the backtest and tuner.
+- **Tier 3 re-grades tier 2 against the rules in force now** — `_row_quality`
+  recomputes rather than trusting the verdict the scan recorded, and both the
+  gate (`list_candidates`) and the Discord card (`_facts`) go through it, so they
+  cannot disagree. The reason: `config.json` gets retuned between scans, and a
+  gate answering with last night's bar silently ignores the change until the next
+  scan — loosening a rule and watching `candidates` still report the old failures
+  is genuinely confusing. `output/history/` keeps the original verdict, so nothing
+  historical is rewritten. `_has_fundamentals` guards the case where the row has
+  no values to grade (fundamentals were off that night): without it, re-grading
+  would score every rule as failed rather than reporting "not evaluated".
 - **Everything tunable lives in `config.json`** (per-screen strategy
   sections, charts, Discord, fundamentals fields) and all user-facing text
   (alert lines, backtest STEP logs, chart labels) is built from those values
@@ -315,3 +356,13 @@ real send.
 - Windows box, Microsoft Store Python 3.13 (`python` on PATH). yfinance's
   progress bar is disabled for non-TTY output so `output/scanner_log.txt` stays
   readable. matplotlib uses the Agg backend (set in `charts.py`).
+- **Entry points must call `scanner_common.enable_utf8_output()`.** When output
+  is redirected — which every `.bat` and the test runner do — Windows hands
+  Python the locale codepage (cp1255 here), and the ⭐ quality badge has no
+  mapping in it, so printing a passing ticker raises `UnicodeEncodeError`. It
+  took down the deep-dive dry-run in exactly the `discord_send: false`
+  configuration used to shake the nightly chain down. The call sits in each
+  `__main__` block (and in `tests/_harness.py`), never at import, so importing a
+  module never mutates global streams. A test asserts the badge is genuinely
+  unencodable in cp1255 *and* that the guard rescues it — if the first half ever
+  starts passing, the second half has stopped testing anything.

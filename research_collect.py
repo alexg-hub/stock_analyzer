@@ -28,6 +28,8 @@ import sys
 import pandas as pd
 import yfinance as yf
 
+from scanner_common import stmt_value
+
 
 # --------------------------------------------------------------------------
 # n/a-tolerant scalar helpers (a missing value never raises -- it becomes None)
@@ -237,6 +239,76 @@ def _quality(info: dict) -> dict:
     }
 
 
+def _financials(tk: yf.Ticker, years: int = 4, quarters: int = 4) -> dict:
+    """Annual and quarterly history of the five trend metrics, oldest -> newest.
+
+    Revenue, earnings, margin, free cash flow and leverage -- the shape of the
+    business over time, which none of the other collectors carry (they are all
+    snapshots or forward estimates). Feeds `charts.plot_financials` and the
+    report's trend table.
+
+    **Margin is issuer-dependent and says so.** Yahoo reports no Operating
+    Income for banks or insurers (verified absent for JPM and PGR, present for
+    MSFT), and Gross Profit is missing for exactly the same issuers -- so the
+    margin falls back to Pretax Income / Revenue and records `margin_kind` for
+    the label. This fallback lives *here only*: `scanner_common` keeps the
+    strict Operating-Income definition, because that one feeds the quality
+    rules and changing it would move the tier-2 badge for every financial.
+    """
+    def frame(name: str) -> pd.DataFrame:
+        try:
+            df = getattr(tk, name)
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                return df
+        except Exception as exc:  # noqa: BLE001 - a missing statement is not fatal
+            print(f"  {name} failed for {tk.ticker}: {exc}")
+        return pd.DataFrame()
+
+    def series(income, cashflow, balance, count, label) -> list[dict]:
+        # Union of the three frames, because they don't always publish the same
+        # periods -- but *filter before slicing*: Yahoo can carry a newest
+        # column with no revenue yet (seen on JPM's quarterlies), and letting
+        # that empty period take one of the `count` slots costs a real one.
+        # Oldest -> newest so the chart reads left to right.
+        cols = sorted(set(income.columns) | set(cashflow.columns)
+                      | set(balance.columns))
+        rows = []
+        for c in cols:
+            revenue = (stmt_value(income, "Total Revenue", c)
+                       or stmt_value(income, "Operating Revenue", c))
+            operating = stmt_value(income, "Operating Income", c)
+            pretax = stmt_value(income, "Pretax Income", c)
+            numerator, kind = ((operating, "operating") if operating is not None
+                               else (pretax, "pretax"))
+            equity = stmt_value(balance, "Stockholders Equity", c)
+            debt = stmt_value(balance, "Total Debt", c)
+            rows.append({
+                "period": label(c),
+                "end": str(c.date()),
+                "revenue": revenue,
+                "earnings": (stmt_value(income, "Net Income", c)
+                             or stmt_value(income, "Net Income Common Stockholders", c)),
+                "margin_pct": (100 * numerator / revenue
+                               if numerator is not None and revenue else None),
+                "margin_kind": kind if numerator is not None else None,
+                "fcf": stmt_value(cashflow, "Free Cash Flow", c),
+                "debt_to_equity": (100 * debt / equity
+                                   if debt is not None and equity else None),
+            })
+        usable = [r for r in rows if r["revenue"] is not None]
+        return usable[-count:]
+
+    return {
+        "annual": series(frame("income_stmt"), frame("cash_flow"),
+                         frame("balance_sheet"), years,
+                         lambda c: f"FY{c.year % 100:02d}"),
+        "quarterly": series(frame("quarterly_income_stmt"),
+                            frame("quarterly_cash_flow"),
+                            frame("quarterly_balance_sheet"), quarters,
+                            lambda c: f"Q{(c.month - 1) // 3 + 1} {c.year % 100:02d}"),
+    }
+
+
 def _ownership(tk: yf.Ticker, info: dict) -> dict:
     top = None
     ih = _df(getattr(tk, "institutional_holders", None))
@@ -296,13 +368,14 @@ def _news(tk: yf.Ticker, limit: int = 8) -> list:
 # Public entry point
 # --------------------------------------------------------------------------
 
-def collect_yahoo(ticker: str, close: pd.Series | None = None) -> dict:
+def collect_yahoo(ticker: str, close: pd.Series | None = None,
+                  years: int = 4, quarters: int = 4) -> dict:
     """Gather every Tier-A (Yahoo) group for one ticker into a plain dict.
 
     `close` is an optional 2y daily close Series (the nightly pipeline already
     holds it -- pass it to avoid a redundant download and to keep the P/E
     percentile on the exact same series the screens use). If omitted, a 2y
-    history is fetched here.
+    history is fetched here. `years`/`quarters` size the financials history.
     """
     tk = yf.Ticker(ticker)
     try:
@@ -326,6 +399,7 @@ def collect_yahoo(ticker: str, close: pd.Series | None = None) -> dict:
         "analyst": (_analyst, (tk, info)),
         "earnings": (_earnings, (tk,)),
         "quality": (_quality, (info,)),
+        "financials": (_financials, (tk, years, quarters)),
         "ownership": (_ownership, (tk, info)),
     }
     out = {"ticker": ticker}

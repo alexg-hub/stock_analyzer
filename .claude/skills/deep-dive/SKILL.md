@@ -61,9 +61,12 @@ tier 2 said about it. If the gate holds everything back, say so and offer
 ## Procedure — per ticker
 
 1. **Deterministic bundle.** `python research_report.py context TICKER` → JSON:
-   `trigger` (which screen fired + row), `yahoo` (Tier-A), `quant`
-   (`score` 0-100 + per-dimension breakdown + metrics), `filings` (SEC 10-Q/10-K
-   MD&A / Risk Factors / Business sections + curated XBRL, or null).
+   `trigger` (which screen fired + row), `yahoo` (Tier-A, including a
+   `financials` history), `quant` (`score` 0-100 + per-dimension breakdown +
+   metrics), `filings` (SEC 10-Q/10-K MD&A / Risk Factors / Business sections +
+   curated XBRL, or null), plus three things already written to disk for you:
+   `financials_chart` (a rendered PNG path), `financials_table_md` (the same
+   numbers as a markdown table) and `facts_path`.
    The quant score is your **anchor** — do not recompute it, reason on top of it.
 2. **Tier B — IBKR (MCP).** `search_contracts(TICKER)` → the row with exact symbol
    + US primary listing (`country_code=US`, `STK`) → `underlying_contract_id`. Then:
@@ -96,14 +99,27 @@ tier 2 said about it. If the gate holds everything back, say so and offer
    the **Write tool** to create `<TICKER>_<scan_date>.md` there (Write handles the
    multiline markdown cleanly; `write_report` exists too but Write is simpler for
    prose).
-8. Record `{ticker, company, tier, conviction, thesis (one line), screen}` for the batch.
+8. Record only your **judgment** for the batch:
+   `{ticker, scan_date, tier, conviction, narrative_adj, thesis}`. Every number
+   on the Discord card (price, upside, P/E and its percentile, quant score,
+   trigger, quality screen, next earnings) is read back from `facts_path` —
+   don't retype any of it, and don't worry that you left it out.
 
 ## After all tickers
 
-Deliver one **combined** Discord message:
-`research_report.post_summary(verdicts, cfg, send=False)` to dry-run;
-`send=True` **only after the user confirms** (it posts to the live channel), or
-immediately in unattended mode where config has already authorized it.
+Write the batch's verdicts to `output/reports/<scan_date>_verdicts.json` with the
+**Write tool** — a JSON array of
+`{ticker, scan_date, tier, conviction, narrative_adj, thesis}` — then deliver them:
+
+```powershell
+python research_report.py post-verdicts output/reports/<scan_date>_verdicts.json
+python research_report.py post-verdicts output/reports/<scan_date>_verdicts.json --send
+```
+
+Without `--send` it prints the cards; with `--send` it posts to the live channel,
+and it refuses to send anyway unless `research.auto.discord_send` is true. Use
+`--send` only after the user confirms, or immediately in unattended mode where
+config has already authorized it.
 
 ## Unattended (nightly) mode
 
@@ -113,6 +129,15 @@ mode:
 
 - **Never ask a question** — nobody is there. Every decision comes from config
   or from your own judgment.
+- **Keep every shell command a single, un-redirected invocation of a documented
+  subcommand.** The run's allow-list is narrow on purpose, and Claude Code
+  requires *every* segment of a compound command to be allowed — so `cmd > file`,
+  `cmd; echo $?`, `python -c "..."`, a scratch `.py` you wrote, and any
+  `PowerShell(...)` will all be **silently refused**, not error. The 2026-07-26
+  shakedown lost its verdict post to exactly this. Everything you need is a
+  subcommand: `context`, `post-verdicts`, `candidates`. If you find yourself
+  wanting a one-liner, you want a subcommand that does not exist yet — say so in
+  the report rather than working around the allow-list.
 - **The Discord send is pre-authorized** by `research.auto.discord_send`, which
   the prompt passes as `send=<true|false>`. That config flag *is* the user's
   confirmation; do not wait for another one, and do not send when it is false.
@@ -169,6 +194,15 @@ geographic exposure. Assess moat width/durability.
 ## Growth potential
 Forward estimates + revision trend; secular themes/peers; runway.
 
+## Financial trend
+![financials](TICKER_<scan_date>_financials.png)
+
+<paste `financials_table_md` here, unedited>
+
+2-4 sentences reading the trend: what revenue, earnings, margin, cash generation
+and leverage have actually done over 4 years and 4 quarters, and where annual and
+quarterly disagree (a business rolling over shows it in the quarters first).
+
 ## Financial quality
 Margins, ROA, balance sheet (net debt/EBITDA), FCF, buybacks; tie to the
 financial_quality dimension score. State the **tier-2 quality screen** result and,
@@ -204,6 +238,12 @@ _This is research analysis, not investment advice._
 
 ## Rules
 
+- **Never generate a chart, and never retype a figure.** The financial-trend PNG
+  is rendered by `charts.plot_financials` before you start — embed
+  `financials_chart` by filename and paste `financials_table_md` verbatim. Do not
+  draw, plot, sketch, or hand-build a chart or table of these numbers; a
+  model-made one is a bug, not a fallback. Your job on this data is
+  *interpretation*: say what the trend means, not what the values are.
 - **Cite everything non-obvious**: a Yahoo field, an IBKR connection's evidence, a
   news URL (with date), or a filing (MD&A / Risk Factors) quote. No unsourced claims.
 - **Rumors**: prefix `RUMOR (unverified)`, give the source + date, never state as

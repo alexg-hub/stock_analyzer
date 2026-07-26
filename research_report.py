@@ -29,12 +29,15 @@ import sys
 from datetime import date
 from pathlib import Path
 
+import charts
 import sec
 from research_collect import collect_yahoo
 from scanner_common import (
     COMPANY_COL,
     QUALITY_COL,
     QUALITY_MISSING_COL,
+    enable_utf8_output,
+    fmt_compact,
     load_config,
     output_dir,
     quality_enabled,
@@ -62,26 +65,40 @@ def load_hits(cfg: dict) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def find_ticker(hits: dict, ticker: str) -> dict | None:
+def find_ticker(hits: dict, ticker: str, cfg: dict | None = None) -> dict | None:
     """Locate `ticker` in the hand-off; return {screen, kind, ...} or None.
 
     `kind` is the row's tier-1 setup tier (`full` or `partial`) -- every screen
     reports one signal list, with partial setups tagged rather than split out.
-    `quality` / `quality_missing` are the tier-2 verdict, `None` when the scan
-    did not evaluate it.
+
+    Tier 2 comes back twice, on purpose. `quality` / `quality_missing` are
+    graded under the rules in force **now** (when `cfg` is passed), matching
+    what the gate and the Discord card use, while `quality_recorded` /
+    `quality_missing_recorded` are what the scan itself concluded. They differ
+    whenever the thresholds were retuned between scan and report, and a report
+    that says so is more useful than one that silently picks a side -- but the
+    two must never be *confused*, which is why they are separate keys rather
+    than one ambiguous one.
 
     A ticker that fired on more than one screen resolves to the first; use
     `list_candidates` when you need every (screen, ticker) pair.
     """
     for screen in hits.get("screens", []):
         row = screen.get("hits", {}).get(ticker)
-        if row is not None:
-            return {"screen": screen["title"], "config_key": screen["config_key"],
-                    "kind": row.get("Setup", "full"),
-                    "quality": row.get(QUALITY_COL),
-                    "quality_missing": row.get(QUALITY_MISSING_COL),
-                    "strategy": screen.get("strategy", {}),
-                    "row": row}
+        if row is None:
+            continue
+        recorded = row.get(QUALITY_COL)
+        recorded_missing = row.get(QUALITY_MISSING_COL)
+        quality, missing = (_row_quality(row, cfg) if cfg
+                            else (recorded, recorded_missing))
+        return {"screen": screen["title"], "config_key": screen["config_key"],
+                "kind": row.get("Setup", "full"),
+                "quality": quality,
+                "quality_missing": missing,
+                "quality_recorded": recorded,
+                "quality_missing_recorded": recorded_missing,
+                "strategy": screen.get("strategy", {}),
+                "row": row}
     return None
 
 
@@ -93,21 +110,40 @@ GATES = ("all", "quality_pass")
 
 
 def _row_quality(row: dict, cfg: dict) -> tuple[bool | None, list]:
-    """The row's tier-2 verdict, recomputed if the scan predates it.
+    """The row's tier-2 verdict under the rules in force **now**.
 
-    Hand-offs written before `annotate_quality` existed carry the raw
-    fundamentals but no verdict. `quality_failures` works unchanged on a
-    JSON-round-tripped row -- it looks values up by display label and indexes
-    the multi-year series positionally, so nested arrays behave exactly like
-    the original tuples -- which keeps old archives readable.
+    Deliberately re-evaluates rather than trusting the verdict the scan
+    recorded. The hand-off is stamped with a scan date but the rules get
+    retuned between scans, and a gate that answered with last night's bar
+    would silently ignore a threshold change until the next scan -- the exact
+    confusion of loosening a rule and watching `candidates` report the old
+    answer. The archived snapshot in `output/history/` keeps the original
+    verdict, so nothing historical is rewritten.
+
+    `quality_failures` works unchanged on a JSON-round-tripped row -- it looks
+    values up by display label and indexes the multi-year series positionally,
+    so nested arrays behave exactly like the original tuples. That is also
+    what lets a hand-off written before the verdict existed still be graded.
     """
-    if QUALITY_COL in row:
-        return bool(row[QUALITY_COL]), list(row.get(QUALITY_MISSING_COL) or [])
     fund_cfg = cfg.get("fundamentals", {})
-    if not quality_enabled(fund_cfg):
-        return None, []
-    failed = quality_failures(row, fund_cfg)
-    return not failed, failed
+    if quality_enabled(fund_cfg) and _has_fundamentals(row, fund_cfg):
+        failed = quality_failures(row, fund_cfg)
+        return not failed, failed
+    if QUALITY_COL in row:      # fundamentals gone or disabled -- trust the record
+        return bool(row[QUALITY_COL]), list(row.get(QUALITY_MISSING_COL) or [])
+    return None, []
+
+
+def _has_fundamentals(row: dict, fund_cfg: dict) -> bool:
+    """Whether the row still carries the values the rules grade.
+
+    Without this, a row scanned with fundamentals switched off would be
+    re-graded as failing everything (a missing value fails its rule) instead
+    of reporting honestly that quality was never evaluated.
+    """
+    labels = list((fund_cfg.get("fields") or {}).values())
+    labels += list((fund_cfg.get("statements", {}).get("metrics") or {}).values())
+    return any(row.get(label) is not None for label in labels)
 
 
 def list_candidates(hits: dict, cfg: dict, gate: str | None = None,
@@ -267,21 +303,130 @@ def tier_for(conviction: float, cfg: dict) -> str:
 # The context bundle Claude reasons over
 # --------------------------------------------------------------------------
 
-def assemble_context(ticker: str, cfg: dict | None = None) -> dict:
-    """Everything deterministic the deep-dive skill needs for one ticker:
-    the scan trigger, Yahoo Tier-A data, the quant-score anchor, and the SEC
-    10-Q/10-K filings. IBKR Tier-B + live web research are added by Claude in-session.
+def financials_table_md(fin: dict) -> str:
+    """The financial trend as a markdown table, rendered not transcribed.
+
+    The report shows the same numbers as the chart, and a PNG is not
+    greppable. Generating the table here means the model pastes a block
+    instead of retyping figures -- one less place for a digit to drift.
     """
-    cfg = cfg or load_config()
-    hits = load_hits(cfg)
-    yahoo = collect_yahoo(ticker)
+    annual = (fin or {}).get("annual") or []
+    quarterly = (fin or {}).get("quarterly") or []
+    periods = annual + quarterly
+    if not periods:
+        return "_No financial history available._"
+
+    def cell(row, key, kind):
+        value = row.get(key)
+        if value is None:
+            return "n/a"
+        return f"{value:.1f}%" if kind == "percent" else fmt_compact(value)
+
+    header = "| Metric | " + " | ".join(r["period"] for r in periods) + " |"
+    rule = "|---" * (len(periods) + 1) + "|"
+    lines = [header, rule]
+    for key, label, kind in charts.FINANCIAL_ROWS:
+        lines.append(f"| {label} | "
+                     + " | ".join(cell(r, key, kind) for r in periods) + " |")
+
+    kinds = {r.get("margin_kind") for r in periods if r.get("margin_kind")}
+    if kinds == {"pretax"}:
+        lines.append("")
+        lines.append("_Margin is pretax income / revenue: Yahoo reports no "
+                     "Operating Income for this issuer (normal for banks and "
+                     "insurers)._")
+    elif "pretax" in kinds:
+        lines.append("")
+        lines.append("_Margin basis is mixed across periods (operating where "
+                     "reported, pretax otherwise)._")
+    return "\n".join(lines)
+
+
+def _facts(ticker: str, scan_date: str, yahoo: dict, quant: dict,
+           trigger: dict | None, chart: Path | None, cfg: dict) -> dict:
+    """The deterministic values the Discord card shows.
+
+    Written to disk so `post_summary` reads them back rather than the model
+    retyping them: every figure on the notification comes from the collector,
+    and the model contributes only tier, conviction, the adjustment and the
+    thesis.
+    """
+    valuation = yahoo.get("valuation") or {}
+    targets = (yahoo.get("analyst") or {}).get("targets") or {}
+    earnings = yahoo.get("earnings") or {}
+    profile = yahoo.get("profile") or {}
+    quality, quality_missing = _quality_now(trigger, cfg)
     return {
         "ticker": ticker,
-        "scan_date": hits.get("scan_date") or date.today().isoformat(),
-        "trigger": find_ticker(hits, ticker),
+        "scan_date": scan_date,
+        "company": profile.get("company"),
+        "price": targets.get("current"),
+        "target_mean": targets.get("mean"),
+        "upside_pct": targets.get("upside_pct"),
+        "trailing_pe": valuation.get("trailingPE"),
+        "pe_percentile_2y": valuation.get("pe_percentile_2y"),
+        "next_earnings_date": earnings.get("next_date"),
+        "days_to_earnings": earnings.get("days_to_next"),
+        "quant_score": quant.get("score"),
+        "screen": (trigger or {}).get("screen"),
+        "setup": (trigger or {}).get("kind"),
+        "quality": quality,
+        "quality_missing": quality_missing,
+        "chart": str(chart) if chart else None,
+    }
+
+
+def _quality_now(trigger: dict | None, cfg: dict) -> tuple[bool | None, list]:
+    """The trigger row's tier-2 verdict, graded like the gate grades it."""
+    row = (trigger or {}).get("row")
+    return _row_quality(row, cfg) if row else (None, [])
+
+
+def assemble_context(ticker: str, cfg: dict | None = None) -> dict:
+    """Everything deterministic the deep-dive skill needs for one ticker:
+    the scan trigger, Yahoo Tier-A data, the quant-score anchor, the SEC
+    10-Q/10-K filings, and the rendered financial-trend chart + facts file.
+    IBKR Tier-B + live web research are added by Claude in-session.
+
+    The chart and the facts file are written **here**, before this function
+    returns, precisely so the model never generates either. Tier 3 is
+    skill-driven, and without that the chart would be improvised and the
+    figures retyped.
+    """
+    cfg = cfg or load_config()
+    fin_cfg = cfg.get("research", {}).get("financials", {})
+    hits = load_hits(cfg)
+    scan_date = hits.get("scan_date") or date.today().isoformat()
+    yahoo = collect_yahoo(ticker,
+                          years=fin_cfg.get("years", 4),
+                          quarters=fin_cfg.get("quarters", 4))
+    quant = compute_quant_score(yahoo, cfg)
+    trigger = find_ticker(hits, ticker, cfg)   # re-graded, so it agrees with _facts
+
+    chart = None
+    try:
+        chart = report_dir(cfg) / f"{ticker}_{scan_date}_financials.png"
+        charts.plot_financials(yahoo.get("financials") or {}, ticker, chart,
+                               dpi=fin_cfg.get("chart_dpi", 120))
+    except Exception as exc:  # noqa: BLE001 - a chart must not sink the deep-dive
+        print(f"  financials chart failed for {ticker}: {exc}")
+        chart = None
+
+    facts = _facts(ticker, scan_date, yahoo, quant, trigger, chart, cfg)
+    facts_path = report_dir(cfg) / f"{ticker}_{scan_date}_facts.json"
+    facts_path.write_text(json.dumps(facts, indent=2, ensure_ascii=False),
+                          encoding="utf-8")
+
+    return {
+        "ticker": ticker,
+        "scan_date": scan_date,
+        "trigger": trigger,
         "yahoo": yahoo,
-        "quant": compute_quant_score(yahoo, cfg),
+        "quant": quant,
         "filings": sec.fetch_filing_sections(ticker, cfg),
+        "financials_chart": str(chart) if chart else None,
+        "financials_table_md": financials_table_md(yahoo.get("financials") or {}),
+        "facts_path": str(facts_path),
     }
 
 
@@ -314,37 +459,141 @@ def write_report(ticker: str, scan_date: str, markdown: str, cfg: dict) -> Path:
 # Deliver: verdicts to Discord (reuse the existing webhook path)
 # --------------------------------------------------------------------------
 
-def _verdict_line(v: dict) -> str:
-    comp = f" ({v['company']})" if v.get("company") else ""
-    return (f"**{v.get('tier', '?')} {v.get('conviction', '?')}** · "
-            f"{v['ticker']}{comp} — {v.get('thesis', '')} _[{v.get('screen', '')}]_")
+DISCLAIMER = "_Research analysis, not investment advice._"
+
+
+def _num_or_na(value, fmt="{:.1f}") -> str:
+    return fmt.format(value) if isinstance(value, (int, float)) else "n/a"
+
+
+def _ordinal(n: int) -> str:
+    """1st / 2nd / 3rd / 4th -- including the 11-13 exception."""
+    suffix = "th" if 11 <= n % 100 <= 13 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
+def load_facts(ticker: str, scan_date: str, cfg: dict) -> dict:
+    """The deterministic facts `assemble_context` wrote for this ticker."""
+    path = report_dir(cfg, create=False) / f"{ticker}_{scan_date}_facts.json"
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001 - a stale facts file must not block the post
+        print(f"  facts unreadable for {ticker}: {exc}", file=sys.stderr)
+        return {}
+
+
+def _tier_color(tier: str, cfg: dict) -> int:
+    for band in cfg.get("research", {}).get("synthesis", {}).get("tiers", []):
+        if band.get("label") == tier and band.get("color"):
+            return int(str(band["color"]), 16)
+    return VERDICT_COLOR
+
+
+def _verdict_fields(f: dict, v: dict) -> list[dict]:
+    """The six decision fields, inline so Discord lays them out 3-per-row."""
+    def field(name, value):
+        return {"name": name, "value": value or "n/a", "inline": True}
+
+    adj = v.get("narrative_adj")
+    quant = _num_or_na(f.get("quant_score"))
+    if isinstance(adj, (int, float)):
+        quant += f"  ({adj:+g} narrative)"
+
+    setup = f.get("setup")
+    screen = f.get("screen") or "ad-hoc"
+    trigger = f"{screen}\n{setup}" if setup else screen
+
+    if f.get("quality") is True:
+        quality = "PASS ⭐"
+    elif f.get("quality") is False:
+        failed = f.get("quality_missing") or []
+        quality = f"{len(failed)} rule(s) failed\n" + ", ".join(failed[:4])
+    else:
+        quality = "not evaluated"
+
+    price, upside = f.get("price"), f.get("upside_pct")
+    valuation = _num_or_na(price, "{:,.2f}")
+    if isinstance(upside, (int, float)):
+        valuation += f"  ({upside:+.0f}% to target)"
+
+    pe = _num_or_na(f.get("trailing_pe"))
+    pct = f.get("pe_percentile_2y")
+    if isinstance(pct, (int, float)):
+        pe += f"  ({_ordinal(round(pct))} pct, 2y)"
+
+    days = f.get("days_to_earnings")
+    when = f.get("next_earnings_date") or "n/a"
+    if isinstance(days, (int, float)):
+        when = f"{when}\nin {int(days)}d"
+
+    return [field("Quant", quant), field("Trigger", trigger),
+            field("Quality screen", quality), field("Price", valuation),
+            field("P/E", pe), field("Next earnings", when)]
+
+
+def build_verdict_embeds(verdicts: list[dict], cfg: dict
+                         ) -> tuple[list[dict], list[Path]]:
+    """One card per ticker: the model's judgment plus the recorded facts.
+
+    Everything numeric comes from the ticker's `_facts.json`, so the card can
+    never disagree with what the collector actually measured; the verdict dict
+    supplies only `tier`, `conviction`, `narrative_adj` and `thesis`.
+    """
+    embeds, images = [], []
+    for v in sorted(verdicts, key=lambda x: -(x.get("conviction") or 0)):
+        ticker = v["ticker"]
+        facts = load_facts(ticker, v.get("scan_date") or "", cfg)
+        company = v.get("company") or facts.get("company")
+        tier = v.get("tier", "?")
+        title = f"{tier} {v.get('conviction', '?')}/100 · {ticker}"
+        if company:
+            title += f" ({company[:44]})"
+        embed = {
+            "title": title,
+            "description": (v.get("thesis") or "")[:1500],
+            "color": _tier_color(tier, cfg),
+            "fields": _verdict_fields(facts, v),
+            "footer": {"text": str(report_dir(cfg, create=False))},
+        }
+        chart = facts.get("chart")
+        if chart and Path(chart).exists():
+            embed["image"] = {"url": f"attachment://{Path(chart).name}"}
+            images.append(Path(chart))
+        embeds.append(embed)
+    return embeds, images
 
 
 def post_summary(verdicts: list[dict], cfg: dict, send: bool = False) -> None:
-    """One combined Discord message: a ranked verdict line per ticker."""
-    vs = sorted(verdicts, key=lambda v: -(v.get("conviction") or 0))
-    desc = "\n".join(_verdict_line(v) for v in vs) or "No verdicts."
-    desc += f"\n\nFull reports: {report_dir(cfg, create=False)}"
-    embed = {"title": "Deep-dive verdicts", "description": desc[:4000], "color": VERDICT_COLOR}
-    content = "**Nightly deep-dive summary**"
+    """The nightly deep-dive message: one card per ticker, chart attached.
+
+    `send_discord_alert` batches these under Discord's 10-embed / 10-file /
+    ~5500-char caps, so this scales from one verdict to five without tuning.
+    """
+    embeds, images = build_verdict_embeds(verdicts, cfg)
+    scan_date = next((v.get("scan_date") for v in verdicts if v.get("scan_date")), "")
+    header = f"**Deep-dive verdicts{f' -- {scan_date}' if scan_date else ''}** "
+    header += f"({len(embeds)} report(s))\n{DISCLAIMER}"
     if send:
-        send_discord_alert(content, cfg["discord"], [embed])
+        send_discord_alert(header, cfg["discord"], embeds, images)
     else:
         print("\n--- Discord summary (dry-run, not sent) ---")
-        print(content + "\n" + desc)
+        print(header)
+        for e in embeds:
+            print(f"\n[{e['title']}]  color=0x{e['color']:06X}")
+            print(e["description"])
+            for f in e["fields"]:
+                print(f"  - {f['name']}: {f['value']}")
+            if "image" in e:
+                print(f"  image: {e['image']['url']}")
 
 
 def post_verdict(ticker: str, headline: str, short_md: str, cfg: dict,
                  send: bool = False) -> None:
-    """Post (or dry-run print) a single-ticker verdict embed."""
-    embed = {"title": f"{ticker} -- {headline}", "description": short_md[:4000],
-             "color": VERDICT_COLOR}
-    content = f"**Deep-dive verdict: {ticker}**"
-    if send:
-        send_discord_alert(content, cfg["discord"], [embed])
-    else:
-        print("\n--- Discord verdict (dry-run, not sent) ---")
-        print(f"{content}\n[{embed['title']}]\n{embed['description']}")
+    """Post (or dry-run print) a single verdict, using the same card shape."""
+    post_summary([{"ticker": ticker, "tier": headline, "thesis": short_md}],
+                 cfg, send=send)
 
 
 # --------------------------------------------------------------------------
@@ -394,6 +643,7 @@ USAGE = """usage:
   python research_report.py candidates [--all] [--json]   who to deep-dive tonight
   python research_report.py auto-prompt                   the nightly prompt (exit 1 if none)
   python research_report.py auto-model                    the model the nightly run should use
+  python research_report.py post-verdicts F.json [--send] deliver the batch's verdict cards
   python research_report.py context TICKER [TICKER ...]   the data bundle for one ticker"""
 
 
@@ -449,6 +699,28 @@ def main() -> int:
         print(auto_cfg.get("model", "opus"))
         return 0
 
+    # A first-class subcommand rather than leaving the skill to reach for
+    # `python -c`: the unattended run's allow-list is deliberately narrow, and
+    # Claude Code requires *every* segment of a compound command to be allowed,
+    # so an inline one-liner (or one with a `; echo` tail) gets refused. The
+    # 2026-07-26 shakedown wrote a full report and then silently failed to post
+    # the verdict for exactly that reason.
+    if args[0] == "post-verdicts":
+        if len(args) < 2:
+            print("usage: post-verdicts <verdicts.json> [--send]", file=sys.stderr)
+            return 1
+        cfg = load_config()
+        verdicts = json.loads(Path(args[1]).read_text(encoding="utf-8"))
+        if isinstance(verdicts, dict):
+            verdicts = [verdicts]
+        authorized = cfg.get("research", {}).get("auto", {}).get("discord_send", False)
+        send = "--send" in args and authorized
+        if "--send" in args and not authorized:
+            print("research.auto.discord_send is false -- printing instead of sending.",
+                  file=sys.stderr)
+        post_summary(verdicts, cfg, send=send)
+        return 0
+
     if len(args) >= 2 and args[0] == "context":
         for t in args[1:]:
             print(json.dumps(assemble_context(t.upper()), indent=2,
@@ -460,4 +732,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    enable_utf8_output()   # the quality badge is unprintable in a Windows codepage
     sys.exit(main())

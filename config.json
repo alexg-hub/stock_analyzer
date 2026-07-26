@@ -147,17 +147,17 @@
             "enabled": true,
             "badge": "⭐",
             "rules": {
-                "trailingPE": {"max": 35},
-                "trailingPegRatio": {"max": 2},
-                "debtToEquity": {"max": 75},
+                "trailingPE": {"max": 60},
+                "trailingPegRatio": {"max": 3},
+                "debtToEquity": {"max": 133},
                 "revenueGrowth": {"min": 10},
                 "dividendYield": {"min": 0},
                 "payoutRatio": {"max": 50},
                 "roe": {"min": 10},
                 "roic": {"min": 10},
-                "operating_margin": {"min": 20, "increasing": true},
+                "operating_margin": {"min": 10, "increasing": true},
                 "profit_margin": {"min": 10, "increasing": true},
-                "fcf": {"min": 0, "increasing": true}
+                "fcf": {"min": 0, "increasing": false}
             }
         }
     },
@@ -175,6 +175,11 @@
             "enabled": true,
             "dir": "history",
             "csv": "signals.csv"
+        },
+        "financials": {
+            "years": 4,
+            "quarters": 4,
+            "chart_dpi": 120
         },
         "sec": {
             "user_agent": "stock-analyzer/1.0 (you@example.com)",
@@ -197,9 +202,9 @@
         "synthesis": {
             "narrative_adj_max": 15,
             "tiers": [
-                {"label": "STRONG", "min": 70},
-                {"label": "WATCH", "min": 45},
-                {"label": "PASS", "min": 0}
+                {"label": "STRONG", "min": 70, "color": "2E9C6B"},
+                {"label": "WATCH", "min": 45, "color": "2A78D6"},
+                {"label": "PASS", "min": 0, "color": "898781"}
             ],
             "dimensions": {
                 "valuation": {

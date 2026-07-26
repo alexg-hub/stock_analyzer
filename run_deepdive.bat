@@ -31,6 +31,14 @@ rem The IBKR MCP tools MUST be listed -- an un-allowed tool is refused silently,
 rem which would drop the moat/competitor section with no error to explain it.
 rem Do not add --bare (forces an API key, dropping the OAuth credential the
 rem IBKR server is bound to) or --strict-mcp-config (ignores registered servers).
+rem
+rem Bash(python research_report.py *) is a PREFIX rule and Claude Code requires
+rem every segment of a compound command to be allowed, so `cmd > file`,
+rem `cmd; echo $?`, `python -c "..."` and scratch scripts are all refused. That
+rem cost the 2026-07-26 shakedown its verdict post. Everything the skill needs is
+rem a subcommand (context / candidates / post-verdicts) -- widen the skill's
+rem vocabulary with a new subcommand, never this allow-list with `Bash(python *)`,
+rem which would be arbitrary code execution.
 type output\deepdive_prompt.txt | claude -p ^
   --model %MODEL% ^
   --permission-mode dontAsk ^

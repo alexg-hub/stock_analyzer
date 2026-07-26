@@ -28,6 +28,7 @@ from scanner_common import (
     archive_scan,
     build_embeds,
     download_price_data,
+    enable_utf8_output,
     fetch_fundamentals,
     get_sp500_tickers,
     load_config,
@@ -142,4 +143,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    enable_utf8_output()   # the nightly log is a redirect, i.e. a codepage stream
     sys.exit(main())
