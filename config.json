@@ -166,8 +166,8 @@
         "report_subdir": "reports",
         "auto": {
             "enabled": true,
-            "gate": "quality_pass",
-            "max_reports": 5,
+            "gate": "all",
+            "max_reports": 1,
             "discord_send": true,
             "model": "opus"
         },

@@ -62,6 +62,23 @@ c = Checks("signal contract")
 panel, cfg = cached_panel_or_skip()
 truncated, day = busiest_day(panel, cfg)
 
+# This file runs production `main()` several times. Fingerprint the real
+# output directory up front so the last check can prove none of those runs
+# leaked into it -- a redirect that covers the hand-off but forgets the
+# archive files test scan days among the user's genuine ones.
+from scanner_common import output_dir
+
+
+def output_fingerprint():
+    root = output_dir(create=False)
+    if not root.exists():
+        return set()
+    return {(str(p.relative_to(root)), p.stat().st_mtime_ns)
+            for p in root.rglob("*") if p.is_file()}
+
+
+OUTPUT_BEFORE = output_fingerprint()
+
 # --------------------------------------------------------------------------
 c.section("mask algebra (per screen, over all history)")
 for module, compute, strategy in screens(cfg):
@@ -119,11 +136,19 @@ silenced = sorted(set(frames) - set(alerted))
 # --------------------------------------------------------------------------
 c.section("Discord cards: one per signal, tier visible, no near-miss wording")
 captured = {}
-handoff = Path(tempfile.mkdtemp(prefix="test_handoff_")) / "latest_hits.json"
+# EVERY output path main() writes has to be redirected, not just the hand-off:
+# `archive_scan` otherwise falls back to the real `output/history/` and files
+# the test's historical scan days alongside genuine ones. A test that runs
+# production `main()` must leave no trace in output/.
+sandbox = Path(tempfile.mkdtemp(prefix="test_handoff_"))
+handoff = sandbox / "latest_hits.json"
 run_cfg = json.loads(json.dumps(cfg))          # deep copy
 run_cfg["fundamentals"]["enabled"] = False     # no Yahoo round-trips
 run_cfg["charts"]["enabled"] = False           # no PNG rendering
 run_cfg["research"]["latest_hits_path"] = str(handoff)
+run_cfg["research"].setdefault("history", {})
+run_cfg["research"]["history"].update(enabled=True, dir=str(sandbox / "history"),
+                                      csv="signals.csv")
 
 run_scanners.load_config = lambda: run_cfg
 run_scanners.get_sp500_tickers = lambda url: list(panel["Close"].columns)
@@ -484,5 +509,12 @@ if not passers:
 
 c.ok("load_hits reads the same payload the run wrote",
      research_report.load_hits(q_cfg) == gate_payload)
+
+# --------------------------------------------------------------------------
+c.section("the suite leaves the real output/ untouched")
+touched = sorted(p for p, _ in output_fingerprint() - OUTPUT_BEFORE)
+c.ok("no production main() run wrote into output/",
+     not touched,
+     f"leaked: {touched[:6]}" if touched else "every path redirected to a temp dir")
 
 sys.exit(c.finish())

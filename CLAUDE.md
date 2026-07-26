@@ -30,8 +30,6 @@ so runs only with `--network`.
 ## Commands
 
 ```powershell
-pip install -r requirements.txt
-
 # Tests. Offline + cache-backed by default; exit 0 pass / 1 fail / 2 skip.
 # Never downloads and never sends to Discord.
 python tests/run_all.py
@@ -56,20 +54,16 @@ python backtest_universe.py --entry-delay 0 --holding-days 30   # one cell
 python backtest_universe.py --screens breakout_strategy --entry signal_close
 python backtest_universe.py --split-by-tier                     # full vs partial
 
-# Threshold tuning for ONE screen, scored against the random-entry baseline and
-# against protected cases that must keep firing. Reads the cached panel only --
-# run backtest_universe.py once first. No Discord.
+# Threshold tuning (see the tune-thresholds skill). Reads the cached panel
+# only -- run backtest_universe.py once first. No Discord.
 python tune_screen.py sensitivity reclaim_strategy
-python tune_screen.py grid breakout_strategy --csv
-python tune_screen.py delay reclaim_strategy
 
 # Tier 3 selection: who is worth a deep dive tonight, per the tier-2 gate.
-# Reads output/latest_hits.json only. No network, no Discord.
-python research_report.py candidates            # the configured gate
-python research_report.py candidates --all      # every tier-1 hit
-python research_report.py candidates --json     # machine-readable
-python research_report.py auto-prompt           # nightly prompt; exit 1 = nothing to do
-python research_report.py context MSFT          # the data bundle for one ticker
+# Reads output/latest_hits.json only. No network, no Discord. `auto-prompt`
+# exits 1 when there is nothing to do -- that is what run_deepdive.bat branches
+# on, so don't make it exit 0 with an empty prompt.
+python research_report.py candidates            # --all / --json also available
+python research_report.py auto-prompt
 ```
 
 To test alert formatting/sending without spamming the channel, monkeypatch
@@ -92,15 +86,9 @@ real send.
     underperforming, which is when you most need to measure it. Reclaim has
     been off since 2026-07-26 for exactly that reason (excess −1.65 vs the
     random-entry baseline) and must stay measurable.
-  - `scan(data, strategy) -> ScanResult` (dataclass in `scanner_common.py`:
-    title, one ticker-indexed `hits` DataFrame, the strategy dict).
-  - `EMBED_COLOR` + `describe_hit(row, strategy)` — the screen-specific parts
-    of its Discord embed cards (`scanner_common.build_embeds` assembles the
-    cards: one per signal, fundamentals as inline fields, the chart bound in
-    via `attachment://<filename>`).
-  - `plot_hit(data, ticker, strategy, chart_cfg, out_path)` — per-hit alert
-    chart (delegates to `charts.py`).
-  Adding a scanner = new module + one entry in `SCANNERS` + a config section.
+
+  The rest of the registry contract (`scan`, `EMBED_COLOR`/`describe_hit`,
+  `plot_hit`) and how to add a screen are in `run_scanners.py`'s own docstring.
 - **The `compute_*` function in each screen module is the single source of
   truth** for its condition math (`breakout_scanner.compute_signals`,
   `sma_pullback.compute_pullback_signals`,
@@ -130,33 +118,12 @@ real send.
   discarding the better cohort. Keep the tier recorded — it is the only thing
   that preserves that distinction.
 - **`backtest_universe.py` is the profit backtest** — the whole universe ×
-  all history, one fixed-horizon trade per signal. It reuses the production
-  `compute_*` + `fires_mask` unchanged (its own `SCREENS` registry pairs
-  each module with its compute function) — one cohort per screen, or `full`
-  vs `partial` under `--split-by-tier`/`backtest.split_by_tier` — and reuses
-  `scanner_common.download_price_data`/`warmup_months`; the simulation itself
-  is a few `shift()`s (`forward_trades`), never a loop. **Two timing knobs,
-  swept as a cross product**: `entry_delay_days` (x) = extra trading days to
-  wait *beyond the earliest tradeable bar* (x=0 buys as soon as possible, so
-  look-ahead is impossible by construction), `holding_days` (y) = trading days
-  held after the entry day. Excursion (MFE/MAE) windows must roll *then* shift —
-  shifting first needs rows before the signal day and silently NaNs out the
-  start of the frame — and span the bars the position is actually open (y+1 for
-  `next_open`, y for `signal_close`, whose entry bar's own range predates the
-  closing entry). Two things keep an 18-cell sweep fast and its outputs usable:
-  stats come from **`cohort_values`** (raw arrays at the mask's cells) rather
-  than `collect_trades`, because materializing the entry/exit *date* frames per
-  cell dominates the cost; and per-trade rows are written for the single
-  **`backtest.detail`** cell only (a full grid is ~1M rows). `detail` is an
-  explicit config pair, never "first in the list", so widening the swept lists
-  can't silently move the detailed table. The **baseline is computed once per
-  holding period** and reused across delays — a random entry has no signal to be
-  delayed from — which is what makes `excess_%` comparable down a grid column.
-  Its price panel is cached to
-  `output/backtest_universe_cache.pkl`; `--refresh` re-downloads. The
-  caveats (survivorship bias from using today's index members, no costs, no
-  dividends, clustered/overlapping trades) are printed in the run header and
-  documented in the README — keep them there, don't quietly drop them.
+  all history, one fixed-horizon trade per signal, reusing the production
+  `compute_*` + `fires_mask` unchanged. It caches its price panel to
+  `output/backtest_universe_cache.pkl`, which `tune_screen.py` and the tests
+  also read — run it once before either. See the `universe-backtest` skill for
+  its timing knobs, the excursion/`cohort_values`/baseline gotchas, and the
+  caveats that must stay visible in its output.
 - **Shared infra lives in `scanner_common.py`** (config, Wikipedia tickers,
   bulk/single downloads, fundamentals, Discord send — content text + embed
   cards, batched automatically under Discord's 10-embed / 10-file / ~6000
