@@ -5,3 +5,4 @@ __pycache__/
 # Everything generated -- logs, the latest_hits.json scan hand-off, backtest
 # tables/charts and the cached price panel (see scanner_common.output_dir).
 output/
+
