@@ -194,6 +194,12 @@ def download_price_data(tickers: list[str], period: str, interval: str) -> pd.Da
     )
     if data.empty:
         raise RuntimeError("yfinance returned no data -- check connectivity.")
+    if len(tickers) == 1 and not isinstance(data.columns, pd.MultiIndex):
+        # yfinance flattens the column index for a one-ticker request, and the
+        # whole data contract downstream is (Field, Ticker) -- restore it, the
+        # same normalization `download_history` does. Matters for the
+        # on-demand single-ticker scan.
+        data.columns = pd.MultiIndex.from_product([data.columns, list(tickers)])
     return drop_unsettled_tail(data)
 
 
@@ -676,16 +682,19 @@ def _json_safe(obj):
     return str(obj)
 
 
-def write_latest_hits(path: Path, scan_date, results) -> dict:
-    """Serialize every screen's signal rows to `path` for the deep-dive.
+def build_hits_payload(scan_date, results) -> dict:
+    """The tier-1/2 hand-off structure, without writing it anywhere.
 
     `results` is the list of (module, ScanResult) the nightly run already
     holds. Rows are whatever each screen put in its hits frame (day stats,
     the Setup/Missing tier columns, the Quality/Quality Missing tier-2
     verdict, and any joined fundamentals), made JSON-safe.
 
-    Returns the payload so `archive_scan` can keep a dated copy without
-    re-serializing it.
+    Split out of `write_latest_hits` so an *on-demand* single-ticker scan
+    (`run_scanners.scan_ticker`) can produce the identical shape without
+    overwriting the nightly hand-off. Everything downstream -- `find_ticker`,
+    the tier-2 re-grade, `_facts` -- then consumes both without knowing which
+    it got.
     """
     payload = {
         "scan_date": str(scan_date),
@@ -700,6 +709,16 @@ def write_latest_hits(path: Path, scan_date, results) -> dict:
             "hits": {str(t): _json_safe(row.to_dict())
                      for t, row in result.hits.iterrows()},
         })
+    return payload
+
+
+def write_latest_hits(path: Path, scan_date, results) -> dict:
+    """Write the hand-off to `path` for the deep-dive.
+
+    Returns the payload so `archive_scan` can keep a dated copy without
+    re-serializing it.
+    """
+    payload = build_hits_payload(scan_date, results)
     Path(path).write_text(json.dumps(payload, indent=2, ensure_ascii=False),
                           encoding="utf-8")
     n = sum(len(s["hits"]) for s in payload["screens"])
@@ -715,8 +734,23 @@ def write_latest_hits(path: Path, scan_date, results) -> dict:
 # because they answer different questions: a dated JSON snapshot preserves the
 # hand-off exactly as the deep-dive saw it, while one flat CSV is what you
 # actually load into pandas to join signals against forward returns.
+#
+# Two CSVs, split by provenance rather than by content: `signals.csv` holds
+# what the nightly screens fired on, `on_demand_scans_results.csv` holds
+# tickers you asked about yourself. An ad-hoc look has no signal row to attach
+# to, so folding the two together would silently drop it.
 
 HISTORY_KEYS = ["scan_date", "config_key", "ticker"]
+
+# A verdict is about a *ticker on a date*, so the on-demand table -- one row
+# per ad-hoc look, not per screen -- keys on the pair.
+ON_DEMAND_KEYS = ["scan_date", "ticker"]
+
+# Tier 3's judgment, written into a row tier 1 created hours earlier. Every
+# rewrite of a history table has to carry these forward; see merge_history_csv.
+VERDICT_COL = "Verdict"
+CONVICTION_COL = "Conviction"
+VERDICT_COLS = [VERDICT_COL, CONVICTION_COL]
 
 
 def history_dir(cfg: dict, create: bool = True) -> Path:
@@ -730,8 +764,35 @@ def history_dir(cfg: dict, create: bool = True) -> Path:
     return path
 
 
-def _history_rows(payload: dict) -> list[dict]:
-    """Flatten one scan payload to one row per (scan_date, screen, ticker)."""
+def _history_csv(cfg: dict, key: str, default: str, create: bool = True) -> Path:
+    """One of the history tables, `research.history.<key>` under `history_dir`.
+
+    Config stores a bare filename that resolves inside `output/`; an absolute
+    path still overrides it, which is how the tests redirect these files.
+    """
+    hist_cfg = cfg.get("research", {}).get("history", {})
+    path = Path(hist_cfg.get(key, default))
+    return path if path.is_absolute() else history_dir(cfg, create) / path
+
+
+def signals_csv_path(cfg: dict, create: bool = True) -> Path:
+    """The signal history table -- one row per (scan_date, screen, ticker)."""
+    return _history_csv(cfg, "csv", "signals.csv", create)
+
+
+def on_demand_csv_path(cfg: dict, create: bool = True) -> Path:
+    """The on-demand scan table -- one row per (scan_date, ticker)."""
+    return _history_csv(cfg, "on_demand_csv", "on_demand_scans_results.csv",
+                        create)
+
+
+def history_rows(payload: dict) -> list[dict]:
+    """Flatten one scan payload to one row per (scan_date, screen, ticker).
+
+    Public because the on-demand table is built from it too: sharing the
+    flattening is what keeps both CSVs carrying identical, config-driven
+    fundamentals labels, so the two are directly comparable.
+    """
     rows = []
     for screen in payload.get("screens", []):
         for ticker, hit in screen.get("hits", {}).items():
@@ -750,18 +811,106 @@ def _history_rows(payload: dict) -> list[dict]:
     return rows
 
 
+def merge_history_csv(path: Path, rows: list[dict], keys: list[str],
+                      protect: list[str] | None = None) -> pd.DataFrame:
+    """Merge `rows` into a history table: read, concat, de-duplicate, rewrite.
+
+    Rewriting rather than appending, for two reasons: the fundamentals columns
+    are *config-driven display labels*, so retuning the config changes the
+    schema and a blind append would misalign every later row; and
+    de-duplicating on `keys` makes a same-day re-run idempotent instead of
+    double-counting it. At a handful of rows a night the full rewrite stays
+    trivially cheap for years.
+
+    `protect` names columns only a *later* writer fills in -- the tier-3
+    verdict, recorded hours after tier 1 created the row. Incoming rows never
+    carry them, so they are inherited from the row already on file. Without
+    that, re-running a scan for a date it already covered would silently erase
+    the verdict recorded against it, with no error to explain the loss.
+    """
+    frame = pd.DataFrame(rows)
+    if path.exists():
+        previous = pd.read_csv(path, dtype={"scan_date": str})
+        carry = [c for c in (protect or []) if c in previous.columns]
+        if carry and not frame.empty:
+            frame = frame.drop(columns=carry, errors="ignore").merge(
+                previous[keys + carry].drop_duplicates(subset=keys, keep="last"),
+                on=keys, how="left")
+        frame = pd.concat([previous, frame], ignore_index=True)
+    if not frame.empty:
+        frame = frame.drop_duplicates(subset=keys, keep="last")
+        frame = frame.sort_values(keys, kind="stable")
+    frame.to_csv(path, index=False, encoding="utf-8")
+    return frame
+
+
+def _row_mask(frame: pd.DataFrame, match: dict):
+    """Boolean mask of rows whose `match` columns all equal the wanted values.
+
+    Compared as strings: these tables round-trip through CSV, so a scan_date is
+    text on the way back in and a conviction may be int or float.
+    """
+    mask = pd.Series(True, index=frame.index)
+    for column, wanted in match.items():
+        if column not in frame.columns:
+            return None
+        mask &= frame[column].astype(str) == str(wanted)
+    return mask
+
+
+def count_csv_rows(path: Path, match: dict) -> int:
+    """How many rows of `path` match -- 0 for a missing file or column.
+
+    Read-only, so callers can ask "is this ticker already recorded elsewhere?"
+    without rewriting anything.
+    """
+    if not path.exists():
+        return 0
+    frame = pd.read_csv(path, dtype={"scan_date": str})
+    if frame.empty:
+        return 0
+    mask = _row_mask(frame, match)
+    return 0 if mask is None else int(mask.sum())
+
+
+def update_csv_rows(path: Path, match: dict, values: dict) -> int:
+    """Set `values` on every row of `path` matching `match`; return the count.
+
+    How the tier-3 verdict reaches a row tier 1 wrote hours earlier. A ticker
+    that fired on two screens has two rows and *both* get it -- the verdict is
+    about the ticker that night, not about one screen's view of it. (Which is
+    why an analysis that groups by verdict must de-duplicate on
+    (scan_date, ticker) first, or those names count twice.)
+
+    Returns 0 -- no write, no error -- when the file or the matching row is
+    absent: that is an on-demand ticker, which the caller routes to the
+    on-demand table instead.
+    """
+    if not path.exists():
+        return 0
+    frame = pd.read_csv(path, dtype={"scan_date": str})
+    if frame.empty:
+        return 0
+    mask = _row_mask(frame, match)
+    if mask is None:
+        return 0
+    count = int(mask.sum())
+    if not count:
+        return 0
+    for column, value in values.items():
+        if column not in frame.columns:
+            frame[column] = pd.NA
+        frame.loc[mask, column] = value
+    frame.to_csv(path, index=False, encoding="utf-8")
+    return count
+
+
 def archive_scan(payload: dict, cfg: dict) -> None:
     """Append this scan to the permanent record under `output/history/`.
 
     Writes `hits_<scan_date>.json` (the payload verbatim) and merges the
-    flattened rows into `signals.csv`.
-
-    The CSV is rewritten rather than appended, which matters for two reasons:
-    the fundamentals columns are *config-driven display labels*, so retuning
-    the config changes the schema and a blind append would misalign every
-    later row; and de-duplicating on (scan_date, screen, ticker) makes a
-    same-day re-run idempotent instead of double-counting it. At a handful of
-    rows a night the full rewrite stays trivially cheap for years.
+    flattened rows into `signals.csv`, preserving any tier-3 verdict already
+    recorded against those rows.
     """
     hist_cfg = cfg.get("research", {}).get("history", {})
     if not hist_cfg.get("enabled", True):
@@ -773,17 +922,8 @@ def archive_scan(payload: dict, cfg: dict) -> None:
     snapshot.write_text(json.dumps(payload, indent=2, ensure_ascii=False),
                         encoding="utf-8")
 
-    rows = _history_rows(payload)
-    csv_path = Path(hist_cfg.get("csv", "signals.csv"))
-    if not csv_path.is_absolute():
-        csv_path = out / csv_path
-    frame = pd.DataFrame(rows)
-    if csv_path.exists():
-        previous = pd.read_csv(csv_path, dtype={"scan_date": str})
-        frame = pd.concat([previous, frame], ignore_index=True)
-    if not frame.empty:
-        frame = frame.drop_duplicates(subset=HISTORY_KEYS, keep="last")
-        frame = frame.sort_values(HISTORY_KEYS, kind="stable")
-    frame.to_csv(csv_path, index=False, encoding="utf-8")
+    rows = history_rows(payload)
+    csv_path = signals_csv_path(cfg)
+    frame = merge_history_csv(csv_path, rows, HISTORY_KEYS, protect=VERDICT_COLS)
     print(f"Archived {len(rows)} row(s) to {snapshot.name}; "
           f"{len(frame)} row(s) total in {csv_path.name}.")

@@ -32,6 +32,7 @@ from _harness import Checks
 import charts
 import research_collect
 import research_report
+import run_scanners
 import scanner_common
 
 c = Checks("tier-3 output")
@@ -316,6 +317,195 @@ c.ok("the scan's own verdict is still available separately",
      "a report can state that the thresholds moved between scan and write-up")
 c.ok("without cfg, find_ticker reports what the scan recorded",
      research_report.find_ticker(stale, "AAA")["quality"] is True)
+
+# --------------------------------------------------------------------------
+# Asking about a ticker by name is mostly a tier-2 question, so a scan that
+# fires nothing still has to produce a graded row -- an ad-hoc deep dive used
+# to arrive with an empty trigger and quality "not evaluated".
+c.section("on-demand scan: tiers 1 and 2 for a named ticker")
+
+TICK = "AAA"
+history = tmp / "history"
+od_cfg = json.loads(json.dumps(cfg))
+od_cfg["research"]["history"] = {"enabled": True, "dir": str(history),
+                                 "csv": "signals.csv",
+                                 "on_demand_csv": "on_demand.csv"}
+# One rule the stub satisfies, so the verdict is deterministic whatever the
+# real rule set has been retuned to since.
+pe_label = od_cfg["fundamentals"]["fields"]["trailingPE"]
+od_cfg["fundamentals"]["enabled"] = True
+od_cfg["fundamentals"]["quality"] = {"enabled": True, "badge": "*",
+                                     "rules": {"trailingPE": {"max": 20}}}
+
+# 800 sessions of a gentle, uniformly red decline. No screen can fire on it at
+# any thresholds -- nothing consolidates, no SMA rises, no close crosses up
+# through one -- which is precisely the case tier 2 still has to answer.
+_n = 800
+_idx = pd.bdate_range("2023-01-02", periods=_n)
+_close = pd.Series([200.0 * 0.9985 ** i for i in range(_n)], index=_idx)
+falling = pd.DataFrame({("Open", TICK): _close / 0.999,
+                        ("High", TICK): _close / 0.997,
+                        ("Low", TICK): _close * 0.997,
+                        ("Close", TICK): _close,
+                        ("Adj Close", TICK): _close,
+                        ("Volume", TICK): 1_000_000.0})
+falling.columns = pd.MultiIndex.from_tuples(falling.columns)
+
+
+def stub_fundamentals(tickers, _fund_cfg):
+    return pd.DataFrame({pe_label: [12.0], scanner_common.COMPANY_COL: ["Alpha Corp"]},
+                        index=list(tickers)).rename_axis("Ticker")
+
+
+run_scanners.download_price_data = lambda t, period, interval: falling
+run_scanners.fetch_fundamentals = stub_fundamentals
+
+_out = io.StringIO()
+_stdout, sys.stdout = sys.stdout, _out
+try:
+    payload = run_scanners.scan_ticker(TICK, od_cfg)
+finally:
+    sys.stdout = _stdout
+
+scan_date = payload["scan_date"]
+c.ok("the on-demand scan dates itself off its own price data",
+     scan_date == str(_idx[-1].date()), f"{scan_date} vs {_idx[-1].date()}")
+
+# The whole reuse rests on this: the payload is shaped like latest_hits.json,
+# so find_ticker, the tier-2 re-grade and _facts consume it unchanged.
+trigger = research_report.find_ticker(payload, TICK, od_cfg)
+c.ok("find_ticker consumes an on-demand payload unchanged", trigger is not None)
+c.ok("no signal is reported as a setup, not as a missing trigger",
+     trigger["kind"] == "none"
+     and trigger["screen"] == run_scanners.NO_SIGNAL_TITLE,
+     f"{trigger['screen']}: {trigger['kind']}")
+c.ok("tier 2 is graded even though no screen fired",
+     trigger["quality"] is True and trigger["quality_missing"] == [],
+     f"{trigger['quality']} {trigger['quality_missing']}")
+c.ok("the gate reads it like any other row",
+     len(research_report.list_candidates(payload, od_cfg, gate="quality_pass")) == 1)
+
+# --------------------------------------------------------------------------
+# Two tables, split by provenance: a nightly signal annotates the row it
+# already has, an ad-hoc look has none and would otherwise be dropped.
+c.section("the verdict record: one table per provenance")
+
+od_csv = history / "on_demand.csv"
+sig_csv = history / "signals.csv"
+
+
+def _quiet(fn, *args):
+    buf, keep = io.StringIO(), sys.stdout
+    sys.stdout = buf
+    try:
+        return fn(*args)
+    finally:
+        sys.stdout = keep
+
+
+_quiet(research_report.record_on_demand, payload, TICK, od_cfg)
+recorded = pd.read_csv(od_csv, dtype={"scan_date": str})
+c.ok("the scan is recorded before any verdict exists", len(recorded) == 1)
+c.ok("the record carries the ratios tier 2 graded",
+     pe_label in recorded.columns
+     and scanner_common.QUALITY_COL in recorded.columns
+     and recorded.loc[0, "Setup"] == "none",
+     f"{[col for col in recorded.columns][:8]}")
+
+_quiet(research_report.record_on_demand, payload, TICK, od_cfg)
+c.ok("re-scanning the same day updates rather than duplicates",
+     len(pd.read_csv(od_csv)) == 1)
+
+
+def _facts_file(ticker, source, **extra):
+    (reports / f"{ticker}_{scan_date}_facts.json").write_text(
+        json.dumps({"ticker": ticker, "scan_date": scan_date, "source": source,
+                    "quant_score": 62.0, "price": 100.0, **extra}),
+        encoding="utf-8")
+
+
+_facts_file(TICK, research_report.SOURCE_ON_DEMAND)
+od_verdict = {"ticker": TICK, "scan_date": scan_date, "tier": "WATCH",
+              "conviction": 59, "narrative_adj": -3, "thesis": "A thesis."}
+c.ok("an on-demand verdict lands in the on-demand table",
+     _quiet(research_report.record_verdict, od_verdict, od_cfg) == od_csv.name)
+
+with_verdict = pd.read_csv(od_csv, dtype={"scan_date": str})
+c.ok("the verdict updates the scan's row rather than adding one",
+     len(with_verdict) == 1
+     and with_verdict.loc[0, scanner_common.VERDICT_COL] == "WATCH"
+     and with_verdict.loc[0, scanner_common.CONVICTION_COL] == 59)
+c.ok("an on-demand row keeps the figures that make it readable later",
+     {"Narrative Adj", "Quant Score", "Report", "Thesis"} <= set(with_verdict.columns))
+
+# The same clobber the signal archive has: re-scanning rewrites the row.
+_quiet(research_report.record_on_demand, payload, TICK, od_cfg)
+c.ok("re-scanning after a verdict preserves it",
+     pd.read_csv(od_csv).loc[0, scanner_common.VERDICT_COL] == "WATCH")
+
+# A signal ticker routes the other way -- and never to both tables.
+SIG = "BBB"
+scanner_common.merge_history_csv(
+    sig_csv, [{"scan_date": scan_date, "config_key": "breakout_strategy",
+               "ticker": SIG, "Setup": "full"}],
+    scanner_common.HISTORY_KEYS)
+_facts_file(SIG, research_report.SOURCE_SIGNAL)
+sig_verdict = {"ticker": SIG, "scan_date": scan_date, "tier": "PASS",
+               "conviction": 20, "narrative_adj": 0, "thesis": "Nope."}
+c.ok("a signal verdict lands on its signals.csv row",
+     _quiet(research_report.record_verdict, sig_verdict, od_cfg) == sig_csv.name)
+signals = pd.read_csv(sig_csv, dtype={"scan_date": str})
+on_demand = pd.read_csv(od_csv, dtype={"scan_date": str})
+c.ok("signals.csv gained exactly the two columns asked for",
+     signals.loc[0, scanner_common.VERDICT_COL] == "PASS"
+     and signals.loc[0, scanner_common.CONVICTION_COL] == 20
+     and "Thesis" not in signals.columns)
+c.ok("a (scan_date, ticker) is recorded in exactly one table",
+     SIG not in set(on_demand["ticker"]) and TICK not in set(signals["ticker"]),
+     f"on-demand={sorted(on_demand['ticker'])} signals={sorted(signals['ticker'])}")
+
+# Scanning a ticker the nightly run also caught must not create an orphan row
+# in the other table -- its verdict routes to the signal row it already has.
+sig_payload = json.loads(json.dumps(payload))
+sig_payload["screens"][0]["hits"] = {SIG: payload["screens"][0]["hits"][TICK]}
+c.ok("scanning a ticker that already has a signal row records nothing new",
+     _quiet(research_report.record_on_demand, sig_payload, SIG, od_cfg) is None
+     and SIG not in set(pd.read_csv(od_csv)["ticker"]))
+
+# A verdict for a ticker never scanned still has to survive somewhere.
+_facts_file("CCC", research_report.SOURCE_ON_DEMAND)
+_quiet(research_report.record_verdict,
+       {"ticker": "CCC", "scan_date": scan_date, "tier": "PASS",
+        "conviction": 10, "thesis": "x"}, od_cfg)
+c.ok("a verdict with no scan row is still recorded, not dropped",
+     "CCC" in set(pd.read_csv(od_csv, dtype={"scan_date": str})["ticker"]))
+
+# The tier the model set and the bands in force can part company, because the
+# bands get retuned between the run and the record.
+bands = od_cfg["research"]["synthesis"]["tiers"]
+top = max(band["min"] for band in bands)
+drifted = {"ticker": TICK, "scan_date": scan_date, "tier": "STRONG",
+           "conviction": max(top - 10, 0), "thesis": "x"}
+buf, _stderr = io.StringIO(), sys.stderr
+sys.stderr = buf
+try:
+    _quiet(research_report.record_verdict, drifted, od_cfg)
+finally:
+    sys.stderr = _stderr
+c.ok("a tier that disagrees with the config bands is flagged",
+     "WARNING" in buf.getvalue()
+     and research_report.tier_for(drifted["conviction"], od_cfg) in buf.getvalue(),
+     buf.getvalue().strip()[:90] or "no warning emitted")
+c.ok("the flagged verdict is still recorded as the model set it",
+     pd.read_csv(od_csv, dtype={"scan_date": str}).set_index("ticker")
+     .loc[TICK, scanner_common.VERDICT_COL] == "STRONG",
+     "a drift warning informs; it never rewrites the judgment")
+
+off = json.loads(json.dumps(od_cfg))
+off["research"]["history"]["enabled"] = False
+c.ok("history.enabled false disables both tables",
+     _quiet(research_report.record_verdict, od_verdict, off) is None
+     and _quiet(research_report.record_on_demand, payload, TICK, off) is None)
 
 # --------------------------------------------------------------------------
 # The dry-run print carries the quality badge, and Windows picks the locale

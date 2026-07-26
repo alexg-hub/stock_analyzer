@@ -147,17 +147,17 @@
             "enabled": true,
             "badge": "⭐",
             "rules": {
-                "trailingPE": {"max": 60},
-                "trailingPegRatio": {"max": 3},
-                "debtToEquity": {"max": 133},
+                "trailingPE": {"max": 37},
+                "trailingPegRatio": {"max": 2.1},
+                "debtToEquity": {"max": 85},
                 "revenueGrowth": {"min": 10},
                 "dividendYield": {"min": 0},
-                "payoutRatio": {"max": 50},
-                "roe": {"min": 10},
-                "roic": {"min": 10},
+                "payoutRatio": {"max": 60},
+                "roe": {"min": 12},
+                "roic": {"min": 12},
                 "operating_margin": {"min": 10, "increasing": true},
                 "profit_margin": {"min": 10, "increasing": true},
-                "fcf": {"min": 0, "increasing": false}
+                "fcf": {"min": 0, "increasing": true}
             }
         }
     },
@@ -174,7 +174,8 @@
         "history": {
             "enabled": true,
             "dir": "history",
-            "csv": "signals.csv"
+            "csv": "signals.csv",
+            "on_demand_csv": "on_demand_scans_results.csv"
         },
         "financials": {
             "years": 4,
@@ -202,7 +203,7 @@
         "synthesis": {
             "narrative_adj_max": 15,
             "tiers": [
-                {"label": "STRONG", "min": 70, "color": "2E9C6B"},
+                {"label": "STRONG", "min": 80, "color": "2E9C6B"},
                 {"label": "WATCH", "min": 45, "color": "2A78D6"},
                 {"label": "PASS", "min": 0, "color": "898781"}
             ],

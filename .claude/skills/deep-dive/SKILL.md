@@ -35,7 +35,9 @@ disclaimer line (below) in every report and the Discord summary.
 
 - `output/latest_hits.json` exists (run `python run_scanners.py` first, or work
   ad-hoc). `research_report.load_hits` resolves it via
-  `scanner_common.output_dir()`.
+  `scanner_common.output_dir()`. A ticker that is *not* in it is fine: step 1
+  scans it on demand, so an ad-hoc name arrives with a real trigger and a real
+  tier-2 verdict rather than "not evaluated".
 - IBKR MCP authenticated in this session (Tier B). If not, run `/mcp`.
 - SEC filings need only `research.sec.user_agent` (email-bearing, already in config) — no API key.
 - Confirm with the user before any **live** Discord send — except in unattended
@@ -68,6 +70,12 @@ tier 2 said about it. If the gate holds everything back, say so and offer
    `financials_chart` (a rendered PNG path), `financials_table_md` (the same
    numbers as a markdown table) and `facts_path`.
    The quant score is your **anchor** — do not recompute it, reason on top of it.
+   `source` says where the trigger came from: `signal` (tonight's hand-off) or
+   `on_demand` (tiers 1 and 2 were just run for this ticker because the scan
+   never surfaced it). On-demand, `trigger.screen` may be *"No active technical
+   signal"* with `Setup: none` — report that plainly as the trigger; it is an
+   answer, not a gap. `python research_report.py scan TICKER` runs the same two
+   tiers on their own if you want them without the full bundle.
 2. **Tier B — IBKR (MCP).** `search_contracts(TICKER)` → the row with exact symbol
    + US primary listing (`country_code=US`, `STK`) → `underlying_contract_id`. Then:
    `get_company_connections(conid, include=["link_info"])` (moat, competitors,
@@ -120,6 +128,14 @@ Without `--send` it prints the cards; with `--send` it posts to the live channel
 and it refuses to send anyway unless `research.auto.discord_send` is true. Use
 `--send` only after the user confirms, or immediately in unattended mode where
 config has already authorized it.
+
+**The permanent record is automatic** — `post-verdicts` writes each tier and
+conviction to `output/history/`, either onto the ticker's `signals.csv` row or
+into `on_demand_scans_results.csv`, and it does so with or without `--send`
+(the record is the point; the notification is not). You do not write, update, or
+even read those files. If it warns that a tier disagrees with the config bands,
+that is information for the user, not something to go back and "fix" — say so in
+your summary and leave the verdict as you set it.
 
 ## Unattended (nightly) mode
 

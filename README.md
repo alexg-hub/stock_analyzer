@@ -255,6 +255,8 @@ what tier 2 decided:
 pip install -r requirements.txt
 python run_scanners.py            # tiers 1+2: full S&P 500 scan + Discord alert
 python research_report.py candidates                 # tier 3: who to deep-dive
+python research_report.py scan PGR                   # on-demand: tiers 1+2 for one ticker
+run_ondemand.bat PGR                                 # on-demand: all three tiers
 python backtest_breakout.py       # historical validation, breakout screen
 python backtest_pullback.py       # historical validation, pullback screen
 python backtest_reclaim.py        # historical validation, reclaim screen
@@ -452,6 +454,10 @@ python research_report.py candidates --all    # every tier-1 hit
 python research_report.py candidates --json   # machine-readable
 ```
 
+A ticker you name explicitly needs none of this — `scan` and `/deep-dive` run
+tiers 1 and 2 for it on the spot (see *On-demand* below), so the candidate list
+is only about who the *nightly* run should pick.
+
 Ranked **quality-pass first, then `full` before `partial`, then ticker**, so a
 cap takes the best candidates rather than an arbitrary slice. The gate
 (`research.auto.gate`) is `quality_pass` or `all`; it is a *soft* filter, printed
@@ -526,28 +532,73 @@ price vs analyst target, P/E with its 2-year percentile, and next earnings.
 `send_discord_alert` batches them under Discord's caps, so a five-report night
 still fits (~1.1k of the ~5500-char embed budget).
 
-## Signal history
+## On-demand: one ticker, all three tiers
+
+The nightly run analyses what the screens surface. To ask about a ticker
+yourself — whether or not it signalled — name it:
+
+```powershell
+python research_report.py scan PGR          # tiers 1 + 2, printed and recorded
+run_ondemand.bat PGR                        # + the tier-3 deep dive and Discord card
+```
+
+Interactively, `/deep-dive PGR` does the same thing: `assemble_context` looks
+the ticker up in tonight's hand-off and, finding nothing, runs
+`run_scanners.scan_ticker` for it — the same registry loop, the same screens,
+the same fundamentals grading, on a one-ticker universe. Two differences from
+the nightly path, both deliberate:
+
+- **A disabled screen still reports** (labelled `[screen disabled nightly]`).
+  `enabled` gates the nightly *alert*; `backtest_universe.py` and
+  `tune_screen.py` already ignore it for the same reason.
+- **Tier 2 is graded even when nothing fires.** No signal is an answer —
+  `Setup: none` — not a missing trigger, and the quality check is usually the
+  point of asking.
+
+The scan dates itself off its own price data (the last *settled* bar), so a
+second look next week is a new row rather than a collision with today's.
+
+## Signal history and the verdict record
 
 `latest_hits.json` is overwritten nightly, so every scan is archived on the way
 past (`research.history`):
 
 - `output/history/hits_<scan_date>.json` — the hand-off verbatim, one per scan day
 - `output/history/signals.csv` — one row per `(scan_date, screen, ticker)` with
-  both tiers' verdicts and every day-stat and fundamentals column
+  both tiers' verdicts and every day-stat and fundamentals column, plus
+  **`Verdict` and `Conviction`** once tier 3 has judged that ticker
+- `output/history/on_demand_scans_results.csv` — one row per
+  `(scan_date, ticker)` you asked about yourself: the same fundamentals columns,
+  plus the verdict and the figures behind it (`Narrative Adj`, `Quant Score`,
+  `Price`, `Upside %`, `P/E Pctile 2y`, `Report`, `Thesis`)
 
-The CSV is rewritten rather than appended, because the fundamentals columns are
-*config-driven display labels* — retuning the config changes the schema, and a
-blind append would misalign every later row. De-duplicating on
-`(scan_date, config_key, ticker)` also makes re-running a day idempotent instead
-of double-counting it.
+Two tables split by provenance, not by content. An ad-hoc look has no signal row
+to annotate, so folding it into `signals.csv` would silently drop it; a
+`(scan_date, ticker)` is therefore recorded in **exactly one** of them, and
+`post-verdicts` routes on the `source` key `assemble_context` wrote into the
+facts file. Recording happens with or without `--send` — the record is the
+point, the notification is not.
+
+Both CSVs are rewritten rather than appended, because the fundamentals columns
+are *config-driven display labels* — retuning the config changes the schema, and
+a blind append would misalign every later row. De-duplicating on the key also
+makes re-running a day idempotent instead of double-counting it. The rewrite
+**carries the verdict columns forward**: tier 3 writes them hours after tier 1
+created the row, so without that, re-scanning a day would erase last night's
+judgment with no error to explain the loss.
 
 ```python
 import pandas as pd
 sig = pd.read_csv("output/history/signals.csv", parse_dates=["scan_date"])
 sig[sig["Quality"]].groupby("config_key")["ticker"].count()   # passers per screen
+
+# A ticker that fired on two screens has two rows and the verdict is on both --
+# de-duplicate before grouping by it, or those names count twice.
+verdicts = sig.dropna(subset=["Verdict"]).drop_duplicates(["scan_date", "ticker"])
+verdicts.groupby("Verdict")["Conviction"].describe()
 ```
 
-Multi-year metrics and `Quality Missing` are stored as JSON strings in the CSV
+Multi-year metrics and `Quality Missing` are stored as JSON strings in the CSVs
 (`json.loads` them back); the dated snapshots keep them as real nested lists.
 
 ## Tuning a screen (`tune_screen.py`)
@@ -660,7 +711,8 @@ small differences as noise.
 | `research.auto.discord_send` | `true` | Authorizes the unattended run to post its verdict summary live |
 | `research.auto.model` | `opus` | Model the headless nightly run uses |
 | `research.history.enabled` | `true` | Archive every scan under `output/history/` |
-| `research.history.dir` / `.csv` | `history` / `signals.csv` | Archive location and the flat table's name |
+| `research.history.dir` / `.csv` | `history` / `signals.csv` | Archive location and the signal table's name |
+| `research.history.on_demand_csv` | `on_demand_scans_results.csv` | The on-demand scan table, in the same directory |
 | `research.financials.years` / `.quarters` | `4` / `4` | Periods on the financial-trend chart and table |
 | `research.financials.chart_dpi` | `120` | Resolution of that chart |
 | `research.synthesis.tiers[].color` | per tier | Hex side-bar colour of the Discord verdict card |

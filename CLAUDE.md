@@ -64,6 +64,12 @@ python tune_screen.py sensitivity reclaim_strategy
 # on, so don't make it exit 0 with an empty prompt.
 python research_report.py candidates            # --all / --json also available
 python research_report.py auto-prompt
+
+# On-demand: one named ticker, whether or not it signalled. `scan` is tiers
+# 1+2 (one ticker downloaded, no Discord) and records its own row;
+# run_ondemand.bat adds the tier-3 deep dive and posts the card.
+python research_report.py scan PGR RL
+run_ondemand.bat PGR
 ```
 
 To test alert formatting/sending without spamming the channel, monkeypatch
@@ -187,12 +193,42 @@ real send.
   execution. Verify a shakedown by grepping `output/deepdive_log.txt` for
   `permission_denials` in the result JSON, not just the exit code: the run exits
   **0** with denials in it.
-- **The signal history CSV is rewritten, not appended** (`archive_scan`).
-  The fundamentals columns are config-driven display labels, so retuning
-  `config.json` changes the schema and a blind append would misalign every later
-  row; de-duplicating on `(scan_date, config_key, ticker)` also makes re-running
-  a day idempotent. Cheap at a handful of rows a night — don't "optimize" it
-  into an append.
+- **The signal history CSV is rewritten, not appended** (`archive_scan` →
+  `merge_history_csv`). The fundamentals columns are config-driven display
+  labels, so retuning `config.json` changes the schema and a blind append would
+  misalign every later row; de-duplicating on `(scan_date, config_key, ticker)`
+  also makes re-running a day idempotent. Cheap at a handful of rows a night —
+  don't "optimize" it into an append. **The rewrite must keep carrying
+  `VERDICT_COLS` forward** (`merge_history_csv(..., protect=...)`): tier 3
+  writes `Verdict`/`Conviction` into a row tier 1 created hours earlier, so
+  without the carry a same-day re-scan erases the verdict with no error at all.
+  A test pins it.
+- **A verdict is recorded in exactly one of two tables, by provenance.**
+  `signals.csv` gets `Verdict`/`Conviction` on the ticker's existing row;
+  `on_demand_scans_results.csv` holds one row per `(scan_date, ticker)` you
+  asked about yourself, with the ratios and the figures behind the judgment.
+  The split exists because an ad-hoc look **has no signal row** — PGR and MSFT
+  were deep-dived on 2026-07-26 and appear nowhere in `signals.csv` — so a
+  single-table design drops exactly the verdicts you most want to study. The
+  routing key is `source` in `<T>_<date>_facts.json`, written by
+  `assemble_context` because it is the only place that knows; `post-verdicts`
+  only reads it back. `record_on_demand` skips a ticker `signals.csv` already
+  covers, so the on-demand table can never accumulate orphan rows that no
+  verdict will ever reach. Recording runs with or without `--send`.
+  Note for analysis: a ticker that fired on two screens has **two**
+  `signals.csv` rows and the verdict is on both — de-duplicate on
+  `(scan_date, ticker)` before grouping by it.
+- **On-demand scanning is the nightly registry on a one-ticker universe**
+  (`run_scanners.scan_ticker`), and it returns a payload in **exactly the
+  `latest_hits.json` shape** — that is what lets `find_ticker`, the tier-2
+  re-grade, `_facts` and the Discord card consume an ad-hoc look unchanged.
+  `assemble_context` falls back to it whenever the ticker is absent from the
+  hand-off. Two intentional deviations from the nightly path: `enabled` is
+  ignored (as `backtest_universe.py`/`tune_screen.py` already do — you asked
+  about *this* ticker), and **tier 2 is graded even when no screen fires**
+  (`Setup: "none"`), because the quality check is usually the point of asking.
+  Its `scan_date` comes from its own price data, not from `latest_hits.json`:
+  the stale nightly date would collapse two separate looks into one CSV row.
 - **Every generated file goes to `output/`** via
   `scanner_common.output_dir()` — logs, `latest_hits.json`, the cached price
   panel, all backtest tables/charts, the tier-3 reports (`output/reports/`) and
@@ -292,7 +328,10 @@ real send.
   `quality_failures` still grades a round-tripped row because it looks values up
   by label and indexes the series positionally — that is what keeps *archived*
   scans readable after the format moves on. Only **enabled** screens appear: the
-  hand-off follows the alert, unlike the backtest and tuner.
+  hand-off follows the alert, unlike the backtest and tuner. The same shape is
+  produced in memory by `scan_ticker` for on-demand tickers — keep the two
+  identical, since that identity is the only reason tier 3 needs no second code
+  path.
 - **Tier 3 re-grades tier 2 against the rules in force now** — `_row_quality`
   recomputes rather than trusting the verdict the scan recorded, and both the
   gate (`list_candidates`) and the Discord card (`_facts`) go through it, so they

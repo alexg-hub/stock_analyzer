@@ -41,12 +41,15 @@ import research_report
 import run_scanners
 from scanner_common import (
     COMPANY_COL,
+    CONVICTION_COL,
     HISTORY_KEYS,
     PARTIAL_COLOR,
     QUALITY_COL,
     QUALITY_MISSING_COL,
+    VERDICT_COL,
     drop_unsettled_tail,
     quality_check,
+    update_csv_rows,
 )
 
 
@@ -455,6 +458,35 @@ c.ok("both scan dates are present",
      {q_payload["scan_date"], second_payload["scan_date"]})
 c.ok("no (scan_date, screen, ticker) is duplicated",
      not after_second.duplicated(subset=HISTORY_KEYS).any())
+
+# Tier 3 writes its verdict into a row tier 1 created hours earlier, and the
+# archive is *rewritten* on every scan. Without the protected-column carry in
+# merge_history_csv, re-running a day would silently drop the verdict recorded
+# against it -- no error, no warning, just a blank column next morning.
+verdict_ticker = str(after_second.iloc[0]["ticker"])
+verdict_date = str(after_second.iloc[0]["scan_date"])
+n_marked = update_csv_rows(csv_path,
+                           {"scan_date": verdict_date, "ticker": verdict_ticker},
+                           {VERDICT_COL: "STRONG", CONVICTION_COL: 91})
+c.ok("a verdict can be written onto an archived signal row", n_marked >= 1,
+     f"{n_marked} row(s) for {verdict_ticker} on {verdict_date}")
+
+rescan_day = next(d for d in busy_days
+                  if str(pd.Timestamp(d).date()) == verdict_date)
+run_on(rescan_day)
+after_verdict = pd.read_csv(csv_path, dtype={"scan_date": str})
+marked = after_verdict[(after_verdict["scan_date"] == verdict_date)
+                       & (after_verdict["ticker"] == verdict_ticker)]
+c.ok("re-scanning that day preserves the verdict",
+     len(marked) == n_marked and (marked[VERDICT_COL] == "STRONG").all()
+     and (marked[CONVICTION_COL] == 91).all(),
+     f"{marked[VERDICT_COL].tolist()} / {marked[CONVICTION_COL].tolist()}")
+c.ok("re-scanning still adds no duplicate rows",
+     len(after_verdict) == len(after_second),
+     f"{len(after_verdict)} vs {len(after_second)}")
+c.ok("only the verdicted ticker carries a verdict",
+     int(after_verdict[VERDICT_COL].notna().sum()) == n_marked,
+     f"{int(after_verdict[VERDICT_COL].notna().sum())} row(s) with a verdict")
 
 # --------------------------------------------------------------------------
 c.section("the deep-dive gate")

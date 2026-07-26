@@ -5,6 +5,10 @@ Downloads the whole universe once, runs every enabled screen module over
 it, and sends one combined Discord alert (text sections + a chart image
 per hit).
 
+`scan_ticker()` runs the same registry over a one-ticker universe for the
+on-demand path (`research_report.py scan TICKER`), returning the identical
+hand-off shape so tier 3 cannot tell the two apart.
+
 Adding a new scanner:
   1. write a module exposing CONFIG_KEY, scan(), EMBED_COLOR + describe_hit(),
      plot_hit() (see breakout_scanner.py / sma_pullback.py / sma_reclaim.py);
@@ -19,14 +23,19 @@ Usage:
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
+
+import pandas as pd
 
 import breakout_scanner
 import sma_pullback
 import sma_reclaim
 from scanner_common import (
+    ScanResult,
     annotate_quality,
     archive_scan,
     build_embeds,
+    build_hits_payload,
     download_price_data,
     enable_utf8_output,
     fetch_fundamentals,
@@ -39,6 +48,72 @@ from scanner_common import (
 
 # Every screen that runs nightly, in alert order.
 SCANNERS = [breakout_scanner, sma_pullback, sma_reclaim]
+
+# The screen entry a ticker gets when nothing fired: an on-demand look is
+# mostly about tier 2, so the payload still needs somewhere to put the row.
+NO_SIGNAL_KEY = "on_demand"
+NO_SIGNAL_TITLE = "No active technical signal"
+
+
+def scan_ticker(ticker: str, cfg: dict) -> dict:
+    """Run tiers 1 and 2 for one named ticker, on demand.
+
+    Returns a payload in exactly the `latest_hits.json` shape, so
+    `research_report.find_ticker` and everything behind it handle an ad-hoc
+    look and a nightly signal without knowing which they got.
+
+    Two deliberate differences from the nightly scan:
+
+    * **`enabled` is ignored**, as `backtest_universe.py` and `tune_screen.py`
+      already ignore it. That flag gates the nightly *alert*; here you asked
+      about this ticker specifically, and a screen is switched off precisely
+      when you most want to see what it would have said. Its title says so.
+    * **Tier 2 is graded whether or not a screen fires.** The quality check is
+      the point of an on-demand look, so when nothing fires the payload still
+      carries one row -- `Setup: "none"` -- holding the fundamentals.
+    """
+    ticker = ticker.upper()
+    data = download_price_data(
+        [ticker],
+        period=cfg["data"]["download_period"],
+        interval=cfg["data"]["download_interval"],
+    )
+    # From the price data, never from latest_hits.json: this is the last
+    # *settled* bar (drop_unsettled_tail already ran), and it makes a re-look
+    # next week a new row rather than a collision with today's.
+    scan_date = data.index[-1].date()
+
+    results = []
+    for module in SCANNERS:
+        strategy = cfg.get(module.CONFIG_KEY)
+        if not strategy:
+            print(f"No '{module.CONFIG_KEY}' section in config.json -- skipping.")
+            continue
+        result = module.scan(data, strategy)
+        if result.hits.empty:
+            continue
+        if not strategy.get("enabled", True):
+            result.title += " [screen disabled nightly]"
+        results.append((module, result))
+
+    if not results:
+        print(f"{ticker}: no screen fires today -- grading fundamentals only.")
+        row = pd.DataFrame(index=pd.Index([ticker], name="Ticker"))
+        row["Setup"] = "none"
+        row["Missing"] = ""
+        results = [(SimpleNamespace(CONFIG_KEY=NO_SIGNAL_KEY),
+                    ScanResult(title=NO_SIGNAL_TITLE, hits=row))]
+
+    # -- tier 2, the same two steps and the same single grading call as main() --
+    fund_cfg = cfg["fundamentals"]
+    if fund_cfg["enabled"]:
+        fundamentals = fetch_fundamentals([ticker], fund_cfg)
+        for _, result in results:
+            result.hits = result.hits.join(fundamentals)
+    for _, result in results:
+        annotate_quality(result.hits, fund_cfg)
+
+    return build_hits_payload(scan_date, results)
 
 
 def main() -> int:

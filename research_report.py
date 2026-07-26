@@ -8,10 +8,12 @@ verdict. This module provides the deterministic pieces around that reasoning:
 
   * list_candidates(hits, cfg) -> tonight's deep-dive candidates, gated by tier 2
   * assemble_context(ticker) -> the data bundle Claude reasons over
-      (trigger + Yahoo Tier-A + deterministic quant score + SEC 10-Q/10-K filings)
+      (trigger + Yahoo Tier-A + deterministic quant score + SEC 10-Q/10-K filings),
+      running tiers 1+2 on demand for a ticker the nightly scan never surfaced
   * compute_quant_score(yahoo, cfg) -> the config-driven 0-100 anchor
   * report_dir / write_report -> archive the full report under output/
   * post_summary / post_verdict -> deliver to Discord (reuse send_discord_alert)
+  * record_verdicts -> the permanent record of tier + conviction
 
 The verdict = tier + conviction: conviction = clamp(quant + narrative_adj, 0,
 100), narrative_adj (bounded by config) is Claude's qualitative adjustment; the
@@ -20,32 +22,50 @@ tier comes from config conviction bands.
 CLI:
     python research_report.py candidates [--all] [--json]   # who to deep-dive
     python research_report.py auto-prompt                   # the nightly prompt
+    python research_report.py scan PGR [RL ...]             # on-demand tiers 1+2
     python research_report.py context MSFT [JNJ ...]        # the data bundle
 """
 
 import json
 import math
 import sys
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import charts
+import run_scanners
 import sec
 from research_collect import collect_yahoo
 from scanner_common import (
     COMPANY_COL,
+    CONVICTION_COL,
+    ON_DEMAND_KEYS,
     QUALITY_COL,
     QUALITY_MISSING_COL,
+    VERDICT_COL,
+    count_csv_rows,
     enable_utf8_output,
     fmt_compact,
+    fundamentals_fields,
+    history_rows,
     load_config,
+    merge_history_csv,
+    on_demand_csv_path,
     output_dir,
     quality_enabled,
     quality_failures,
     send_discord_alert,
+    signals_csv_path,
+    update_csv_rows,
 )
 
 VERDICT_COLOR = 0x2A78D6  # matches the charts' "close" blue
+
+# Where a ticker's trigger came from, and therefore which table its verdict is
+# recorded in: a nightly signal has a `signals.csv` row to annotate, an on-demand
+# look has none and gets its own table.
+SOURCE_SIGNAL = "signal"
+SOURCE_ON_DEMAND = "on_demand"
 
 
 # --------------------------------------------------------------------------
@@ -343,13 +363,18 @@ def financials_table_md(fin: dict) -> str:
 
 
 def _facts(ticker: str, scan_date: str, yahoo: dict, quant: dict,
-           trigger: dict | None, chart: Path | None, cfg: dict) -> dict:
+           trigger: dict | None, chart: Path | None, cfg: dict,
+           source: str = SOURCE_SIGNAL) -> dict:
     """The deterministic values the Discord card shows.
 
     Written to disk so `post_summary` reads them back rather than the model
     retyping them: every figure on the notification comes from the collector,
     and the model contributes only tier, conviction, the adjustment and the
     thesis.
+
+    `source` records whether the trigger came from the nightly hand-off or from
+    an on-demand scan. It is the routing key for the permanent record, decided
+    here because this is the only place that knows the answer.
     """
     valuation = yahoo.get("valuation") or {}
     targets = (yahoo.get("analyst") or {}).get("targets") or {}
@@ -373,6 +398,7 @@ def _facts(ticker: str, scan_date: str, yahoo: dict, quant: dict,
         "quality": quality,
         "quality_missing": quality_missing,
         "chart": str(chart) if chart else None,
+        "source": source,
     }
 
 
@@ -392,16 +418,31 @@ def assemble_context(ticker: str, cfg: dict | None = None) -> dict:
     returns, precisely so the model never generates either. Tier 3 is
     skill-driven, and without that the chart would be improvised and the
     figures retyped.
+
+    A ticker the nightly scan never surfaced gets tiers 1 and 2 run for it now
+    (`run_scanners.scan_ticker`) rather than arriving with an empty trigger and
+    a quality verdict of "not evaluated" -- which is what an ad-hoc deep dive
+    used to look like.
     """
     cfg = cfg or load_config()
     fin_cfg = cfg.get("research", {}).get("financials", {})
     hits = load_hits(cfg)
     scan_date = hits.get("scan_date") or date.today().isoformat()
+    trigger = find_ticker(hits, ticker, cfg)   # re-graded, so it agrees with _facts
+
+    source, on_demand = SOURCE_SIGNAL, None
+    if trigger is None:
+        source = SOURCE_ON_DEMAND
+        on_demand = run_scanners.scan_ticker(ticker, cfg)
+        # The on-demand scan dates itself off its own price data, so the report
+        # and its record carry the day actually analysed, not the last nightly.
+        scan_date = on_demand["scan_date"]
+        trigger = find_ticker(on_demand, ticker, cfg)
+
     yahoo = collect_yahoo(ticker,
                           years=fin_cfg.get("years", 4),
                           quarters=fin_cfg.get("quarters", 4))
     quant = compute_quant_score(yahoo, cfg)
-    trigger = find_ticker(hits, ticker, cfg)   # re-graded, so it agrees with _facts
 
     chart = None
     try:
@@ -412,14 +453,18 @@ def assemble_context(ticker: str, cfg: dict | None = None) -> dict:
         print(f"  financials chart failed for {ticker}: {exc}")
         chart = None
 
-    facts = _facts(ticker, scan_date, yahoo, quant, trigger, chart, cfg)
+    facts = _facts(ticker, scan_date, yahoo, quant, trigger, chart, cfg, source)
     facts_path = report_dir(cfg) / f"{ticker}_{scan_date}_facts.json"
     facts_path.write_text(json.dumps(facts, indent=2, ensure_ascii=False),
                           encoding="utf-8")
 
+    if on_demand is not None:
+        record_on_demand(on_demand, ticker, cfg)
+
     return {
         "ticker": ticker,
         "scan_date": scan_date,
+        "source": source,
         "trigger": trigger,
         "yahoo": yahoo,
         "quant": quant,
@@ -597,6 +642,186 @@ def post_verdict(ticker: str, headline: str, short_md: str, cfg: dict,
 
 
 # --------------------------------------------------------------------------
+# The permanent record: every verdict, in the table that fits its provenance
+# --------------------------------------------------------------------------
+# Discord is a notification and `output/reports/` is prose; neither accumulates
+# into something you can load and study. These two tables do, split by where the
+# ticker came from: a nightly signal annotates its existing `signals.csv` row,
+# an on-demand look has no such row and gets its own table carrying the ratios
+# that make an old verdict interpretable.
+
+# Columns only tier 3 fills in, long after the scan row was written -- so every
+# rewrite of the on-demand table has to carry them forward.
+ON_DEMAND_VERDICT_COLS = [VERDICT_COL, CONVICTION_COL, "Narrative Adj",
+                          "Quant Score", "Price", "Upside %", "P/E Pctile 2y",
+                          "Report", "Thesis"]
+
+
+def on_demand_row(payload: dict, ticker: str) -> dict | None:
+    """One flat row for the on-demand table, from a `scan_ticker` payload.
+
+    Flattened by `scanner_common.history_rows` -- the same function that builds
+    `signals.csv` -- so both tables carry identical, config-driven fundamentals
+    labels and can be compared column for column.
+
+    A ticker firing more than one screen keeps the *first* screen's row, which
+    is the one `find_ticker` resolves to and therefore the trigger the deep dive
+    actually reasoned about; `Screens` names all of them.
+    """
+    rows = [r for r in history_rows(payload) if r.get("ticker") == ticker]
+    if not rows:
+        return None
+    base = dict(rows[0])
+    screens = ", ".join(dict.fromkeys(r.get("screen") or "" for r in rows))
+    row = {
+        "scan_date": base.pop("scan_date", None),
+        "run_at": base.pop("generated_at", None),
+        "ticker": base.pop("ticker", None),
+        COMPANY_COL: base.pop(COMPANY_COL, None),
+        "Screens": screens,
+    }
+    base.pop("config_key", None)   # replaced by Screens
+    base.pop("screen", None)
+    row.update(base)
+    return row
+
+
+def record_on_demand(payload: dict, ticker: str, cfg: dict) -> Path | None:
+    """Archive an on-demand scan's tier-1/tier-2 row, verdict columns blank.
+
+    Written as soon as the scan runs, so a ticker you looked at but never
+    deep-dived is still on the record; `record_verdict` fills in the judgment
+    later if it comes.
+
+    Skipped when `signals.csv` already covers that (scan_date, ticker) -- you
+    can perfectly well scan a ticker the nightly run also caught, and its
+    verdict routes to the signal row. Writing here too would leave an orphan
+    that can never receive one. The invariant is worth stating: **a
+    (scan_date, ticker) belongs to exactly one of the two tables.**
+    """
+    if not cfg.get("research", {}).get("history", {}).get("enabled", True):
+        return None
+    row = on_demand_row(payload, ticker)
+    if row is None:
+        return None
+    match = {"scan_date": str(row.get("scan_date")), "ticker": ticker}
+    if count_csv_rows(signals_csv_path(cfg, create=False), match):
+        print(f"{ticker} already has a {signals_csv_path(cfg).name} row for "
+              f"{match['scan_date']} -- its verdict records there.")
+        return None
+    path = on_demand_csv_path(cfg)
+    frame = merge_history_csv(path, [row], ON_DEMAND_KEYS,
+                              protect=ON_DEMAND_VERDICT_COLS)
+    print(f"Recorded {ticker} in {path.name} ({len(frame)} row(s) total).")
+    return path
+
+
+def _verdict_values(verdict: dict, facts: dict, full: bool) -> dict:
+    """The columns a recorded verdict sets.
+
+    `signals.csv` gets only the tier and the conviction -- the row beside them
+    already holds the signal and the ratios. The on-demand table has no such
+    neighbour, so it gets the figures needed to read the verdict a year later.
+    """
+    values = {VERDICT_COL: verdict.get("tier"),
+              CONVICTION_COL: verdict.get("conviction")}
+    if not full:
+        return values
+    scan_date = verdict.get("scan_date") or ""
+    values.update({
+        "Narrative Adj": verdict.get("narrative_adj"),
+        "Quant Score": facts.get("quant_score"),
+        "Price": facts.get("price"),
+        "Upside %": facts.get("upside_pct"),
+        "P/E Pctile 2y": facts.get("pe_percentile_2y"),
+        "Report": f"{verdict.get('ticker')}_{scan_date}.md",
+        "Thesis": verdict.get("thesis"),
+    })
+    return values
+
+
+def _warn_tier_drift(verdict: dict, cfg: dict) -> None:
+    """Warn when a recorded tier and the config bands disagree.
+
+    Not an error and not a correction: the bands get retuned between a run and
+    its record, and the label the analysis actually reasoned under is the one
+    worth keeping. But a study that groups by tier deserves to know the label
+    and the bands have parted company.
+    """
+    tier, conviction = verdict.get("tier"), verdict.get("conviction")
+    if not tier or not isinstance(conviction, (int, float)):
+        return
+    band = tier_for(conviction, cfg)
+    if band != tier:
+        print(f"  WARNING: {verdict.get('ticker')} recorded as {tier} at "
+              f"conviction {conviction}, but the current config bands put "
+              f"{conviction} in {band}. Keeping {tier} as stated.",
+              file=sys.stderr)
+
+
+def record_verdict(verdict: dict, cfg: dict) -> str | None:
+    """Route one verdict to its table and write it; return the file name.
+
+    The routing question -- signal or ad-hoc? -- was answered once, by `_facts`,
+    at the only place that knew. Here it is only read back. A verdict is never
+    written to both tables and never dropped: with no scan row to annotate, the
+    on-demand table gains a minimal one rather than losing the judgment.
+    """
+    if not cfg.get("research", {}).get("history", {}).get("enabled", True):
+        return None
+    ticker, scan_date = verdict.get("ticker"), verdict.get("scan_date")
+    if not ticker or not scan_date:
+        print(f"  cannot record a verdict without ticker and scan_date: "
+              f"{verdict.get('ticker') or verdict}", file=sys.stderr)
+        return None
+    _warn_tier_drift(verdict, cfg)
+
+    facts = load_facts(ticker, scan_date, cfg)
+    match = {"scan_date": scan_date, "ticker": ticker}
+
+    if facts.get("source") != SOURCE_ON_DEMAND:
+        path = signals_csv_path(cfg, create=False)
+        updated = update_csv_rows(path, match,
+                                  _verdict_values(verdict, facts, full=False))
+        if updated:
+            print(f"  {ticker}: {verdict.get('tier')} "
+                  f"{verdict.get('conviction')} -> {path.name} "
+                  f"({updated} row(s))")
+            return path.name
+        # No signal row: either an ad-hoc look whose facts file is missing, or
+        # a scan whose rows have since been rewritten. The on-demand table is
+        # the honest home for it either way.
+
+    path = on_demand_csv_path(cfg)
+    values = _verdict_values(verdict, facts, full=True)
+    if not update_csv_rows(path, match, values):
+        merge_history_csv(path, [{
+            "scan_date": scan_date,
+            "run_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "ticker": ticker,
+            COMPANY_COL: facts.get("company"),
+            "Screens": facts.get("screen") or "",
+            "Setup": facts.get("setup") or "",
+            QUALITY_COL: facts.get("quality"),
+            QUALITY_MISSING_COL: json.dumps(facts.get("quality_missing") or []),
+            **values,
+        }], ON_DEMAND_KEYS)
+    print(f"  {ticker}: {verdict.get('tier')} {verdict.get('conviction')} "
+          f"-> {path.name}")
+    return path.name
+
+
+def record_verdicts(verdicts: list[dict], cfg: dict) -> None:
+    """Record every verdict in the batch. Runs whether or not Discord was sent:
+    the record is the point, the notification is not."""
+    if not verdicts:
+        return
+    print("Recording verdicts:")
+    for verdict in verdicts:
+        record_verdict(verdict, cfg)
+
+
+# --------------------------------------------------------------------------
 # The nightly unattended prompt
 # --------------------------------------------------------------------------
 
@@ -643,6 +868,7 @@ USAGE = """usage:
   python research_report.py candidates [--all] [--json]   who to deep-dive tonight
   python research_report.py auto-prompt                   the nightly prompt (exit 1 if none)
   python research_report.py auto-model                    the model the nightly run should use
+  python research_report.py scan TICKER [TICKER ...]      on-demand tiers 1 + 2 for a ticker
   python research_report.py post-verdicts F.json [--send] deliver the batch's verdict cards
   python research_report.py context TICKER [TICKER ...]   the data bundle for one ticker"""
 
@@ -662,6 +888,34 @@ def _print_candidates(rows: list[dict], held_back: int, gate: str) -> None:
     if held_back:
         print(f"\n({held_back} more signal(s) held back by gate '{gate}' -- "
               f"rerun with --all to see them.)")
+
+
+def _print_scan(payload: dict, ticker: str, cfg: dict) -> None:
+    """One on-demand scan, readable: what fired, and what tier 2 made of it."""
+    print(f"\n{ticker} -- scanned {payload.get('scan_date')}")
+    for screen in payload.get("screens", []):
+        row = screen.get("hits", {}).get(ticker)
+        if row is None:
+            continue
+        missing = row.get("Missing") or ""
+        print(f"  tier 1  {screen['title']}: {row.get('Setup', '?')}"
+              + (f" -- {missing}" if missing else ""))
+
+    trigger = find_ticker(payload, ticker, cfg)
+    if trigger is None:
+        print("  tier 2  no row produced")
+        return
+    fund_cfg = cfg["fundamentals"]
+    for field in fundamentals_fields(trigger["row"], fund_cfg):
+        print(f"          {field['name']}: {field['value']}")
+    quality, failed = trigger["quality"], trigger["quality_missing"]
+    if quality is None:
+        print("  tier 2  not evaluated (quality layer off)")
+    elif quality:
+        badge = fund_cfg.get("quality", {}).get("badge", "")
+        print(f"  tier 2  PASS {badge}".rstrip())
+    else:
+        print(f"  tier 2  fails: {', '.join(failed)}")
 
 
 def main() -> int:
@@ -699,6 +953,18 @@ def main() -> int:
         print(auto_cfg.get("model", "opus"))
         return 0
 
+    # On-demand: tiers 1 + 2 for a ticker you name, whether or not the nightly
+    # scan surfaced it. Recorded immediately, so a look you never deep-dive is
+    # still on the record.
+    if len(args) >= 2 and args[0] == "scan":
+        cfg = load_config()
+        for name in args[1:]:
+            ticker = name.upper()
+            payload = run_scanners.scan_ticker(ticker, cfg)
+            _print_scan(payload, ticker, cfg)
+            record_on_demand(payload, ticker, cfg)
+        return 0
+
     # A first-class subcommand rather than leaving the skill to reach for
     # `python -c`: the unattended run's allow-list is deliberately narrow, and
     # Claude Code requires *every* segment of a compound command to be allowed,
@@ -719,6 +985,7 @@ def main() -> int:
             print("research.auto.discord_send is false -- printing instead of sending.",
                   file=sys.stderr)
         post_summary(verdicts, cfg, send=send)
+        record_verdicts(verdicts, cfg)
         return 0
 
     if len(args) >= 2 and args[0] == "context":
