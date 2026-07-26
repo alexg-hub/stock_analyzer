@@ -4,10 +4,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A set of S&P 500 screens that run nightly on this Windows machine via Task
-Scheduler and push one combined alert (text + per-signal chart images) to a
-Discord channel, plus historical tooling: single-ticker backtesters, a
-universe-wide profit backtest, and a threshold tuner.
+A **three-tier stock filter** running nightly on this Windows machine via Task
+Scheduler, plus historical tooling (single-ticker backtesters, a universe-wide
+profit backtest, a threshold tuner).
+
+1. **Tier 1 — technical.** The S&P 500 screens (breakout, pullback; reclaim
+   disabled). Records `Setup` (`full`/`partial`) + `Missing`.
+2. **Tier 2 — quality.** `fundamentals.quality.rules` graded over the tier-1
+   hits only. Records `Quality` (the ⭐ badge) + `Quality Missing`.
+3. **Tier 3 — deep dive.** The `deep-dive` skill over Yahoo + IBKR + SEC + web,
+   producing a graded report per ticker.
+
+Tiers 1+2 are `run_scanners.py`: one combined Discord alert (text + per-signal
+chart images) and the `output/latest_hits.json` hand-off. Tier 3 reads that
+hand-off, both automatically (`run_deepdive.bat`, chained from
+`run_scanner.bat`) and on demand.
 
 Validation is `python tests/run_all.py` — plain scripts, no test dependency,
 asserting **invariants** rather than recorded output (config gets retuned
@@ -51,6 +62,14 @@ python backtest_universe.py --split-by-tier                     # full vs partia
 python tune_screen.py sensitivity reclaim_strategy
 python tune_screen.py grid breakout_strategy --csv
 python tune_screen.py delay reclaim_strategy
+
+# Tier 3 selection: who is worth a deep dive tonight, per the tier-2 gate.
+# Reads output/latest_hits.json only. No network, no Discord.
+python research_report.py candidates            # the configured gate
+python research_report.py candidates --all      # every tier-1 hit
+python research_report.py candidates --json     # machine-readable
+python research_report.py auto-prompt           # nightly prompt; exit 1 = nothing to do
+python research_report.py context MSFT          # the data bundle for one ticker
 ```
 
 To test alert formatting/sending without spamming the channel, monkeypatch
@@ -144,43 +163,53 @@ real send.
   embed-char per-message limits) and **`charts.py`**
   (validated palette + the per-screen chart builders used by both the alert
   and the backtests).
-- **`tests/` asserts invariants, never snapshots.** Anything comparing against
-  recorded counts goes stale the moment the user retunes `config.json`, which is
-  constantly — so a check has to hold at *any* thresholds (e.g. "`fires_mask` is
-  `signal` or exactly `signal | partial`", not "breakout fires 2709 times"). Test
-  fixtures come from the **cached** panel via `_harness.cached_panel_or_skip()`
-  and a `busiest_day()` found from the data, so no test downloads, hardcodes a
-  date, or sends to Discord. Exit codes are the interface: 0 pass, 1 fail,
-  **2 skip** (a missing cache is a skip with instructions, not a failure).
-  Add new checks to the existing file that owns that concern rather than making
-  another script; `run_all.py` lists them in dependency order.
-- **`tune_screen.py` is the threshold tuner** — sweeps one screen's parameters
-  (`sensitivity` one at a time / `grid` crossing 2-3 / `delay` wait×hold) over
-  the **cached** panel via `backtest_universe.cached_panel()`, which raises
-  rather than silently re-downloading 500 tickers. It reuses the production
-  `compute_*` / `fires_mask` / `partial_mask` and `backtest_universe`'s
-  `forward_trades` / `cohort_values` / `stats_from` — never reimplement either.
-  **The `protected` column is the point**: `tuning.protected_cases` names setups
-  that must keep firing (META 2023-02-02 etc.) and each candidate is graded
-  `FULL`/`partial`/`MISSED`, because a config that scores well by dropping the
-  wanted setups is not an improvement. Ranges, protected cases and grid axes all
-  live in `config.json` → `tuning`; adding a value is a config edit, never a code
-  edit. Measured so far: reclaim is **untunable** (all candidates below
-  baseline, every tightening hurts) while breakout **does** respond
-  (`breakout_multiplier` 1.01→1.02 lifts excess +0.62→+1.33 but demotes the JNJ
-  protected case).
+- **`tests/` asserts invariants, never snapshots** — see `tests/CLAUDE.md`,
+  which loads whenever you work under that directory.
+- **`tune_screen.py` is the threshold tuner** — see the `tune-thresholds`
+  skill for how to sweep a screen and read its `protected` column.
+- **Tier 2's verdict is computed exactly once**, by
+  `scanner_common.annotate_quality`, in `run_scanners.main()` right after the
+  fundamentals join and *before* the hand-off is written. `build_embeds` reads
+  the recorded `Quality` column (falling back to `quality_check` only when the
+  column is absent), so the ⭐ badge and `latest_hits.json` cannot disagree.
+  Don't reintroduce a second call site — the bug this fixed was exactly that:
+  the badge was computed inside `build_embeds`, which runs *after*
+  `write_latest_hits`, so the hand-off never carried it and tier 3 was blind to
+  tier 2. **Absent quality columns mean "not evaluated", not "failed"** — the
+  helper is a deliberate no-op when the quality layer is off.
+- **`research_report.py` is tier 3's deterministic half** (`list_candidates` +
+  the gate, the quant score, `report_dir`/`write_report`, the Discord verdict
+  posts); the synthesis itself is the `deep-dive` skill, i.e. Claude reasoning,
+  not a function — which is why the nightly run invokes `claude -p` from
+  `run_deepdive.bat` rather than calling Python. `research_collect.py` (Yahoo)
+  and `sec.py` (EDGAR) are its collectors; `RESEARCH_DATA.md` maps what each
+  source can and cannot supply. **The IBKR MCP tools must stay in
+  `run_deepdive.bat`'s `--allowedTools`** — under `--permission-mode dontAsk` an
+  un-allowed tool is refused *silently*, which would drop the moat/competitor
+  section from every report with no error to explain it.
+- **The signal history CSV is rewritten, not appended** (`archive_scan`).
+  The fundamentals columns are config-driven display labels, so retuning
+  `config.json` changes the schema and a blind append would misalign every later
+  row; de-duplicating on `(scan_date, config_key, ticker)` also makes re-running
+  a day idempotent. Cheap at a handful of rows a night — don't "optimize" it
+  into an append.
 - **Every generated file goes to `output/`** via
-  `scanner_common.output_dir()` — both logs, `latest_hits.json`, the cached
-  price panel, and all backtest tables/charts. The project root holds only
-  inputs (code, `config.json`, docs); `output/` is gitignored as one directory.
-  Never write an artifact with `Path(__file__).parent` — that is exactly what
-  this replaced. `config.json` deliberately still stores **bare filenames**
-  (`backtest_universe_cache.pkl`, …) which `output_dir()` resolves, so an
-  absolute path in config keeps overriding it and no sub-paths leak into config.
-  `PROJECT_ROOT` assumes the code is flat in the repo root — the one line to
-  revisit if modules ever move into a package. The two `.bat` files must keep
-  their `if not exist output md output` guard: `cmd` expands `>>` before Python
-  runs, so `output_dir()`'s `mkdir` would be too late.
+  `scanner_common.output_dir()` — logs, `latest_hits.json`, the cached price
+  panel, all backtest tables/charts, the tier-3 reports (`output/reports/`) and
+  the signal history (`output/history/`). There are no exceptions; Google Drive
+  was one until 2026-07-26 and was removed, partly because Claude Code cannot
+  `--add-dir` a path containing the U+200F mark in that folder's name. The
+  project root holds only inputs (code, `config.json`, docs); `output/` is
+  gitignored as one directory. Never write an artifact with
+  `Path(__file__).parent` — that is exactly what this replaced. `config.json`
+  deliberately still stores **bare filenames** (`backtest_universe_cache.pkl`,
+  `reports`, `history`, …) which `output_dir()` resolves, so an absolute path in
+  config keeps overriding it (which is how the tests redirect them) and no
+  sub-paths leak into config. `PROJECT_ROOT` assumes the code is flat in the
+  repo root — the one line to revisit if modules ever move into a package. All
+  three `.bat` files must keep their `if not exist output md output` guard:
+  `cmd` expands `>>` before Python runs, so `output_dir()`'s `mkdir` would be
+  too late.
 - **Data layout contract**: `yf.download(..., group_by="column",
   auto_adjust=False)` giving a `(Field, Ticker)` column MultiIndex
   (`data["Close"]["AAPL"]`). Single-ticker frames must be normalized to this
@@ -239,16 +268,33 @@ real send.
   column (`info` longName/shortName) that `build_embeds` puts in each card
   title as `TICKER (Company Name)`; it is not a config field and never
   renders as an inline field.
-- **Quality badge** (`fundamentals.quality` in config): `quality_check(row,
-  fund_cfg)` in `scanner_common.py` evaluates `rules` — keyed by the same
-  `info`/metric keys as the display config, each `{min, max, increasing}`;
-  strict compares, latest fiscal year for multi-year metrics, missing value
-  = rule fails (banks can never pass). `build_embeds` prefixes the
-  configured `badge` to any passing signal card's title, every screen
-  automatically — **including `partial` setups** (it grades fundamentals, which
-  are independent of setup completeness; this changed when the tiers merged).
-  The default rule set is intentionally strict — most tickers fail at least one
-  rule.
+- **Quality badge = tier 2** (`fundamentals.quality` in config):
+  `quality_failures(row, fund_cfg)` in `scanner_common.py` evaluates `rules` —
+  keyed by the same `info`/metric keys as the display config, each
+  `{min, max, increasing}`; strict compares, latest fiscal year for multi-year
+  metrics, missing value = rule fails (banks can never pass). `annotate_quality`
+  records the result, `build_embeds` prefixes the configured `badge` to any
+  passing signal card's title, every screen automatically — **including
+  `partial` setups** (it grades fundamentals, which are independent of setup
+  completeness; this changed when the tiers merged). The rule set is
+  intentionally strict: **most tickers fail at least one rule**, which is why
+  the tier-3 gate is a soft, configurable one (`research.auto.gate`:
+  `quality_pass` | `all`) — a hard gate would routinely leave tier 3 with
+  nothing. If `candidates` keeps coming back empty, that is the rule set doing
+  its job, and the fix is a config decision (loosen the rules or switch the gate
+  to `all`), not a code change.
+- **The tier 1→2→3 hand-off contract** is `output/latest_hits.json`: per screen
+  a `config_key`/`title`/`strategy` and a `hits` map of ticker → row, where the
+  row is whatever the screen's frame held plus `Setup`/`Missing` (tier 1),
+  `Quality`/`Quality Missing` (tier 2), `Company`, and the joined fundamentals
+  under their **display labels**. `_json_safe` makes it JSON-native: NaN→`null`,
+  numpy scalars→Python, and the `[(year, value)]` series→nested arrays.
+  `research_report.quality_failures` still grades a round-tripped row because it
+  looks values up by label and indexes the series positionally — that is what
+  keeps *archived* scans readable after the format moves on, and
+  `list_candidates` relies on it to recompute a verdict a pre-2026-07-26
+  hand-off never recorded. Only **enabled** screens appear: the hand-off follows
+  the alert, unlike the backtest and tuner.
 - **Everything tunable lives in `config.json`** (per-screen strategy
   sections, charts, Discord, fundamentals fields) and all user-facing text
   (alert lines, backtest STEP logs, chart labels) is built from those values
@@ -270,12 +316,16 @@ real send.
 - `config.json` holds the **live Discord webhook URL** and is committed on
   purpose (private repo). Never paste it into issues/PRs or public output.
 - Nightly run: Task Scheduler task **"SP500 Breakout Scanner"**, Mon–Fri 23:30
-  Israel time → `run_scanner.bat` → output appended to
-  `output/scanner_log.txt`. README's "Nightly schedule" section has the exact
+  Israel time → `run_scanner.bat` (tiers 1+2 → `output/scanner_log.txt`) →
+  `run_deepdive.bat` (tier 3 → `output/deepdive_log.txt`). One task, all three
+  tiers. README's "Nightly schedule" section has the exact
   `Register-ScheduledTask` command and diagnostics; keep it in sync if the
   schedule changes. Result code `3221225786` in `Get-ScheduledTaskInfo` means
   the run was killed mid-scan (usually PC shutdown), and that night's alert is
-  simply lost.
+  simply lost — though the signals themselves are archived before tier 3
+  starts. **The task's `ExecutionTimeLimit` has to cover tier 3**: it was
+  registered at `PT30M`, which is ample for the scan but will guillotine a run
+  of five deep-dives.
 - Yahoo quirks the code already tolerates (don't "fix" into hard failures):
   missing `info` fundamentals render as `n/a` (e.g. negative-equity companies
   have no Debt/Equity); individual ticker download failures just drop out of

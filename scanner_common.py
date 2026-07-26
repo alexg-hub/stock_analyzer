@@ -7,7 +7,6 @@ Screen modules (breakout_scanner.py, sma_pullback.py, ...) contain only
 their own condition math and formatting; run_scanners.py orchestrates.
 """
 
-import glob
 import io
 import json
 import math
@@ -55,6 +54,13 @@ PARTIAL_COLOR = 0x898781
 # the embed titles; not a config-driven fundamentals field, so it never
 # renders as an inline field.
 COMPANY_COL = "Company"
+
+# Reserved columns (added by annotate_quality) holding the tier-2 quality
+# verdict, mirroring the tier-1 Setup/Missing pair: the badge decision and the
+# rules that failed. Like COMPANY_COL these are not config-driven fundamentals
+# fields and never render as inline fields.
+QUALITY_COL = "Quality"
+QUALITY_MISSING_COL = "Quality Missing"
 
 
 # --------------------------------------------------------------------------
@@ -453,6 +459,32 @@ def quality_check(row, fund_cfg: dict) -> bool:
     return not quality_failures(row, fund_cfg)
 
 
+def quality_enabled(fund_cfg: dict) -> bool:
+    """Whether the tier-2 quality layer is switched on at all."""
+    return bool(fund_cfg.get("enabled") and fund_cfg.get("quality", {}).get("enabled"))
+
+
+def annotate_quality(hits: pd.DataFrame, fund_cfg: dict) -> pd.DataFrame:
+    """Record the tier-2 verdict on a hits frame, mirroring Setup/Missing.
+
+    Adds `Quality` (passed every rule?) and `Quality Missing` (the rule keys
+    that failed, `[]` when it passed). Computing it here rather than inside
+    `build_embeds` gives the badge and the research hand-off **one** source of
+    truth -- they used to be a Discord-only decision that the hand-off never
+    saw, so nothing downstream could tell whether a ticker earned the star.
+
+    A no-op when the quality layer is disabled: the columns stay *absent*,
+    which downstream readers must treat as "not evaluated" rather than as a
+    failure. Mutates and returns `hits`.
+    """
+    if hits.empty or not quality_enabled(fund_cfg):
+        return hits
+    failures = [quality_failures(row, fund_cfg) for _, row in hits.iterrows()]
+    hits[QUALITY_COL] = [not f for f in failures]
+    hits[QUALITY_MISSING_COL] = pd.Series(failures, index=hits.index, dtype=object)
+    return hits
+
+
 def build_embeds(module, result: ScanResult, fund_cfg: dict,
                  chart_files: dict[str, Path] = {}) -> list[dict]:
     """One embed card per signal, with its chart image bound in.
@@ -461,8 +493,16 @@ def build_embeds(module, result: ScanResult, fund_cfg: dict,
     `EMBED_COLOR` and `describe_hit(row, strategy)`. A `partial` setup keeps
     the same card shape but gets the grey `PARTIAL_COLOR` side bar and its
     `Missing` text appended, so one list still shows the tier at a glance.
+
+    The quality badge reads the verdict `annotate_quality` already recorded,
+    falling back to computing it only when the column is absent -- so a card
+    and the hand-off row behind it can never disagree.
     """
     badge = fund_cfg.get("quality", {}).get("badge", "")
+
+    def passed(row) -> bool:
+        value = row.get(QUALITY_COL)
+        return bool(value) if value is not None else quality_check(row, fund_cfg)
 
     def label(ticker, row) -> str:
         """`TICKER (Company Name)` when the name is available, else the ticker."""
@@ -476,7 +516,7 @@ def build_embeds(module, result: ScanResult, fund_cfg: dict,
 
     embeds = []
     for ticker, row in result.hits.iterrows():
-        prefix = f"{badge} " if badge and quality_check(row, fund_cfg) else ""
+        prefix = f"{badge} " if badge and passed(row) else ""
         partial = row.get("Setup") == "partial"
         title = f"{prefix}{label(ticker, row)} -- {result.title}"
         if partial:
@@ -571,10 +611,10 @@ def send_discord_alert(content: str, discord_cfg: dict, embeds: list[dict] = (),
 # --------------------------------------------------------------------------
 # Research hand-off (Stage 1 -> Stage 2)
 # --------------------------------------------------------------------------
-# The nightly scan writes latest_hits.json so an on-demand interactive Claude
-# session can pick up exactly what fired (no Discord read-back). The full
-# deep-dive report is later archived into the local Google Drive folder,
-# resolved by glob (its real name starts with an invisible U+200F mark).
+# The nightly scan writes latest_hits.json so the deep-dive -- whether the
+# nightly unattended run or an on-demand interactive session -- picks up
+# exactly what fired, with no Discord read-back. It carries both tiers: the
+# technical Setup/Missing and the tier-2 Quality/Quality Missing verdict.
 
 def _json_safe(obj):
     """Recursively convert pandas/numpy row values to JSON-native types.
@@ -610,13 +650,16 @@ def _json_safe(obj):
     return str(obj)
 
 
-def write_latest_hits(path: Path, scan_date, results) -> None:
+def write_latest_hits(path: Path, scan_date, results) -> dict:
     """Serialize every screen's signal rows to `path` for the deep-dive.
 
     `results` is the list of (module, ScanResult) the nightly run already
     holds. Rows are whatever each screen put in its hits frame (day stats,
-    the Setup/Missing tier columns, and any joined fundamentals), made
-    JSON-safe.
+    the Setup/Missing tier columns, the Quality/Quality Missing tier-2
+    verdict, and any joined fundamentals), made JSON-safe.
+
+    Returns the payload so `archive_scan` can keep a dated copy without
+    re-serializing it.
     """
     payload = {
         "scan_date": str(scan_date),
@@ -635,17 +678,86 @@ def write_latest_hits(path: Path, scan_date, results) -> None:
                           encoding="utf-8")
     n = sum(len(s["hits"]) for s in payload["screens"])
     print(f"Wrote {path} ({n} ticker row(s) across {len(payload['screens'])} screen(s)).")
+    return payload
 
 
-def resolve_drive_dir(pattern: str) -> Path | None:
-    """First existing directory matching a glob pattern, else None.
+# --------------------------------------------------------------------------
+# Signal history (the long-term record of tiers 1 + 2)
+# --------------------------------------------------------------------------
+# `latest_hits.json` is overwritten nightly, so without this every scan's
+# output is gone within a day and there is nothing to study later. Two forms,
+# because they answer different questions: a dated JSON snapshot preserves the
+# hand-off exactly as the deep-dive saw it, while one flat CSV is what you
+# actually load into pandas to join signals against forward returns.
 
-    Used for the Google Drive sync folder whose real name begins with an
-    invisible U+200F RTL mark -- glob (`...\\*Google Drive*`) sidesteps having
-    to embed that character in config or code.
+HISTORY_KEYS = ["scan_date", "config_key", "ticker"]
+
+
+def history_dir(cfg: dict, create: bool = True) -> Path:
+    """Where the signal history lives (`research.history.dir` under output/)."""
+    hist_cfg = cfg.get("research", {}).get("history", {})
+    path = Path(hist_cfg.get("dir", "history"))
+    if not path.is_absolute():
+        path = output_dir(create) / path
+    if create:
+        path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _history_rows(payload: dict) -> list[dict]:
+    """Flatten one scan payload to one row per (scan_date, screen, ticker)."""
+    rows = []
+    for screen in payload.get("screens", []):
+        for ticker, hit in screen.get("hits", {}).items():
+            row = {
+                "scan_date": payload.get("scan_date"),
+                "generated_at": payload.get("generated_at"),
+                "config_key": screen.get("config_key"),
+                "screen": screen.get("title"),
+                "ticker": ticker,
+            }
+            for key, value in hit.items():
+                # Lists (the [year, value] series, the failed-rule keys) have
+                # to survive a CSV round trip -- JSON keeps them re-readable.
+                row[key] = json.dumps(value) if isinstance(value, list) else value
+            rows.append(row)
+    return rows
+
+
+def archive_scan(payload: dict, cfg: dict) -> None:
+    """Append this scan to the permanent record under `output/history/`.
+
+    Writes `hits_<scan_date>.json` (the payload verbatim) and merges the
+    flattened rows into `signals.csv`.
+
+    The CSV is rewritten rather than appended, which matters for two reasons:
+    the fundamentals columns are *config-driven display labels*, so retuning
+    the config changes the schema and a blind append would misalign every
+    later row; and de-duplicating on (scan_date, screen, ticker) makes a
+    same-day re-run idempotent instead of double-counting it. At a handful of
+    rows a night the full rewrite stays trivially cheap for years.
     """
-    for match in glob.glob(pattern):
-        p = Path(match)
-        if p.is_dir():
-            return p
-    return None
+    hist_cfg = cfg.get("research", {}).get("history", {})
+    if not hist_cfg.get("enabled", True):
+        return
+    out = history_dir(cfg)
+
+    scan_date = payload.get("scan_date", "unknown")
+    snapshot = out / f"hits_{scan_date}.json"
+    snapshot.write_text(json.dumps(payload, indent=2, ensure_ascii=False),
+                        encoding="utf-8")
+
+    rows = _history_rows(payload)
+    csv_path = Path(hist_cfg.get("csv", "signals.csv"))
+    if not csv_path.is_absolute():
+        csv_path = out / csv_path
+    frame = pd.DataFrame(rows)
+    if csv_path.exists():
+        previous = pd.read_csv(csv_path, dtype={"scan_date": str})
+        frame = pd.concat([previous, frame], ignore_index=True)
+    if not frame.empty:
+        frame = frame.drop_duplicates(subset=HISTORY_KEYS, keep="last")
+        frame = frame.sort_values(HISTORY_KEYS, kind="stable")
+    frame.to_csv(csv_path, index=False, encoding="utf-8")
+    print(f"Archived {len(rows)} row(s) to {snapshot.name}; "
+          f"{len(frame)} row(s) total in {csv_path.name}.")

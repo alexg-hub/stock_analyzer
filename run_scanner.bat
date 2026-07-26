@@ -7,3 +7,8 @@ if not exist output md output
 echo ==== Scan started %date% %time% ==== >> output\scanner_log.txt
 "C:\Users\Lenovo\AppData\Local\Microsoft\WindowsApps\python.exe" run_scanners.py >> output\scanner_log.txt 2>&1
 echo ==== Scan finished %date% %time% (exit %errorlevel%) ==== >> output\scanner_log.txt
+
+rem Tier 3 runs off the hand-off the scan just wrote, so the Discord alert lands
+rem first and the deep-dive verdicts follow a while later. It logs separately and
+rem skips itself when nothing qualifies.
+call "C:\Users\Lenovo\CC\stock_analyzer\run_deepdive.bat"

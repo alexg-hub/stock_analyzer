@@ -1,17 +1,27 @@
 ---
 name: deep-dive
-description: Produce a graded investment-case deep-dive for a scanner signal — a config-driven quant score anchored by Claude's narrative (moat, growth, earnings/management, news & rumors) → a tier + 0-100 conviction verdict, the full report archived to Google Drive and a combined verdict summary posted to Discord. Use when the user asks to deep-dive, analyze, or build an investment case for one or more tickers from the nightly scan.
+description: Produce a graded investment-case deep-dive for a scanner signal — a config-driven quant score anchored by Claude's narrative (moat, growth, earnings/management, news & rumors) → a tier + 0-100 conviction verdict, the full report archived under output/reports and a combined verdict summary posted to Discord. Use when the user asks to deep-dive, analyze, or build an investment case for one or more tickers from the nightly scan.
 ---
 
 # Deep-dive stock analysis
 
-This skill is the **synthesis layer** of the stock_analyzer pipeline. The nightly
-scan (`run_scanners.py`) writes `output/latest_hits.json`; this skill turns a
-signalling ticker into a full investment case. Each screen reports **one signal
-list** whose `Setup` is `full` (every condition held) or `partial` (breakout:
-3 of 4; reclaim: 1-2 confirmations failed, named in `Missing`). Treat a partial
-setup as a weaker technical trigger than a full one and say so in the report --
-it does not change the quant score, only your reading of the trigger.
+This skill is **tier 3** of the stock_analyzer pipeline. Tier 1 (technical
+screens) and tier 2 (a fast fundamentals-quality check) run nightly in
+`run_scanners.py` and hand off `output/latest_hits.json`; this skill turns a
+signalling ticker into a full investment case.
+
+Each row carries **both tiers' verdicts**:
+
+- **Tier 1** — `Setup` is `full` (every condition held) or `partial` (breakout:
+  3 of 4; reclaim: 1-2 confirmations failed), with `Missing` naming what failed.
+  Treat a partial setup as a weaker technical trigger and say so in the report.
+- **Tier 2** — `Quality` is the ⭐ badge decision and `Quality Missing` lists the
+  `fundamentals.quality.rules` keys that failed. Absent keys mean the scan did
+  not evaluate quality, which is different from failing it. The rule set is
+  deliberately strict, so most S&P 500 names fail at least one.
+
+Neither tier changes the quant score — they are separate, faster screens. They
+change how you *read* the trigger, and both belong in the report.
 
 Synthesis is **your reasoning**, anchored by a deterministic quant score.
 Everything mechanical is in `research_report.py` and `sec.py`; the judgment is
@@ -28,7 +38,25 @@ disclaimer line (below) in every report and the Discord summary.
   `scanner_common.output_dir()`.
 - IBKR MCP authenticated in this session (Tier B). If not, run `/mcp`.
 - SEC filings need only `research.sec.user_agent` (email-bearing, already in config) — no API key.
-- Confirm with the user before any **live** Discord send.
+- Confirm with the user before any **live** Discord send — except in unattended
+  mode (below), where config carries that authorization.
+
+## Step 0 — which tickers
+
+If you were given tickers, use them. If you were asked to deep-dive "tonight's
+hits" or similar, get the list rather than guessing:
+
+```powershell
+python research_report.py candidates          # the configured tier-2 gate
+python research_report.py candidates --all    # every tier-1 hit, gate ignored
+python research_report.py candidates --json   # same, machine-readable
+```
+
+Output is ranked quality-pass first, then `full` before `partial`. The gate
+(`research.auto.gate`: `quality_pass` or `all`) is a **fundamentals filter, not
+an override** — a ticker the user names explicitly is always analyzed, whatever
+tier 2 said about it. If the gate holds everything back, say so and offer
+`--all` rather than silently reporting nothing.
 
 ## Procedure — per ticker
 
@@ -64,16 +92,37 @@ disclaimer line (below) in every report and the Discord summary.
    `tier = research_report.tier_for(conviction, cfg)` (config bands STRONG/WATCH/PASS).
    You may override the tier **only** with an explicit written justification.
 7. **Write the full report** (template below) and archive it: resolve the folder
-   with `research_report.report_dir(load_config())` and use the **Write tool** to
-   create `<TICKER>_<scan_date>.md` there (Write handles the multiline markdown
-   cleanly; `write_report_to_drive` exists too but Write is simpler for prose).
+   with `research_report.report_dir(load_config())` — `output/reports/` — and use
+   the **Write tool** to create `<TICKER>_<scan_date>.md` there (Write handles the
+   multiline markdown cleanly; `write_report` exists too but Write is simpler for
+   prose).
 8. Record `{ticker, company, tier, conviction, thesis (one line), screen}` for the batch.
 
 ## After all tickers
 
 Deliver one **combined** Discord message:
 `research_report.post_summary(verdicts, cfg, send=False)` to dry-run;
-`send=True` **only after the user confirms** (it posts to the live channel).
+`send=True` **only after the user confirms** (it posts to the live channel), or
+immediately in unattended mode where config has already authorized it.
+
+## Unattended (nightly) mode
+
+`run_deepdive.bat` runs this skill headlessly after the nightly scan, via a
+prompt from `research_report.py auto-prompt` that says so explicitly. In that
+mode:
+
+- **Never ask a question** — nobody is there. Every decision comes from config
+  or from your own judgment.
+- **The Discord send is pre-authorized** by `research.auto.discord_send`, which
+  the prompt passes as `send=<true|false>`. That config flag *is* the user's
+  confirmation; do not wait for another one, and do not send when it is false.
+- **Tier B normally works** — the IBKR MCP server is registered in Claude Code
+  and resolves in a headless session. But if its login has expired, say so in
+  **Sources & provenance** and note that the narrative adjustment was made
+  without the moat/competitor evidence. A thinner report must be *visibly*
+  thinner; never let a missing section pass unremarked.
+- Everything else — the template, the citation rules, the disclaimer — is
+  unchanged. An unattended report is not a lesser report.
 
 ## The quant dimensions (already scored for you)
 
@@ -97,13 +146,14 @@ Move the adjustment **up** for a real qualitative edge the numbers miss; **down*
 for red flags (eroding moat, guidance cut, accounting/litigation/regulatory risk,
 crowded/expensive positioning). Stay within ±N; the quant score does the heavy lifting.
 
-## Full-report template (Drive markdown)
+## Full-report template (`output/reports/<TICKER>_<scan_date>.md`)
 
 ```
 # TICKER (Company) — deep-dive — <scan_date>
 
 **Verdict: TIER · Conviction NN/100**  (quant NN + narrative ±M)
-Trigger: <screen> (<full|partial> setup)  ·  *Analysis, not investment advice.*
+Trigger: <screen> (<full|partial> setup) · Quality screen: <passed ⭐ | failed: rule, rule>
+*Analysis, not investment advice.*
 
 ## Snapshot
 price · mkt cap · P/E (fwd) + 2y percentile · growth (this/next yr) ·
@@ -121,7 +171,10 @@ Forward estimates + revision trend; secular themes/peers; runway.
 
 ## Financial quality
 Margins, ROA, balance sheet (net debt/EBITDA), FCF, buybacks; tie to the
-financial_quality dimension score.
+financial_quality dimension score. State the **tier-2 quality screen** result and,
+if it failed, name the rules from `Quality Missing` and say whether you consider
+each one a genuine concern or an artifact of the rule (e.g. a bank with no
+operating income can never pass).
 
 ## Earnings & estimate momentum
 Surprise history, revision trend, next earnings date. **Management commentary**
@@ -140,7 +193,9 @@ IV percentile, analyst distribution, ownership/insider, account (held? size).
 The concrete ways this is wrong.
 
 ## Verdict rationale
-How quant + narrative produced the conviction/tier; what would change it.
+How quant + narrative produced the conviction/tier; what would change it. If this
+ticker was analyzed despite failing the tier-2 gate, say so and why it was still
+worth the work.
 
 ## Sources & provenance
 Data sources + dates (Yahoo, IBKR/Reflexivity, SEC EDGAR, web links). n/a where missing.

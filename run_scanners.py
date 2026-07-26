@@ -24,6 +24,8 @@ import breakout_scanner
 import sma_pullback
 import sma_reclaim
 from scanner_common import (
+    annotate_quality,
+    archive_scan,
     build_embeds,
     download_price_data,
     fetch_fundamentals,
@@ -74,17 +76,25 @@ def main() -> int:
         for _, result in results:
             result.hits = result.hits.join(fundamentals)
 
+    # -- tier 2: grade the fundamentals once, here. Both the Discord badge and
+    #    the hand-off read the recorded verdict, so they cannot disagree --
+    for _, result in results:
+        annotate_quality(result.hits, fund_cfg)
+
     for _, result in results:
         if not result.hits.empty:
             print(result.hits.to_string())
 
-    # -- hand-off for the on-demand deep-dive: always written (even when
-    #    empty) so an interactive session sees exactly what fired tonight --
+    # -- hand-off for the deep-dive: always written (even when empty) so the
+    #    nightly tier-3 run and any interactive session see exactly what fired
+    #    tonight, then archived under output/history/ so it survives tomorrow's
+    #    scan overwriting it --
     research_cfg = cfg.get("research", {})
     hits_path = Path(research_cfg.get("latest_hits_path", "latest_hits.json"))
     if not hits_path.is_absolute():
         hits_path = output_dir() / hits_path
-    write_latest_hits(hits_path, scan_date, results)
+    payload = write_latest_hits(hits_path, scan_date, results)
+    archive_scan(payload, cfg)
 
     all_empty = all(r.hits.empty for _, r in results)
     if all_empty and not cfg["discord"]["send_message_when_no_breakouts"]:

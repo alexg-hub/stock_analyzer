@@ -12,6 +12,23 @@ Each screen reports **one signal list with two tiers** (there is no separate
 when the setup is incomplete, with `Missing` naming the failing test. Full
 setups are listed first. See [Signal tiers](#signal-tiers).
 
+## The three-tier pipeline
+
+The scan is the first of three filters, each narrowing the last and each
+recording its verdict so the next one can read it:
+
+| tier | what it asks | how | output |
+|---|---|---|---|
+| **1 — technical** | Is the chart set up? | `breakout_scanner` / `sma_pullback` / `sma_reclaim`, nightly over all 503 names | `Setup` (`full`/`partial`) + `Missing` |
+| **2 — quality** | Are the fundamentals sound? | `fundamentals.quality.rules` over the tier-1 hits only, one Yahoo pass | `Quality` (the ⭐ badge) + `Quality Missing` |
+| **3 — deep dive** | Is the *business* worth owning? | the `deep-dive` skill: Claude over Yahoo + IBKR + SEC filings + live web | a graded report + a tier/conviction verdict |
+
+Tiers 1 and 2 run together in `run_scanners.py` and hand off
+`output/latest_hits.json`. Tier 3 reads that file — automatically each night
+(`run_deepdive.bat`) and on demand — and is the only tier that costs real time
+per name, which is why the first two exist. See
+[Tier 3](#tier-3-deep-dive-research) and [Signal history](#signal-history).
+
 Current screens:
 
 1. **Breakout from consolidation** — upward breakout from a horizontal range.
@@ -35,6 +52,11 @@ Current screens:
 | `backtest_breakout.py` / `backtest_pullback.py` / `backtest_reclaim.py` | Single-ticker historical validators |
 | `backtest_universe.py` | Universe-wide profit backtest: every screen × all history, buy the trigger / sell N days later |
 | `tune_screen.py` | Parameter tuning: sweep one screen's thresholds, scored against the baseline **and** against cases that must keep firing |
+| `research_report.py` | Tier 3 toolkit: the deep-dive candidate gate, quant score, report archive, Discord verdicts |
+| `research_collect.py` | Tier 3 data collection: everything Yahoo has on one ticker (valuation, estimates, analyst, earnings, ownership, news) |
+| `sec.py` | Tier 3 filings: EDGAR 10-Q/10-K MD&A / Risk Factors / Business sections + curated XBRL |
+| `.claude/skills/deep-dive/` | The tier-3 procedure itself — synthesis is Claude's reasoning, not a function |
+| `run_scanner.bat` / `run_deepdive.bat` | Task Scheduler entry point, and the tier-3 step it chains to |
 | `tests/` | Invariant test suite + `run_all.py` runner (no test dependency; plain scripts) |
 
 Adding a new scanner = new module exposing `CONFIG_KEY`, `scan()`,
@@ -210,17 +232,29 @@ for snapshot fields, metric keys for statement metrics) and support:
   one (requires ≥ 2 years of data).
 
 A missing value fails its rule — unverifiable quality doesn't earn the
-badge (so banks, with no operating income, can never carry it). The default
-rule set is deliberately strict (P/E < 35, PEG < 2, D/E < 75, revenue
-growth > 10%, a dividend, payout < 50%, ROE > 15%, ROIC > 15%, OpM > 20%
-and rising, PM > 15% and rising, positive and rising FCF) — most S&P 500
-names fail at least one rule; edit `config.json` to loosen it.
+badge (so banks, with no operating income, can never carry it). The rule set is
+deliberately strict, and **most S&P 500 names fail at least one rule** — read the
+current thresholds from `fundamentals.quality.rules` in `config.json` rather than
+from here, and loosen them there if the tier-2 gate is starving tier 3.
+
+The verdict is computed once, by `scanner_common.annotate_quality`, immediately
+after the fundamentals are joined — before the alert is built and before the
+hand-off is written. Both the badge and `latest_hits.json` read that one recorded
+result, so a card and the row behind it can never disagree, and tier 3 can see
+what tier 2 decided:
+
+| column | meaning |
+|---|---|
+| `Quality` | `true` when every rule passed — the ⭐ badge decision |
+| `Quality Missing` | the rule keys that failed (`[]` when it passed) |
+| *(both absent)* | quality was **not evaluated** — different from failing |
 
 ## Usage
 
 ```
 pip install -r requirements.txt
-python run_scanners.py            # full S&P 500 scan + Discord alert
+python run_scanners.py            # tiers 1+2: full S&P 500 scan + Discord alert
+python research_report.py candidates                 # tier 3: who to deep-dive
 python backtest_breakout.py       # historical validation, breakout screen
 python backtest_pullback.py       # historical validation, pullback screen
 python backtest_reclaim.py        # historical validation, reclaim screen
@@ -254,8 +288,9 @@ single directory): both logs, the `latest_hits.json` scan hand-off, the cached
 price panel, and every backtest table and chart. The project root holds only
 inputs — code, `config.json`, docs. `config.json` keeps storing bare filenames
 (`backtest_universe_cache.pkl`, …) and `scanner_common.output_dir()` resolves
-them; an absolute path in config still overrides. Deep-dive reports are the one
-exception: they go to the Google Drive folder instead.
+them; an absolute path in config still overrides. There are **no exceptions** —
+the tier-3 reports (`output/reports/`) and the signal history
+(`output/history/`) live there too.
 
 ### Universe backtest — did the screens make money?
 
@@ -354,7 +389,7 @@ Plain scripts, no test dependency — each prints `OK`/`FAIL` per check and exit
 | file | needs | asserts |
 |---|---|---|
 | `test_forward_trades.py` | nothing | Trade arithmetic on a synthetic panel: entry/exit offsets for both conventions and any delay, the excursion window, tail NaNs, `delay=0` identity, input rejection |
-| `test_signal_contract.py` | cached panel | `fires_mask` is `signal` or exactly `signal \| partial`; tiers disjoint; `Setup`/`Missing` agree; one card per signal with the grey bar + **Missing** line on partials; hand-off is a single list; `find_ticker` resolves either tier; an empty day doesn't crash |
+| `test_signal_contract.py` | cached panel | `fires_mask` is `signal` or exactly `signal \| partial`; tiers disjoint; `Setup`/`Missing` agree; one card per signal with the grey bar + **Missing** line on partials; hand-off is a single list; `find_ticker` resolves either tier; an empty day doesn't crash. Then with stubbed fundamentals: the tier-2 verdict survives the JSON round trip, the ⭐ badge is exactly that verdict, the archive accumulates without duplicating a re-run, and the gate ranks/filters candidates |
 | `test_backtest_stats.py` | cached panel | `cohort_values` == the `collect_trades` path at several (wait, hold) cells; real rows re-derive from the panel at a nonzero delay; the trades CSV reconciles with the summary grid |
 | `test_path_equivalence.py` | **network** | Screening out of the bulk panel gives the same dates as the single-ticker download, plus the documented JNJ/MSFT/META cases |
 
@@ -368,6 +403,112 @@ moves them, not as failures.
 Tests **never download** (except the `--network` one) and never send to Discord:
 they read the panel `backtest_universe.py` already cached, and a missing cache is
 a skip with instructions rather than a two-minute surprise.
+
+## Tier 3: deep-dive research
+
+Tiers 1 and 2 are cheap and run over the whole universe. Tier 3 is expensive —
+SEC filings, IBKR's competitive graph, live web research and a written
+investment case per name — so it runs on a handful of tickers, chosen by the
+tier-2 gate.
+
+### The hand-off
+
+`output/latest_hits.json`, rewritten every scan (even an empty one):
+
+```json
+{
+  "scan_date": "2026-07-23",
+  "generated_at": "2026-07-25T16:01:48+00:00",
+  "screens": [{
+    "config_key": "breakout_strategy",
+    "title": "Breakout from 312-day consolidation",
+    "strategy": { ...the config section the screen ran with... },
+    "hits": {
+      "CSX": {
+        "Close": 52.81, "Range %": 88.7, "Vol Ratio": 2.37,
+        "Setup": "partial",
+        "Missing": "range too wide: 88.7% > 38% limit",
+        "Quality": false,
+        "Quality Missing": ["debtToEquity", "operating_margin"],
+        "Company": "CSX Corporation",
+        "P/E": 30.95, "FCF": [[2024, 2718000000.0], [2025, 1711000000.0]]
+      }
+    }
+  }]
+}
+```
+
+Row keys are whatever the screen put in its hits frame, so the day-stat columns
+differ per screen; `Setup`/`Missing`/`Quality`/`Quality Missing`/`Company` are
+common to all. Only **enabled** screens appear — the hand-off follows the alert
+(unlike the backtest and tuner, which deliberately ignore `enabled`).
+
+### Choosing candidates
+
+```powershell
+python research_report.py candidates          # the configured gate
+python research_report.py candidates --all    # every tier-1 hit
+python research_report.py candidates --json   # machine-readable
+```
+
+Ranked **quality-pass first, then `full` before `partial`, then ticker**, so a
+cap takes the best candidates rather than an arbitrary slice. The gate
+(`research.auto.gate`) is `quality_pass` or `all`; it is a *soft* filter, printed
+with a footer saying how many it held back, and it never overrides a ticker you
+name explicitly. A hand-off written before the verdict existed is still gradeable
+— `list_candidates` recomputes from the raw fundamentals, so archived scans stay
+readable.
+
+### Running it
+
+On demand, ask for a deep-dive and the `deep-dive` skill takes over. Nightly, it
+is automatic: `run_scanner.bat` chains to `run_deepdive.bat`, which asks
+`research_report.py auto-prompt` what to do (exiting quietly if the gate is empty
+or `research.auto.enabled` is false) and then runs the skill through headless
+Claude Code:
+
+```
+claude -p --model <research.auto.model> --permission-mode dontAsk
+        --allowedTools "... mcp__claude_ai_Interactive_Brokers_IBKR__*"
+```
+
+The IBKR MCP tools **must** be in the allow-list: under `dontAsk` an un-allowed
+tool is refused silently, which would drop the moat/competitor section with no
+error to explain it. Don't add `--bare` (forces an API key, dropping the OAuth
+credential the IBKR server is bound to) or `--strict-mcp-config` (ignores
+registered servers).
+
+Each report is written to `output/reports/<TICKER>_<scan_date>.md`, and one
+combined verdict summary goes to Discord — pre-authorized unattended by
+`research.auto.discord_send`, and only after you confirm in an interactive
+session. Logs land in `output/deepdive_log.txt`.
+
+`research.auto` config: `enabled`, `gate`, `max_reports` (5), `discord_send`,
+`model`.
+
+## Signal history
+
+`latest_hits.json` is overwritten nightly, so every scan is archived on the way
+past (`research.history`):
+
+- `output/history/hits_<scan_date>.json` — the hand-off verbatim, one per scan day
+- `output/history/signals.csv` — one row per `(scan_date, screen, ticker)` with
+  both tiers' verdicts and every day-stat and fundamentals column
+
+The CSV is rewritten rather than appended, because the fundamentals columns are
+*config-driven display labels* — retuning the config changes the schema, and a
+blind append would misalign every later row. De-duplicating on
+`(scan_date, config_key, ticker)` also makes re-running a day idempotent instead
+of double-counting it.
+
+```python
+import pandas as pd
+sig = pd.read_csv("output/history/signals.csv", parse_dates=["scan_date"])
+sig[sig["Quality"]].groupby("config_key")["ticker"].count()   # passers per screen
+```
+
+Multi-year metrics and `Quality Missing` are stored as JSON strings in the CSV
+(`json.loads` them back); the dated snapshots keep them as real nested lists.
 
 ## Tuning a screen (`tune_screen.py`)
 
@@ -471,20 +612,45 @@ small differences as noise.
 | `fundamentals.quality.enabled` | `true` | Evaluate the quality rules and badge passing hits |
 | `fundamentals.quality.badge` | `⭐` | Prefix added to a passing hit's card title |
 | `fundamentals.quality.rules` | 11 rules | Per-metric `min`/`max`/`increasing` thresholds; a hit must pass **all** of them to get the badge |
+| `research.latest_hits_path` | `latest_hits.json` | The tiers 1+2 → tier 3 hand-off, resolved inside `output/` |
+| `research.report_subdir` | `reports` | Where deep-dive reports are written, resolved inside `output/` |
+| `research.auto.enabled` | `true` | Run tier 3 automatically after the nightly scan |
+| `research.auto.gate` | `quality_pass` | `quality_pass` (only tier-2 passers) or `all` (every tier-1 hit) |
+| `research.auto.max_reports` | `5` | Cap on nightly deep-dives, taken off the top of the ranking |
+| `research.auto.discord_send` | `true` | Authorizes the unattended run to post its verdict summary live |
+| `research.auto.model` | `opus` | Model the headless nightly run uses |
+| `research.history.enabled` | `true` | Archive every scan under `output/history/` |
+| `research.history.dir` / `.csv` | `history` / `signals.csv` | Archive location and the flat table's name |
+| `research.sec.*` | — | EDGAR user agent (must carry an email), forms, section size cap, XBRL concepts |
+| `research.synthesis.*` | — | Quant-score dimensions/weights, conviction tier bands, narrative adjustment cap |
 
 ## Nightly schedule (Windows Task Scheduler)
 
 The scan runs Mon–Fri at **23:30 Israel time** (~30 min after the 16:00 ET US
 market close) via the task **"SP500 Breakout Scanner"**, which executes
-`run_scanner.bat` and appends all output to `output/scanner_log.txt`.
+`run_scanner.bat` and appends all output to `output/scanner_log.txt`. That batch
+file then chains to `run_deepdive.bat` (tier 3 →
+`output/deepdive_log.txt`), so one task covers all three tiers: the scan alert
+reaches Discord within a couple of minutes, the deep-dive verdicts follow later.
 
-To (re)create the task, run in PowerShell:
+> **`ExecutionTimeLimit` must cover tier 3.** The scan alone finishes in about a
+> minute, but five deep-dives take considerably longer, and Task Scheduler kills
+> the whole chain at the limit. The original task was registered with `PT30M`;
+> raise it before relying on the nightly deep-dive:
+>
+> ```powershell
+> Set-ScheduledTask -TaskName "SP500 Breakout Scanner" -Settings (
+>   New-ScheduledTaskSettingsSet -StartWhenAvailable -WakeToRun `
+>     -ExecutionTimeLimit (New-TimeSpan -Hours 3))
+> ```
+
+To (re)create the task from scratch, run in PowerShell:
 
 ```powershell
 $action   = New-ScheduledTaskAction -Execute "C:\Users\Lenovo\CC\stock_analyzer\run_scanner.bat" -WorkingDirectory "C:\Users\Lenovo\CC\stock_analyzer"
 $trigger  = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At 23:30
-$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -WakeToRun -ExecutionTimeLimit (New-TimeSpan -Minutes 30)
-Register-ScheduledTask -TaskName "SP500 Breakout Scanner" -Action $action -Trigger $trigger -Settings $settings -Description "Scans S&P 500 for breakouts from consolidation ~30 min after US market close and alerts via Discord webhook."
+$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -WakeToRun -ExecutionTimeLimit (New-TimeSpan -Hours 3)
+Register-ScheduledTask -TaskName "SP500 Breakout Scanner" -Action $action -Trigger $trigger -Settings $settings -Description "Scans S&P 500 for breakouts from consolidation ~30 min after US market close, alerts via Discord webhook, then runs the tier-3 deep-dive on the gated candidates."
 ```
 
 Useful commands:
@@ -492,7 +658,8 @@ Useful commands:
 ```powershell
 Get-ScheduledTaskInfo -TaskName "SP500 Breakout Scanner"   # last/next run + result code
 Start-ScheduledTask   -TaskName "SP500 Breakout Scanner"   # trigger a run right now
-Get-Content output\scanner_log.txt -Tail 20                # inspect the last run's output
+Get-Content output\scanner_log.txt  -Tail 20               # tiers 1+2
+Get-Content output\deepdive_log.txt -Tail 40               # tier 3
 ```
 
 Notes:
@@ -501,8 +668,13 @@ Notes:
   and `WakeToRun` wakes it from sleep — but a run that *started* and was then
   interrupted (e.g. shutting the PC down at ~23:31) is **not** retried, and
   that night's alert is lost. Avoid shutting down between ~23:25 and ~23:35.
+  With tier 3 chained on, the window is longer; the signals themselves are
+  archived before the deep-dive starts, so only the reports are lost.
 - A result code of `0` in `Get-ScheduledTaskInfo` means success;
   `3221225786` (0xC000013A) means the run was terminated mid-scan.
+- Tier 3 needs Claude Code authenticated for this Windows user. If a nightly
+  report is missing its **Business & moat** section, the IBKR MCP login has
+  expired — run `/mcp` in an interactive session to renew it.
 
 ## Notes
 

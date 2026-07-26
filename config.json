@@ -163,8 +163,19 @@
     },
     "research": {
         "latest_hits_path": "latest_hits.json",
-        "drive_report_dir": "C:\\Users\\Lenovo\\Desktop\\*Google Drive*",
-        "report_subdir": "stock_reports",
+        "report_subdir": "reports",
+        "auto": {
+            "enabled": true,
+            "gate": "quality_pass",
+            "max_reports": 5,
+            "discord_send": true,
+            "model": "opus"
+        },
+        "history": {
+            "enabled": true,
+            "dir": "history",
+            "csv": "signals.csv"
+        },
         "sec": {
             "user_agent": "stock-analyzer/1.0 (you@example.com)",
             "forms": ["10-Q", "10-K"],

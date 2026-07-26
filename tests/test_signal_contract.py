@@ -12,6 +12,11 @@ being pinned are the ones the hits/near-miss unification introduced:
   * an unsettled trailing bar (Yahoo's null-close row) is dropped rather than
     scanned as a silent zero
   * `enabled: false` silences a screen's alert without disturbing any other
+  * the tier-2 quality verdict reaches the hand-off intact, and the ⭐ badge is
+    that same recorded verdict rather than a second, drifting computation
+  * the archive accumulates scans without duplicating a re-run
+  * the deep-dive gate ranks and filters candidates, and can still grade a
+    hand-off written before the verdict was recorded
 
 Note the split: the mask/hits invariants run over **every configured screen**,
 enabled or not (a screen is usually switched off while it is being reworked, so
@@ -34,7 +39,24 @@ from _harness import Checks, busiest_day, cached_panel_or_skip, screens
 
 import research_report
 import run_scanners
-from scanner_common import PARTIAL_COLOR, drop_unsettled_tail
+from scanner_common import (
+    COMPANY_COL,
+    HISTORY_KEYS,
+    PARTIAL_COLOR,
+    QUALITY_COL,
+    QUALITY_MISSING_COL,
+    drop_unsettled_tail,
+    quality_check,
+)
+
+
+def _raises(fn) -> bool:
+    try:
+        fn()
+    except SystemExit:
+        return True
+    return False
+
 
 c = Checks("signal contract")
 panel, cfg = cached_panel_or_skip()
@@ -224,5 +246,243 @@ for module, compute, strategy in screens(cfg):
     c.ok(f"{module.CONFIG_KEY}: unsettled bar would scan as zero, guard restores it",
          int(raw.sum()) == 0 and guarded.equals(last_fires(panel)),
          f"unguarded={int(raw.sum())} guarded={int(guarded.sum())}")
+
+# --------------------------------------------------------------------------
+# Tier 2: the quality verdict, the archive, and the deep-dive gate.
+#
+# The run above deliberately disables fundamentals to stay off the network,
+# which leaves the whole second half of the hand-off untested -- so this one
+# stubs `fetch_fundamentals` instead of switching it off. That is what puts
+# `_json_safe` under test on the values that actually exercise it (the
+# [(year, value)] series, a NaN, numpy scalars) and what lets the badge be
+# compared against the recorded verdict.
+#
+# The fixture is derived from `fundamentals.quality.rules` rather than written
+# down: a rule's own min/max produces the value that satisfies it, and the
+# bound *itself* is the value that fails it (the compares are strict). So the
+# fixture keeps working at any thresholds, which is the whole point.
+c.section("tier 2: quality verdict, archive, deep-dive gate")
+
+fund_cfg = cfg["fundamentals"]
+rules = fund_cfg.get("quality", {}).get("rules", {})
+
+
+def rule_label(key):
+    """The hits-frame column a rule key grades, or None if it names nothing."""
+    if key in fund_cfg.get("fields", {}):
+        return fund_cfg["fields"][key]
+    return fund_cfg.get("statements", {}).get("metrics", {}).get(key)
+
+
+unresolvable = [k for k in rules if rule_label(k) is None]
+c.ok("every quality rule names a configured field or metric",
+     not unresolvable, f"unresolvable: {unresolvable}" if unresolvable else "")
+
+resolvable = [k for k in rules if rule_label(k) is not None]
+
+
+def passing_value(rule):
+    lo, hi = rule.get("min"), rule.get("max")
+    if lo is not None and hi is not None:
+        return (lo + hi) / 2
+    if hi is not None:
+        return hi / 2 if hi > 0 else hi - 1
+    return lo + abs(lo) + 1
+
+
+def fundamentals_row(break_key=None, nan_key=None):
+    """A row passing every rule, optionally breaking exactly one of them."""
+    row = {COMPANY_COL: "Test Corp"}
+    for key in resolvable:
+        rule, label = rules[key], rule_label(key)
+        good = passing_value(rule)
+        if key == nan_key:
+            row[label] = float("nan")
+            continue
+        # A strict compare means the bound itself fails, and `increasing`
+        # fails on a series that falls -- no magic numbers either way.
+        broken = key == break_key
+        if rule.get("increasing"):
+            bound = rule.get("min", rule.get("max", good))
+            row[label] = ([(2024, good), (2025, good * 0.5)] if broken
+                          else [(2024, good * 0.5 + bound * 0.5), (2025, good)])
+        else:
+            row[label] = rule.get("min", rule.get("max")) if broken else good
+    return row
+
+
+broken_key = resolvable[0] if resolvable else None
+nan_key = resolvable[-1] if resolvable else None
+SHAPES = ["pass", "break", "nan"]
+
+
+def stub_fundamentals(tickers, _cfg):
+    """Cycle the three row shapes across the signalling tickers."""
+    rows = {}
+    for i, ticker in enumerate(tickers):
+        shape = SHAPES[i % len(SHAPES)]
+        rows[ticker] = fundamentals_row(
+            break_key=broken_key if shape == "break" else None,
+            nan_key=nan_key if shape == "nan" else None)
+    return pd.DataFrame.from_dict(rows, orient="index").rename_axis("Ticker")
+
+
+# Two scan days with signals, so the archive can be tested across dates.
+totals = None
+for module, compute, strategy in screens(cfg):
+    fires = module.fires_mask(panel, compute(panel, strategy), strategy).fillna(False)
+    per_day = fires.sum(axis=1)
+    totals = per_day if totals is None else totals + per_day
+busy_days = list(totals[totals > 0].sort_values(ascending=False).index[:2])
+
+hist_dir = Path(tempfile.mkdtemp(prefix="test_history_"))
+q_cfg = json.loads(json.dumps(cfg))
+q_cfg["charts"]["enabled"] = False
+q_cfg["research"]["latest_hits_path"] = str(handoff)
+q_cfg["research"].setdefault("history", {})
+q_cfg["research"]["history"].update(enabled=True, dir=str(hist_dir),
+                                    csv="signals.csv")
+q_cfg["research"].setdefault("auto", {})
+
+run_scanners.load_config = lambda: q_cfg
+run_scanners.fetch_fundamentals = stub_fundamentals
+
+
+def run_on(day):
+    """Run the full nightly pipeline as if `day` were the scan day."""
+    cut = list(panel.index).index(day) + 1
+    run_scanners.download_price_data = lambda t, period, interval: panel.iloc[:cut]
+    captured.clear()
+    builtins.print = lambda *a, **k: None
+    rc = run_scanners.main()
+    builtins.print = _print
+    return rc, json.loads(handoff.read_text(encoding="utf-8")), captured.get("embeds", [])
+
+
+rc3, q_payload, q_embeds = run_on(busy_days[0])
+q_rows = [(t, r) for s in q_payload["screens"] for t, r in s["hits"].items()]
+c.ok("main() returned 0 with fundamentals on", rc3 == 0)
+c.ok("the fundamentals-enabled run produced rows", bool(q_rows), f"{len(q_rows)} rows")
+
+graded = [r for _, r in q_rows]
+c.ok("every hand-off row carries a Quality verdict",
+     all(isinstance(r.get(QUALITY_COL), bool) for r in graded))
+c.ok("Quality Missing is a list on every row",
+     all(isinstance(r.get(QUALITY_MISSING_COL), list) for r in graded))
+c.ok("Quality is true exactly when nothing failed",
+     all(r[QUALITY_COL] == (not r[QUALITY_MISSING_COL]) for r in graded))
+
+# The real point of the round trip: the verdict recomputed from the *parsed
+# JSON* must match the one recorded before serialization. That can only hold
+# if _json_safe preserved the [(year, value)] series and turned NaN into null.
+c.ok("the verdict survives the JSON round trip",
+     all(quality_check(r, fund_cfg) == r[QUALITY_COL] for r in graded))
+series_rows = [v for r in graded for v in r.values()
+               if isinstance(v, list) and v and isinstance(v[0], list)]
+c.ok("multi-year metrics serialize as [[year, value], ...]",
+     all(len(pair) == 2 for s in series_rows for pair in s),
+     f"{len(series_rows)} series column(s) seen")
+c.ok("a NaN fundamental becomes null and fails its rule",
+     any(r.get(rule_label(nan_key)) is None and nan_key in r[QUALITY_MISSING_COL]
+         for r in graded) if nan_key else True)
+broken_rows = [r for r in graded if r[QUALITY_MISSING_COL] == [broken_key]]
+c.ok("breaking one rule fails exactly that rule",
+     bool(broken_rows), f"{len(broken_rows)} row(s) failing only {broken_key}")
+
+badge = fund_cfg.get("quality", {}).get("badge", "")
+badged = {e["title"].split()[1].split("(")[0] for e in q_embeds
+          if badge and e["title"].startswith(badge)}
+passing = {t for t, r in q_rows if r[QUALITY_COL]}
+c.ok("the badge marks exactly the rows the hand-off recorded as passing",
+     badged == passing, f"badged={sorted(badged)} passing={sorted(passing)}")
+partial_passing = {t for t, r in q_rows
+                   if r.get("Setup") == "partial" and r[QUALITY_COL]}
+c.ok("a partial setup is not excluded from the badge",
+     partial_passing <= badged,
+     f"{len(partial_passing)} partial row(s) passed quality; "
+     "the badge grades fundamentals, not setup completeness")
+
+# --------------------------------------------------------------------------
+c.section("the archive accumulates across scans")
+csv_path = hist_dir / "signals.csv"
+after_first = pd.read_csv(csv_path, dtype={"scan_date": str})
+c.ok("a dated snapshot is written",
+     (hist_dir / f"hits_{q_payload['scan_date']}.json").exists())
+c.ok("the CSV holds one row per hand-off row",
+     len(after_first) == len(q_rows), f"{len(after_first)} vs {len(q_rows)}")
+c.ok("the CSV carries both tiers",
+     {"Setup", "Missing", QUALITY_COL, QUALITY_MISSING_COL} <= set(after_first.columns))
+
+run_on(busy_days[0])
+after_repeat = pd.read_csv(csv_path, dtype={"scan_date": str})
+c.ok("re-running the same scan day adds no duplicate rows",
+     len(after_repeat) == len(after_first),
+     f"{len(after_repeat)} vs {len(after_first)}")
+
+_, second_payload, _ = run_on(busy_days[1])
+after_second = pd.read_csv(csv_path, dtype={"scan_date": str})
+second_rows = sum(len(s["hits"]) for s in second_payload["screens"])
+c.ok("a second scan day is appended, not overwritten",
+     len(after_second) == len(after_first) + second_rows,
+     f"{len(after_second)} vs {len(after_first)}+{second_rows}")
+c.ok("both scan dates are present",
+     set(after_second["scan_date"]) ==
+     {q_payload["scan_date"], second_payload["scan_date"]})
+c.ok("no (scan_date, screen, ticker) is duplicated",
+     not after_second.duplicated(subset=HISTORY_KEYS).any())
+
+# --------------------------------------------------------------------------
+c.section("the deep-dive gate")
+gate_payload = json.loads(handoff.read_text(encoding="utf-8"))
+every = research_report.list_candidates(gate_payload, q_cfg, gate="all")
+passers = research_report.list_candidates(gate_payload, q_cfg, gate="quality_pass")
+c.ok("gate 'all' keeps every signal",
+     len(every) == sum(len(s["hits"]) for s in gate_payload["screens"]))
+c.ok("gate 'quality_pass' keeps exactly the passers",
+     {r["ticker"] for r in passers} == {r["ticker"] for r in every if r["quality"]})
+c.ok("candidates rank quality-pass first, then full before partial",
+     every == sorted(every, key=lambda r: (not r["quality"],
+                                           r["setup"] != "full", r["ticker"])))
+c.ok("a limit takes the top of that ranking, unchanged",
+     research_report.list_candidates(gate_payload, q_cfg, gate="all", limit=2)
+     == every[:2])
+c.ok("an unknown gate is rejected rather than silently ignored",
+     _raises(lambda: research_report.list_candidates(gate_payload, q_cfg, gate="nope")))
+
+# A hand-off written before tier 2 existed must still be gradeable, or every
+# archived scan becomes unreadable the moment the format moves on.
+legacy = json.loads(json.dumps(gate_payload))
+for screen in legacy["screens"]:
+    for row in screen["hits"].values():
+        row.pop(QUALITY_COL, None)
+        row.pop(QUALITY_MISSING_COL, None)
+c.ok("a hand-off with no recorded verdict is recomputed, not dropped",
+     [(r["ticker"], r["quality"]) for r in
+      research_report.list_candidates(legacy, q_cfg, gate="all")]
+     == [(r["ticker"], r["quality"]) for r in every])
+
+# --------------------------------------------------------------------------
+c.section("the nightly auto-prompt")
+q_cfg["research"]["auto"].update(enabled=True, gate="all", max_reports=2,
+                                 discord_send=False)
+research_report.load_config = lambda: q_cfg
+prompt = research_report.auto_prompt(q_cfg)
+c.ok("auto-prompt invokes the skill", bool(prompt) and prompt.startswith("/deep-dive"))
+c.ok("auto-prompt names exactly the capped candidates",
+     prompt.splitlines()[0].split()[1:] ==
+     list(dict.fromkeys(r["ticker"] for r in every))[:2],
+     prompt.splitlines()[0])
+c.ok("auto-prompt passes the configured send authorization",
+     "send=false" in prompt)
+q_cfg["research"]["auto"]["enabled"] = False
+c.ok("auto-prompt declines when the nightly run is disabled",
+     research_report.auto_prompt(q_cfg) is None)
+q_cfg["research"]["auto"].update(enabled=True, gate="quality_pass")
+if not passers:
+    c.ok("auto-prompt declines when the gate holds everything back",
+         research_report.auto_prompt(q_cfg) is None)
+
+c.ok("load_hits reads the same payload the run wrote",
+     research_report.load_hits(q_cfg) == gate_payload)
 
 sys.exit(c.finish())
