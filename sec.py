@@ -15,11 +15,12 @@ above what a few deep-dives need.
 """
 
 import re
+import time
 
 import requests
 from lxml import html as lxml_html
 
-from scanner_common import load_config
+from scanner_common import fmt_bytes, load_config, log_step
 
 _TICKER_MAP = None  # {TICKER -> zero-padded CIK}, cached per process
 
@@ -119,7 +120,7 @@ def _xbrl_facts(cik: str, cfg: dict) -> dict:
         gaap = (_get(f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json", cfg)
                 .json().get("facts", {}).get("us-gaap", {}))
     except Exception as exc:  # noqa: BLE001
-        print(f"  SEC xbrl failed: {exc}")
+        log_step("SEC", "failed", f"xbrl: {exc}")
         return {}
     out = {}
     for c in concepts:
@@ -130,7 +131,19 @@ def _xbrl_facts(cik: str, cfg: dict) -> dict:
         latest = max(series, key=lambda x: x.get("end", ""))
         out[c] = {"val": latest.get("val"), "end": latest.get("end"),
                   "form": latest.get("form"), "unit": "USD" if "USD" in units else ""}
+    log_step("SEC", "ok", f"xbrl {len(out)}/{len(concepts)} concepts")
     return out
+
+
+def _sections_summary(sections: dict) -> str:
+    """`mdna 24000 / risk_factors n-a` -- which sections the parse actually got.
+
+    Worth a log line of its own: a section coming back n/a is silent today, and
+    it is exactly what makes a report thinner (the RL run built its bear case
+    without Item 1A and only said so in prose).
+    """
+    return " / ".join(f"{name} {len(text)}" if text else f"{name} n-a"
+                      for name, text in sections.items())
 
 
 def fetch_filing_sections(ticker: str, cfg: dict | None = None) -> dict | None:
@@ -142,16 +155,20 @@ def fetch_filing_sections(ticker: str, cfg: dict | None = None) -> dict | None:
     try:
         cik = ticker_to_cik(ticker, cfg)
         if not cik:
-            print(f"  (SEC: no CIK for {ticker})")
+            log_step("SEC", "miss", f"no CIK for {ticker}")
             return None
+        log_step("SEC", "ok", f"CIK {cik} for {ticker}")
         picked = _pick_latest(cik, cfg, forms)
+        log_step("SEC", "ok", f"latest filings: {', '.join(picked) or 'none'}")
         result = {"cik": cik, "filings": {}, "financials": _xbrl_facts(cik, cfg)}
         for form, meta in picked.items():
             url = _doc_url(cik, meta["accession"], meta["primary_doc"])
             entry = {"url": url, "filing_date": meta["filing_date"],
                      "period": meta["report_date"], "sections": {}}
             try:
-                text = _clean_text(_get(url, cfg).content)
+                t0 = time.perf_counter()
+                resp = _get(url, cfg)
+                text = _clean_text(resp.content)
                 entry["text_len"] = len(text)
                 if form == "10-K":
                     entry["sections"] = {
@@ -174,13 +191,17 @@ def fetch_filing_sections(ticker: str, cfg: dict | None = None) -> dict | None:
                             text, r"item\s*1a\.?\s*risk\s*factors",
                             [r"item\s*2\.?\s*unregist", r"item\s*5\.?\s*other", r"item\s*6\.?\s*exhibit"], maxc),
                     }
+                log_step("SEC", "ok",
+                         f"{form} {resp.status_code} {fmt_bytes(len(resp.content))} "
+                         f"{_sections_summary(entry['sections'])}",
+                         ms=(time.perf_counter() - t0) * 1000)
             except Exception as exc:  # noqa: BLE001 - one bad doc must not sink the rest
-                print(f"  SEC doc failed {form} {ticker}: {exc}")
+                log_step("SEC", "failed", f"{form} {ticker}: {exc}")
                 entry["error"] = str(exc)
             result["filings"][form] = entry
         return result
     except Exception as exc:  # noqa: BLE001
-        print(f"  SEC failed for {ticker}: {exc}")
+        log_step("SEC", "failed", f"{ticker}: {exc}")
         return None
 
 

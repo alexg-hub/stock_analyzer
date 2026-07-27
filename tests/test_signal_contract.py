@@ -39,6 +39,7 @@ from _harness import Checks, busiest_day, cached_panel_or_skip, screens
 
 import research_report
 import run_scanners
+import scanner_common
 from scanner_common import (
     COMPANY_COL,
     CONVICTION_COL,
@@ -152,6 +153,12 @@ run_cfg["research"]["latest_hits_path"] = str(handoff)
 run_cfg["research"].setdefault("history", {})
 run_cfg["research"]["history"].update(enabled=True, dir=str(sandbox / "history"),
                                       csv="signals.csv")
+# Same rule for the step log: it falls back to the real config when no cfg is
+# passed, so it is pinned here rather than relying on nothing in this file
+# happening to log today.
+run_cfg["research"]["logging"] = {"enabled": True, "dir": str(sandbox / "logs"),
+                                  "manifest": "runs.csv", "keep_runs": 20}
+scanner_common.configure_logging(run_cfg, rid="test_signal_contract")
 
 run_scanners.load_config = lambda: run_cfg
 run_scanners.get_sp500_tickers = lambda url: list(panel["Close"].columns)

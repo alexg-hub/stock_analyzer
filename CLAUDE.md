@@ -70,6 +70,14 @@ python research_report.py auto-prompt
 # run_ondemand.bat adds the tier-3 deep dive and posts the card.
 python research_report.py scan PGR RL
 run_ondemand.bat PGR
+
+# What a deep-dive did: one line per step, both halves merged. Written live,
+# so a run that died still has everything up to that point.
+type output\logs\<run_id>.log
+
+# Complete the log of a run that was killed before log-session ran (the ids are
+# in the "Deep-dive started" banner in output/deepdive_log.txt).
+python research_report.py log-session <run_id> <session_id>
 ```
 
 To test alert formatting/sending without spamming the channel, monkeypatch
@@ -190,9 +198,44 @@ real send.
   couple of wasted turns. `post-verdicts <file.json> [--send]` exists so the
   skill never needs `python -c`. When the skill needs something new, add a
   subcommand — never widen this to `Bash(python *)`, which is arbitrary code
-  execution. Verify a shakedown by grepping `output/deepdive_log.txt` for
-  `permission_denials` in the result JSON, not just the exit code: the run exits
-  **0** with denials in it.
+  execution. A refused tool now shows up as a `DENIED` line in the run log and a
+  `denials` column in `output/logs/deepdive_runs.csv`, so verify a shakedown
+  there rather than by grepping the result JSON — but the underlying trap is
+  unchanged: **the run exits 0 with denials in it**, so the exit code alone
+  still proves nothing.
+- **Tier 3 writes one step log per run** (`output/logs/<run_id>.log`): one line
+  per step — timestamp, phase, status, short description — built by
+  `scanner_common.log_step` / `step()`. Three rules hold it together:
+  - **It writes to stderr, never stdout.** `research_report.py context` prints a
+    JSON bundle the skill parses, and the `context` branch of `main()` wraps the
+    assembly in `stdout_to_stderr()` for exactly that reason: it calls straight
+    through tiers 1+2, whose progress lines (`Downloading 2y…`, the
+    `drop_unsettled_tail` WARNING, the per-screen counts) go to stdout because
+    for `run_scanners.py` stdout *is* the log. Reached this way they landed in
+    front of the JSON — and the WARNING, the one diagnostic most worth seeing,
+    was the one that broke the parse. Don't move that guard into
+    `assemble_context`: like `enable_utf8_output`, mutating global streams
+    belongs in `__main__`, not at import or in a library call.
+  - **It never raises**, and `research.logging.enabled: false` is a full no-op.
+    A lost log line must cost you the record, never the report. `step()` is the
+    exception that proves it: it logs the failure *and* re-raises, so every
+    caller's existing n/a-tolerant `except` behaves exactly as before.
+  - **Three processes, one log.** `STOCK_ANALYZER_RUN_ID` is exported by the
+    `.bat` and inherited through `claude` into the `context` subprocess. Unset
+    means standalone — an ad-hoc `context`/`scan` mints its own id rather than
+    going unrecorded.
+- **The model's half of the log is rendered, not collected.** Claude Code
+  already writes every tool call, web fetch and denial to its session transcript
+  (`~/.claude/projects/*/<session_id>.jsonl`), so `log-session` reads that and
+  emits one short line per call, merging both halves by timestamp. Two
+  consequences: **`--session-id` must stay on both `.bat` files** (it is what
+  makes the transcript findable *before* the run starts, so a run killed
+  mid-flight — result `3221225786` — can still be completed by hand), and the
+  renderer must keep converting the transcript's **UTC** stamps to local time,
+  or every model step sorts hours away from the steps it belongs between. The
+  transcript format is Claude Code's, not ours: `render_session` degrades to
+  "no transcript found" rather than failing, and the Python half never depends
+  on it.
 - **The signal history CSV is rewritten, not appended** (`archive_scan` →
   `merge_history_csv`). The fundamentals columns are config-driven display
   labels, so retuning `config.json` changes the schema and a blind append would
@@ -231,8 +274,9 @@ real send.
   the stale nightly date would collapse two separate looks into one CSV row.
 - **Every generated file goes to `output/`** via
   `scanner_common.output_dir()` — logs, `latest_hits.json`, the cached price
-  panel, all backtest tables/charts, the tier-3 reports (`output/reports/`) and
-  the signal history (`output/history/`). There are no exceptions; Google Drive
+  panel, all backtest tables/charts, the tier-3 reports (`output/reports/`), the
+  signal history (`output/history/`) and the deep-dive step logs
+  (`output/logs/`). There are no exceptions; Google Drive
   was one until 2026-07-26 and was removed, partly because Claude Code cannot
   `--add-dir` a path containing the U+200F mark in that folder's name. The
   project root holds only inputs (code, `config.json`, docs); `output/` is

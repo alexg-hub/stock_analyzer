@@ -28,7 +28,10 @@ CLI:
 
 import json
 import math
+import re
 import sys
+import time
+import uuid
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -42,20 +45,32 @@ from scanner_common import (
     ON_DEMAND_KEYS,
     QUALITY_COL,
     QUALITY_MISSING_COL,
+    RUN_KEYS,
     VERDICT_COL,
     count_csv_rows,
     enable_utf8_output,
+    fmt_bytes,
     fmt_compact,
+    format_step,
     fundamentals_fields,
     history_rows,
     load_config,
+    log_step,
+    manifest_csv_path,
     merge_history_csv,
+    new_run_id,
     on_demand_csv_path,
     output_dir,
+    prune_run_logs,
     quality_enabled,
     quality_failures,
+    run_id,
+    run_log_path,
+    run_result_path,
     send_discord_alert,
     signals_csv_path,
+    stdout_to_stderr,
+    step,
     update_csv_rows,
 )
 
@@ -120,6 +135,23 @@ def find_ticker(hits: dict, ticker: str, cfg: dict | None = None) -> dict | None
                 "strategy": screen.get("strategy", {}),
                 "row": row}
     return None
+
+
+def _trigger_summary(trigger: dict | None, payload: dict) -> str:
+    """Both tiers in one log-line fragment: `pullback/full  quality PASS`.
+
+    Reads the *re-graded* quality (what the gate and the card use), so the log
+    can never disagree with the report about why a ticker was worth the work.
+    """
+    if trigger is None:
+        return "no trigger"
+    screens = len(payload.get("screens", []))
+    quality = trigger.get("quality")
+    verdict = ("not evaluated" if quality is None
+               else "PASS" if quality
+               else f"fails {', '.join(trigger.get('quality_missing') or []) or '?'}")
+    return (f"{trigger.get('config_key')}/{trigger.get('kind')}  "
+            f"{screens} screen(s)  quality {verdict}")
 
 
 # --------------------------------------------------------------------------
@@ -426,53 +458,72 @@ def assemble_context(ticker: str, cfg: dict | None = None) -> dict:
     """
     cfg = cfg or load_config()
     fin_cfg = cfg.get("research", {}).get("financials", {})
+    t0 = time.perf_counter()
+    log_step("CONTEXT", "start", f"{ticker}  run={run_id()}", cfg=cfg)
+
     hits = load_hits(cfg)
     scan_date = hits.get("scan_date") or date.today().isoformat()
     trigger = find_ticker(hits, ticker, cfg)   # re-graded, so it agrees with _facts
 
     source, on_demand = SOURCE_SIGNAL, None
     if trigger is None:
+        log_step("HANDOFF", "miss", f"{ticker} not in latest_hits.json", cfg=cfg)
         source = SOURCE_ON_DEMAND
-        on_demand = run_scanners.scan_ticker(ticker, cfg)
-        # The on-demand scan dates itself off its own price data, so the report
-        # and its record carry the day actually analysed, not the last nightly.
-        scan_date = on_demand["scan_date"]
-        trigger = find_ticker(on_demand, ticker, cfg)
+        with step("SCAN", cfg=cfg) as s:
+            on_demand = run_scanners.scan_ticker(ticker, cfg)
+            # The on-demand scan dates itself off its own price data, so the
+            # report and its record carry the day actually analysed, not the
+            # last nightly.
+            scan_date = on_demand["scan_date"]
+            trigger = find_ticker(on_demand, ticker, cfg)
+            s.detail = (f"on-demand {scan_date}  "
+                        f"{_trigger_summary(trigger, on_demand)}")
+    else:
+        log_step("HANDOFF", "hit", f"{ticker} {scan_date}  "
+                 f"{_trigger_summary(trigger, hits)}", cfg=cfg)
 
     yahoo = collect_yahoo(ticker,
                           years=fin_cfg.get("years", 4),
                           quarters=fin_cfg.get("quarters", 4))
     quant = compute_quant_score(yahoo, cfg)
+    log_step("QUANT", "ok", f"score {quant.get('score')}", cfg=cfg)
 
     chart = None
     try:
         chart = report_dir(cfg) / f"{ticker}_{scan_date}_financials.png"
         charts.plot_financials(yahoo.get("financials") or {}, ticker, chart,
                                dpi=fin_cfg.get("chart_dpi", 120))
+        log_step("CHART", "ok", chart.name, cfg=cfg)
     except Exception as exc:  # noqa: BLE001 - a chart must not sink the deep-dive
-        print(f"  financials chart failed for {ticker}: {exc}")
+        log_step("CHART", "failed", f"{ticker}: {exc}", cfg=cfg)
         chart = None
 
     facts = _facts(ticker, scan_date, yahoo, quant, trigger, chart, cfg, source)
     facts_path = report_dir(cfg) / f"{ticker}_{scan_date}_facts.json"
     facts_path.write_text(json.dumps(facts, indent=2, ensure_ascii=False),
                           encoding="utf-8")
+    log_step("FACTS", "ok", f"{facts_path.name}  source={source}", cfg=cfg)
 
     if on_demand is not None:
         record_on_demand(on_demand, ticker, cfg)
 
-    return {
+    filings = sec.fetch_filing_sections(ticker, cfg)
+    bundle = {
         "ticker": ticker,
         "scan_date": scan_date,
         "source": source,
         "trigger": trigger,
         "yahoo": yahoo,
         "quant": quant,
-        "filings": sec.fetch_filing_sections(ticker, cfg),
+        "filings": filings,
         "financials_chart": str(chart) if chart else None,
         "financials_table_md": financials_table_md(yahoo.get("financials") or {}),
         "facts_path": str(facts_path),
     }
+    log_step("CONTEXT", "ok", f"{ticker} bundle ready"
+             + ("" if filings else "  (no SEC filings)"),
+             ms=(time.perf_counter() - t0) * 1000, cfg=cfg)
+    return bundle
 
 
 # --------------------------------------------------------------------------
@@ -496,6 +547,8 @@ def write_report(ticker: str, scan_date: str, markdown: str, cfg: dict) -> Path:
     """Write `<ticker>_<scan_date>.md` into the report folder."""
     out = report_dir(cfg) / f"{ticker}_{scan_date}.md"
     out.write_text(markdown, encoding="utf-8")
+    log_step("REPORT", "ok", f"{out.name}  {fmt_bytes(len(markdown.encode()))}",
+             cfg=cfg)
     print(f"Report archived: {out}")
     return out
 
@@ -620,9 +673,16 @@ def post_summary(verdicts: list[dict], cfg: dict, send: bool = False) -> None:
     scan_date = next((v.get("scan_date") for v in verdicts if v.get("scan_date")), "")
     header = f"**Deep-dive verdicts{f' -- {scan_date}' if scan_date else ''}** "
     header += f"({len(embeds)} report(s))\n{DISCLAIMER}"
+    tickers = ", ".join(str(v.get("ticker")) for v in verdicts if v.get("ticker"))
     if send:
         send_discord_alert(header, cfg["discord"], embeds, images)
+        log_step("DISCORD", "sent",
+                 f"{tickers}  {len(embeds)} card(s), {len(images)} chart(s)",
+                 cfg=cfg)
     else:
+        log_step("DISCORD", "dry-run",
+                 f"{tickers}  {len(embeds)} card(s), {len(images)} chart(s)",
+                 cfg=cfg)
         print("\n--- Discord summary (dry-run, not sent) ---")
         print(header)
         for e in embeds:
@@ -706,12 +766,17 @@ def record_on_demand(payload: dict, ticker: str, cfg: dict) -> Path | None:
         return None
     match = {"scan_date": str(row.get("scan_date")), "ticker": ticker}
     if count_csv_rows(signals_csv_path(cfg, create=False), match):
+        log_step("RECORD", "skip",
+                 f"{ticker} already in {signals_csv_path(cfg).name} for "
+                 f"{match['scan_date']}", cfg=cfg)
         print(f"{ticker} already has a {signals_csv_path(cfg).name} row for "
               f"{match['scan_date']} -- its verdict records there.")
         return None
     path = on_demand_csv_path(cfg)
     frame = merge_history_csv(path, [row], ON_DEMAND_KEYS,
                               protect=ON_DEMAND_VERDICT_COLS)
+    log_step("RECORD", "ok", f"{ticker} -> {path.name}  {len(frame)} row(s)",
+             cfg=cfg)
     print(f"Recorded {ticker} in {path.name} ({len(frame)} row(s) total).")
     return path
 
@@ -753,6 +818,9 @@ def _warn_tier_drift(verdict: dict, cfg: dict) -> None:
         return
     band = tier_for(conviction, cfg)
     if band != tier:
+        log_step("VERDICT", "warn",
+                 f"{verdict.get('ticker')} recorded {tier} at {conviction}, "
+                 f"config bands say {band}", cfg=cfg)
         print(f"  WARNING: {verdict.get('ticker')} recorded as {tier} at "
               f"conviction {conviction}, but the current config bands put "
               f"{conviction} in {band}. Keeping {tier} as stated.",
@@ -784,6 +852,9 @@ def record_verdict(verdict: dict, cfg: dict) -> str | None:
         updated = update_csv_rows(path, match,
                                   _verdict_values(verdict, facts, full=False))
         if updated:
+            log_step("VERDICT", "ok",
+                     f"{ticker} {verdict.get('tier')} {verdict.get('conviction')}"
+                     f" -> {path.name} ({updated} row(s))", cfg=cfg)
             print(f"  {ticker}: {verdict.get('tier')} "
                   f"{verdict.get('conviction')} -> {path.name} "
                   f"({updated} row(s))")
@@ -806,6 +877,9 @@ def record_verdict(verdict: dict, cfg: dict) -> str | None:
             QUALITY_MISSING_COL: json.dumps(facts.get("quality_missing") or []),
             **values,
         }], ON_DEMAND_KEYS)
+    log_step("VERDICT", "ok",
+             f"{ticker} {verdict.get('tier')} {verdict.get('conviction')} "
+             f"-> {path.name}", cfg=cfg)
     print(f"  {ticker}: {verdict.get('tier')} {verdict.get('conviction')} "
           f"-> {path.name}")
     return path.name
@@ -819,6 +893,258 @@ def record_verdicts(verdicts: list[dict], cfg: dict) -> None:
     print("Recording verdicts:")
     for verdict in verdicts:
         record_verdict(verdict, cfg)
+
+
+# --------------------------------------------------------------------------
+# The run log's other half: what the *model* did
+# --------------------------------------------------------------------------
+# The Python half of a deep-dive logs itself (above). The rest -- the web
+# research, the IBKR calls, the report write -- happens inside a headless
+# `claude` run, and Claude Code already records every bit of it in its session
+# transcript. So none of this collects anything: it reads a record that exists
+# and renders one short line per tool call, then merges the two halves into the
+# single timeline you actually read.
+#
+# Why render rather than archive: the transcript is ~1 MB per run of message
+# bodies and tool output. The question a log has to answer is "which steps ran,
+# when, and did they work", and that is a few dozen lines.
+
+def transcript_path(session_id: str) -> Path | None:
+    """Locate a session transcript by id.
+
+    Globbed rather than composed from the cwd: Claude Code derives the folder
+    name by substituting the project path, and a session id is a UUID -- unique
+    across every project -- so a glob keeps working if that mapping ever
+    changes.
+    """
+    base = Path.home() / ".claude" / "projects"
+    if not base.exists():
+        return None
+    return next(iter(sorted(base.glob(f"*/{session_id}.jsonl"))), None)
+
+
+def _local_stamp(iso: str) -> datetime | None:
+    """Transcript stamps are UTC (`...Z`); the step log is local wall-clock.
+
+    Converting is not cosmetic -- unconverted, every model step would sort
+    hours away from the Python steps it actually interleaves with.
+    """
+    try:
+        return (datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+                .astimezone().replace(tzinfo=None))
+    except (TypeError, ValueError):
+        return None
+
+
+def _short(text, limit: int = 90) -> str:
+    # ASCII "..." rather than a real ellipsis: this line is printed to a Windows
+    # console whose codepage is cp1255 here, and that is the same class of bug
+    # `enable_utf8_output` exists for. A log must never be the thing that raises.
+    text = " ".join(str(text or "").split())
+    return text if len(text) <= limit else text[:limit - 3] + "..."
+
+
+def _short_url(url: str, limit: int = 60) -> str:
+    """Drop the scheme and trim the middle -- host and path tail is the useful part."""
+    trimmed = re.sub(r"^https?://(www\.)?", "", str(url or ""))
+    if len(trimmed) <= limit:
+        return trimmed
+    return f"{trimmed[:limit // 2]}...{trimmed[-(limit // 2 - 3):]}"
+
+
+# Every Bash call the skill makes starts by cd-ing into the project, which is
+# the same 40 characters on every line and tells you nothing.
+_CD_PREFIX = re.compile(r'^cd\s+(".*?"|\S+)\s*&&\s*')
+
+
+# Tool name -> the phase column it logs under. Anything unlisted falls back to
+# the tool's own name, so a new tool shows up rather than silently vanishing.
+TOOL_PHASE = {"Bash": "BASH", "Read": "READ", "Write": "WRITE", "Edit": "EDIT",
+              "Glob": "GREP", "Grep": "GREP", "WebSearch": "SEARCH",
+              "WebFetch": "FETCH", "Task": "AGENT", "Skill": "SKILL"}
+
+# Plumbing the model does to reach its tools -- real calls, no research value.
+TOOL_SKIP = {"ToolSearch", "TodoWrite", "TaskCreate", "TaskUpdate", "TaskList"}
+
+
+def _tool_detail(name: str, tool_input: dict, result) -> str:
+    """The short description column for one tool call."""
+    tool_input = tool_input if isinstance(tool_input, dict) else {}
+    res = result if isinstance(result, dict) else {}
+    if name == "Bash":
+        return _short(_CD_PREFIX.sub("", " ".join(
+            str(tool_input.get("command") or "").split())))
+    if name in ("Read", "Write", "Edit"):
+        path = Path(str(tool_input.get("file_path", ""))).name
+        body = tool_input.get("content")
+        size = f"  {fmt_bytes(len(body.encode()))}" if isinstance(body, str) else ""
+        return f"{path}{size}"
+    if name in ("Glob", "Grep"):
+        return _short(tool_input.get("pattern"), 60)
+    if name == "WebSearch":
+        hits = res.get("results")
+        n = sum(len(r.get("content", [])) for r in hits
+                if isinstance(r, dict)) if isinstance(hits, list) else None
+        return (f'"{_short(tool_input.get("query"), 55)}"'
+                + (f"  {n} hits" if n else ""))
+    if name == "WebFetch":
+        return (f"{_short_url(tool_input.get('url'))}  "
+                f"{res.get('code', '?')}  {fmt_bytes(res.get('bytes'))}")
+    if name.startswith("mcp__"):
+        return _short(name.rsplit("__", 1)[-1], 60)
+    return _short(next((str(v) for v in tool_input.values() if v), ""), 60)
+
+
+def render_session(session_id: str) -> tuple[list[str], dict]:
+    """One log line per tool call in a session, plus a small tally.
+
+    Degrades rather than fails: an unreadable or restructured transcript costs
+    the model half of the timeline, never the run or the Python half.
+    """
+    tally = {"steps": 0, "searches": 0, "fetches": 0, "denials": 0, "errors": 0}
+    path = transcript_path(session_id)
+    if path is None:
+        return [], tally
+
+    calls, lines = {}, []
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for raw in fh:
+                try:
+                    entry = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                content = (entry.get("message") or {}).get("content")
+                if not isinstance(content, list):
+                    continue
+                when = _local_stamp(entry.get("timestamp"))
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    if block.get("type") == "tool_use":
+                        calls[block.get("id")] = {
+                            "name": block.get("name") or "?",
+                            "input": block.get("input") or {}, "at": when}
+                    elif block.get("type") == "tool_result":
+                        call = calls.get(block.get("tool_use_id"))
+                        if call is None:
+                            continue
+                        call["done"] = when
+                        call["error"] = bool(block.get("is_error"))
+                        call["denied"] = entry.get("toolDenialKind")
+                        call["result"] = entry.get("toolUseResult")
+    except OSError:
+        return [], tally
+
+    for call in calls.values():
+        name = call["name"]
+        if name in TOOL_SKIP or call["at"] is None:
+            continue
+        status = ("DENIED" if call.get("denied")
+                  else "error" if call.get("error") else "ok")
+        ms = None
+        if call.get("done"):
+            ms = (call["done"] - call["at"]).total_seconds() * 1000
+        detail = _tool_detail(name, call["input"], call.get("result"))
+        if call.get("denied"):
+            detail = f"{detail} ({call['denied']})"
+        phase = TOOL_PHASE.get(name, "MCP" if name.startswith("mcp__")
+                               else name.upper())
+        lines.append(format_step(phase, status, detail, ms, when=call["at"]))
+        tally["steps"] += 1
+        tally["searches"] += name == "WebSearch"
+        tally["fetches"] += name == "WebFetch"
+        tally["denials"] += bool(call.get("denied"))
+        tally["errors"] += bool(call.get("error"))
+    return lines, tally
+
+
+def _read_result(rid: str, cfg: dict) -> dict:
+    """The headless run's `--output-format json` blob, or {} if it never landed.
+
+    Missing is a real state, not an error: a run killed mid-flight (result
+    3221225786 -- a PC shutdown, which the nightly chain sees) never writes it,
+    and the log for that run should still be completed.
+    """
+    path = run_result_path(cfg, rid, create=False)
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _log_field(lines: list[str], phase: str) -> list[str]:
+    """Pull the detail column off every line of one phase (for the manifest).
+
+    A line is `<date> <time>  <phase> <status> <detail>`, and the stamp holds a
+    space, so the detail is the 5th field -- splitting any shallower hands back
+    the status glued to the front of it.
+    """
+    out = []
+    for line in lines:
+        parts = line.split(None, 4)
+        if len(parts) >= 4 and parts[2] == phase:
+            out.append(parts[4] if len(parts) > 4 else "")
+    return out
+
+
+def complete_run_log(rid: str, session_id: str, cfg: dict,
+                     mode: str = "") -> Path:
+    """Merge the model's steps into the run log, close it out, record the run.
+
+    Safe to re-run: the log is rebuilt from the Python lines already on disk
+    plus a fresh render, and the manifest de-duplicates on `run_id`.
+    """
+    log = run_log_path(cfg, rid)
+    existing = (log.read_text(encoding="utf-8").splitlines()
+                if log.exists() else [])
+    # Drop any END from a previous pass so re-running cannot stack them up.
+    own = [ln for ln in existing if ln and " END " not in ln]
+    rendered, tally = render_session(session_id)
+
+    # Both halves are `TS_FMT`-prefixed and the model's are now local, so a
+    # plain lexicographic sort is a chronological one.
+    merged = sorted(own + rendered)
+
+    result = _read_result(rid, cfg)
+    denials = len(result.get("permission_denials") or []) or tally["denials"]
+    duration_s = (result.get("duration_ms") or 0) / 1000
+    exit_code = ("killed" if not result
+                 else "error" if result.get("is_error") else "ok")
+    end = format_step(
+        "END", exit_code,
+        f"{result.get('num_turns', '?')} turns  {duration_s:.0f}s  "
+        f"${result.get('total_cost_usd', 0):.2f}  {tally['steps']} model step(s)"
+        + (f"  {denials} DENIAL(S)" if denials else "")
+        + (f"  {tally['errors']} tool error(s)" if tally["errors"] else "")
+        + ("" if rendered else "  (no transcript found)"))
+    log.write_text("\n".join(merged + [end]) + "\n", encoding="utf-8")
+
+    reports = _log_field(merged, "REPORT")
+    verdicts = _log_field(merged, "VERDICT")
+    tickers = sorted({d.split()[0] for d in _log_field(merged, "CONTEXT")
+                      if d and d.split()[0].isupper()})
+    merge_history_csv(manifest_csv_path(cfg), [{
+        "run_id": rid,
+        "started": merged[0][:19] if merged else "",
+        "finished": end[:19],
+        "mode": mode,
+        "tickers": " ".join(tickers),
+        "model": result.get("modelUsage") and next(iter(result["modelUsage"]), ""),
+        "session_id": session_id,
+        "exit_code": exit_code,
+        "turns": result.get("num_turns"),
+        "duration_s": round(duration_s, 1),
+        "cost_usd": result.get("total_cost_usd"),
+        "web_searches": tally["searches"],
+        "web_fetches": tally["fetches"],
+        "denials": denials,
+        "errors": tally["errors"],
+        "reports": "; ".join(r.split()[0] for r in reports if r),
+        "verdicts": "; ".join(_short(v, 40) for v in verdicts if v),
+    }], RUN_KEYS)
+    prune_run_logs(cfg)
+    return log
 
 
 # --------------------------------------------------------------------------
@@ -870,7 +1196,9 @@ USAGE = """usage:
   python research_report.py auto-model                    the model the nightly run should use
   python research_report.py scan TICKER [TICKER ...]      on-demand tiers 1 + 2 for a ticker
   python research_report.py post-verdicts F.json [--send] deliver the batch's verdict cards
-  python research_report.py context TICKER [TICKER ...]   the data bundle for one ticker"""
+  python research_report.py context TICKER [TICKER ...]   the data bundle for one ticker
+  python research_report.py run-id                        mint "<run_id> <session_uuid>"
+  python research_report.py log-session ID UUID [--mode M]  merge the model's steps into the run log"""
 
 
 def _print_candidates(rows: list[dict], held_back: int, gate: str) -> None:
@@ -953,6 +1281,33 @@ def main() -> int:
         print(auto_cfg.get("model", "opus"))
         return 0
 
+    # Everything the .bat needs to start a run, on one line for `for /f` to
+    # split: the run id, the session UUID, and where to put the result JSON.
+    # The session UUID is passed to `claude --session-id`, which is what makes
+    # the transcript findable *before* the run starts -- so even a run killed
+    # mid-flight can have its log completed afterwards. The path is resolved
+    # here rather than hardcoded in cmd so `research.logging.dir` stays a real
+    # setting: hardcode it there and moving the directory silently orphans
+    # every result file from the run log it belongs to.
+    if args[0] == "run-id":
+        rid = new_run_id()
+        print(f"{rid} {uuid.uuid4()} {run_result_path(load_config(), rid)}")
+        return 0
+
+    # Closes out a run: merges the model's steps into the run log, writes the
+    # END line, appends the manifest row. Separate from the run itself so it
+    # can be re-run by hand over a run that died before reaching it.
+    if args[0] == "log-session":
+        if len(args) < 3:
+            print("usage: log-session <run_id> <session_id> [--mode M]",
+                  file=sys.stderr)
+            return 1
+        cfg = load_config()
+        mode = args[args.index("--mode") + 1] if "--mode" in args else ""
+        log = complete_run_log(args[1], args[2], cfg, mode)
+        print(f"Run log: {log}")
+        return 0
+
     # On-demand: tiers 1 + 2 for a ticker you name, whether or not the nightly
     # scan surfaced it. Recorded immediately, so a look you never deep-dive is
     # still on the record.
@@ -960,7 +1315,9 @@ def main() -> int:
         cfg = load_config()
         for name in args[1:]:
             ticker = name.upper()
-            payload = run_scanners.scan_ticker(ticker, cfg)
+            with step("SCAN", cfg=cfg) as s:
+                payload = run_scanners.scan_ticker(ticker, cfg)
+                s.detail = f"{ticker} {payload.get('scan_date')} (on-demand scan)"
             _print_scan(payload, ticker, cfg)
             record_on_demand(payload, ticker, cfg)
         return 0
@@ -988,10 +1345,15 @@ def main() -> int:
         record_verdicts(verdicts, cfg)
         return 0
 
+    # stdout here is *structured* -- the skill parses it. Everything the
+    # assembly prints on the way (tiers 1+2's progress lines, the step log) is
+    # a diagnostic and belongs on stderr; only the bundle goes to stdout.
     if len(args) >= 2 and args[0] == "context":
         for t in args[1:]:
-            print(json.dumps(assemble_context(t.upper()), indent=2,
-                             default=str, ensure_ascii=False))
+            with stdout_to_stderr() as out:
+                bundle = assemble_context(t.upper())
+            print(json.dumps(bundle, indent=2, default=str,
+                             ensure_ascii=False), file=out)
         return 0
 
     print(USAGE)

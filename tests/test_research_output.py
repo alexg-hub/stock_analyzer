@@ -151,6 +151,16 @@ c.section("the chart renders for every shape of input")
 
 tmp = Path(tempfile.mkdtemp(prefix="test_charts_"))
 
+# Redirect the step log before anything under test can emit one. The logger
+# falls back to the real config when no cfg is passed (sec.py and
+# research_collect.py log that way), so without this a test would write into
+# the real output/logs -- which is exactly what output_fingerprint() forbids.
+logs = tmp / "logs"
+scanner_common.configure_logging(
+    {"research": {"logging": {"enabled": True, "dir": str(logs),
+                              "manifest": "runs.csv", "keep_runs": 50}}},
+    rid="testrun")
+
 
 def renders(name, payload) -> bool:
     out = tmp / f"{name}.png"
@@ -330,6 +340,8 @@ od_cfg = json.loads(json.dumps(cfg))
 od_cfg["research"]["history"] = {"enabled": True, "dir": str(history),
                                  "csv": "signals.csv",
                                  "on_demand_csv": "on_demand.csv"}
+od_cfg["research"]["logging"] = {"enabled": True, "dir": str(logs),
+                                 "manifest": "runs.csv", "keep_runs": 50}
 # One rule the stub satisfies, so the verdict is deterministic whatever the
 # real rule set has been retuned to since.
 pe_label = od_cfg["fundamentals"]["fields"]["trailingPE"]
@@ -506,6 +518,202 @@ off["research"]["history"]["enabled"] = False
 c.ok("history.enabled false disables both tables",
      _quiet(research_report.record_verdict, od_verdict, off) is None
      and _quiet(research_report.record_on_demand, payload, TICK, off) is None)
+
+# --------------------------------------------------------------------------
+# A deep-dive spans three processes and used to leave three lines in
+# deepdive_log.txt. What is pinned here is the shape of the record, never its
+# content: which phases appear, that a failure is logged *and* re-raised, and
+# that the model's half merges into the same timeline.
+c.section("the step log")
+
+log_cfg = json.loads(json.dumps(od_cfg))
+log_dir = tmp / "steplog"
+log_cfg["research"]["logging"] = {"enabled": True, "dir": str(log_dir),
+                                  "manifest": "runs.csv", "keep_runs": 50}
+log_file = log_dir / "runA.log"
+scanner_common.configure_logging(rid="runA")
+
+
+def log_lines() -> list[str]:
+    return (log_file.read_text(encoding="utf-8").splitlines()
+            if log_file.exists() else [])
+
+
+def phases() -> list[str]:
+    return [ln.split(None, 3)[2] for ln in log_lines() if len(ln.split()) > 2]
+
+
+_err = io.StringIO()
+_stderr, sys.stderr = sys.stderr, _err
+try:
+    scanner_common.log_step("START", "ok", "AAA on-demand", cfg=log_cfg)
+    with scanner_common.step("YAHOO", cfg=log_cfg) as s:
+        s.detail = "9/9 groups"
+    raised = False
+    try:
+        with scanner_common.step("SEC", "10-K", cfg=log_cfg):
+            raise RuntimeError("boom")
+    except RuntimeError:
+        raised = True
+finally:
+    sys.stderr = _stderr
+
+c.ok("a step is one line: timestamp, phase, status, description",
+     len(log_lines()) == 3 and phases() == ["START", "YAHOO", "SEC"],
+     " | ".join(log_lines()))
+c.ok("the timestamp carries the date, so a run crossing midnight still sorts",
+     all(scanner_common.datetime.strptime(ln[:19], scanner_common.TS_FMT)
+         for ln in log_lines()))
+c.ok("a failed step is recorded and the exception still propagates",
+     raised and log_lines()[2].split()[3] == "failed"
+     and "boom" in log_lines()[2],
+     log_lines()[2])
+c.ok("the log echoes to stderr, never stdout",
+     _err.getvalue().count("\n") == 3,
+     "context prints its JSON bundle to stdout -- a log line there corrupts it")
+
+# `context` assembles its bundle by calling straight through tiers 1 and 2,
+# whose progress lines go to stdout because for run_scanners.py stdout IS the
+# log. Reached through `context` they land in front of the JSON the skill
+# parses -- and the most valuable of them, the unsettled-bar WARNING, is
+# precisely the one that breaks it. Pinned with a callee that prints the way
+# the real ones do.
+_out, _keep = io.StringIO(), sys.stdout
+sys.stdout = _out
+try:
+    with scanner_common.stdout_to_stderr() as real_stdout:
+        print("Downloading 2y of 1d data for 1 tickers...")
+        print("WARNING: 2026-07-24 has no settled close -- dropping it.")
+        scanner_common.log_step(          # the step log writes here too
+            "SCAN", "ok", "noise",
+            cfg={"research": {"logging": {"enabled": False}}})
+    print(json.dumps({"ticker": "AAA"}), file=real_stdout)
+finally:
+    sys.stdout = _keep
+
+c.ok("a callee printing to stdout cannot corrupt the bundle",
+     json.loads(_out.getvalue())["ticker"] == "AAA",
+     repr(_out.getvalue()[:60]))
+c.ok("and stdout is restored afterwards", sys.stdout is _keep)
+
+# The whole point of a logger that cannot take down a deep-dive.
+c.ok("an unwritable log destination is survived, not raised",
+     scanner_common.log_step(
+         "X", "ok", "d", cfg={"research": {"logging": {"dir": str(log_file)}}},
+         echo=False) is None)
+
+off_log = json.loads(json.dumps(log_cfg))
+off_log["research"]["logging"]["enabled"] = False
+before = len(log_lines())
+scanner_common.log_step("NOPE", "ok", "silent", cfg=off_log, echo=False)
+c.ok("logging.enabled false writes nothing", len(log_lines()) == before)
+
+# --------------------------------------------------------------------------
+# The model's half. A transcript in Claude Code's own format, hand-built so no
+# real session is needed: one Bash call, one WebFetch, one refused tool.
+# `transcript_path` globs ~/.claude/projects/*/<session>.jsonl, so pointing
+# Path.home at tmp is the whole redirection -- no real session is touched.
+transcript_dir = tmp / ".claude" / "projects" / "proj"
+transcript_dir.mkdir(parents=True)
+session = "11111111-2222-3333-4444-555555555555"
+
+
+def _msg(role, blocks, when, **extra):
+    return json.dumps({"type": role, "timestamp": when,
+                       "message": {"content": blocks}, **extra})
+
+
+(transcript_dir / f"{session}.jsonl").write_text("\n".join([
+    _msg("assistant", [{"type": "tool_use", "id": "t1", "name": "Bash",
+                        "input": {"command": 'cd "C:\\proj" && python research_report.py context AAA'}}],
+         "2026-01-02T03:04:05.000Z"),
+    _msg("user", [{"type": "tool_result", "tool_use_id": "t1"}],
+         "2026-01-02T03:04:07.000Z", toolUseResult={"stdout": "ok"}),
+    _msg("assistant", [{"type": "tool_use", "id": "t2", "name": "WebFetch",
+                        "input": {"url": "https://www.example.com/news"}}],
+         "2026-01-02T03:05:00.000Z"),
+    _msg("user", [{"type": "tool_result", "tool_use_id": "t2"}],
+         "2026-01-02T03:05:04.000Z", toolUseResult={"code": 200, "bytes": 2048}),
+    _msg("assistant", [{"type": "tool_use", "id": "t3", "name": "Bash",
+                        "input": {"command": "python -c 'print(1)'"}}],
+         "2026-01-02T03:06:00.000Z"),
+    _msg("user", [{"type": "tool_result", "tool_use_id": "t3", "is_error": True}],
+         "2026-01-02T03:06:01.000Z", toolUseResult="Error",
+         toolDenialKind="permission-rule"),
+    # Plumbing the model needs but nobody wants in a log.
+    _msg("assistant", [{"type": "tool_use", "id": "t4", "name": "ToolSearch",
+                        "input": {"query": "select:WebFetch"}}],
+         "2026-01-02T03:06:30.000Z"),
+]), encoding="utf-8")
+
+_home = Path.home
+Path.home = staticmethod(lambda: tmp)
+try:
+    rendered, tally = research_report.render_session(session)
+finally:
+    Path.home = _home
+
+c.ok("one line per tool call, plumbing left out",
+     len(rendered) == 3 and tally["steps"] == 3,
+     " | ".join(rendered))
+c.ok("a refused tool is flagged, not silently absent",
+     any(" DENIED " in ln and "permission-rule" in ln for ln in rendered)
+     and tally["denials"] == 1,
+     "the MU run exited 0 with a denial in it and nothing surfaced it")
+c.ok("a fetch records its status and size",
+     any("FETCH" in ln and "200" in ln and "2.0 KB" in ln for ln in rendered),
+     " | ".join(ln for ln in rendered if "FETCH" in ln))
+c.ok("the noisy cd prefix is stripped from a command",
+     any("BASH" in ln and ln.rstrip().endswith("(2.0s)")
+         and "research_report.py context AAA" in ln and "cd " not in ln
+         for ln in rendered),
+     " | ".join(ln for ln in rendered if "BASH" in ln))
+c.ok("an unknown session degrades to no lines rather than raising",
+     research_report.render_session("no-such-session") == ([], {
+         "steps": 0, "searches": 0, "fetches": 0, "denials": 0, "errors": 0}))
+
+# Transcript stamps are UTC and the Python half is local wall-clock; without
+# the conversion every model step sorts hours away from the steps it belongs
+# between, which would make the merged timeline actively misleading.
+utc_hour = int(rendered[0][11:13])
+c.ok("transcript timestamps are converted to local time before merging",
+     utc_hour == (scanner_common.datetime(2026, 1, 2, 3, 4, 5,
+                                          tzinfo=scanner_common.timezone.utc)
+                  .astimezone().hour),
+     rendered[0][:19])
+
+# --------------------------------------------------------------------------
+Path.home = staticmethod(lambda: tmp)
+try:
+    _quiet(research_report.complete_run_log, "runA", session, log_cfg, "on_demand")
+    merged = log_lines()
+    # END is appended after the sort and stays last even when it ties with the
+    # final step's second, so the ordering claim is about the steps.
+    steps = merged[:-1]
+    c.ok("the model's steps merge into the Python half, in time order",
+         steps == sorted(steps) and len(merged) == 3 + 3 + 1,
+         f"{len(merged)} lines: {[ln.split()[2] for ln in merged]}")
+    c.ok("the run is closed with exactly one END line",
+         sum(" END " in ln for ln in merged) == 1 and " END " in merged[-1],
+         merged[-1])
+    c.ok("a missing result file is reported as killed, not crashed",
+         "killed" in merged[-1],
+         "a run cut short by a shutdown still gets its log completed")
+
+    runs = pd.read_csv(log_dir / "runs.csv")
+    c.ok("the run lands one row in the manifest",
+         len(runs) == 1 and runs.loc[0, "run_id"] == "runA"
+         and runs.loc[0, "denials"] == 1 and runs.loc[0, "web_fetches"] == 1,
+         f"{runs.iloc[0].to_dict()}")
+
+    _quiet(research_report.complete_run_log, "runA", session, log_cfg, "on_demand")
+    c.ok("re-running log-session updates the row rather than adding one",
+         len(pd.read_csv(log_dir / "runs.csv")) == 1)
+    c.ok("and does not stack a second END onto the log",
+         sum(" END " in ln for ln in log_lines()) == 1)
+finally:
+    Path.home = _home
+    scanner_common.configure_logging(rid="testrun")
 
 # --------------------------------------------------------------------------
 # The dry-run print carries the quality badge, and Windows picks the locale

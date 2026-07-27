@@ -24,7 +24,26 @@ rem mangles a quoted interpreter path inside backticks.
 "C:\Users\Lenovo\AppData\Local\Microsoft\WindowsApps\python.exe" research_report.py auto-model > output\deepdive_model.txt
 set /p MODEL=<output\deepdive_model.txt
 
-echo ==== Deep-dive started %date% %time% (model %MODEL%) ==== >> output\deepdive_log.txt
+rem Ids for the step log, minted together and split out of one line. The run id
+rem is exported so the `context` subprocess Claude spawns appends to the same
+rem log; the session UUID is handed to --session-id so the transcript is
+rem findable BEFORE the run starts -- which is what lets a run killed mid-flight
+rem (result 3221225786, a PC shutdown) still have its log completed by hand.
+rem The result path is resolved by Python (tokens=1,2* so a path with spaces
+rem survives) rather than hardcoded here, so research.logging.dir stays a real
+rem setting; that call also creates the directory before cmd expands the ">".
+"C:\Users\Lenovo\AppData\Local\Microsoft\WindowsApps\python.exe" research_report.py run-id > output\deepdive_ids.txt
+set /p RUN_IDS=<output\deepdive_ids.txt
+for /f "tokens=1,2*" %%a in ("%RUN_IDS%") do (
+    set STOCK_ANALYZER_RUN_ID=%%a
+    set SESSION_ID=%%b
+    set RESULT_JSON=%%c
+)
+
+rem Both ids go in the banner: it is the only durable record of them if the run
+rem is killed before log-session runs (no result JSON is written in that case),
+rem and both are needed to complete the log by hand afterwards.
+echo ==== Deep-dive started %date% %time% (model %MODEL%, run %STOCK_ANALYZER_RUN_ID%, session %SESSION_ID%) ==== >> output\deepdive_log.txt
 rem --permission-mode dontAsk, not bypassPermissions: anything outside the
 rem allow-list is refused instead of hanging on a prompt nobody will answer.
 rem The IBKR MCP tools MUST be listed -- an un-allowed tool is refused silently,
@@ -39,9 +58,17 @@ rem cost the 2026-07-26 shakedown its verdict post. Everything the skill needs i
 rem a subcommand (context / candidates / post-verdicts) -- widen the skill's
 rem vocabulary with a new subcommand, never this allow-list with `Bash(python *)`,
 rem which would be arbitrary code execution.
+rem --session-id must stay: without it log-session has no transcript to find and
+rem the model's half of the step log goes missing (silently -- the Python half
+rem still writes). The result JSON goes to its own file rather than into this
+rem log, so what you read stays readable; log-session mines it for the END line.
 type output\deepdive_prompt.txt | claude -p ^
   --model %MODEL% ^
+  --session-id %SESSION_ID% ^
   --permission-mode dontAsk ^
   --allowedTools "Bash(python research_report.py *) Read Write Glob Grep WebSearch WebFetch mcp__claude_ai_Interactive_Brokers_IBKR__*" ^
-  --output-format json >> output\deepdive_log.txt 2>&1
+  --output-format json > "%RESULT_JSON%" 2>>output\deepdive_log.txt
 echo ==== Deep-dive finished %date% %time% (exit %errorlevel%) ==== >> output\deepdive_log.txt
+
+rem Merge the model's steps into the run log, write the END line, record the run.
+"C:\Users\Lenovo\AppData\Local\Microsoft\WindowsApps\python.exe" research_report.py log-session %STOCK_ANALYZER_RUN_ID% %SESSION_ID% --mode nightly >> output\deepdive_log.txt 2>&1

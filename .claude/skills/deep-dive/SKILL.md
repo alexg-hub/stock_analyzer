@@ -137,6 +137,13 @@ even read those files. If it warns that a tier disagrees with the config bands,
 that is information for the user, not something to go back and "fix" — say so in
 your summary and leave the verdict as you set it.
 
+**So is the step log** — `output/logs/<run_id>.log` gets one line per step of
+the run, and your half of it is rendered afterwards from the session transcript
+by `log-session`, which the batch file calls when you are done. Never write to
+it, and never narrate your steps into a file yourself: the record is built from
+what actually happened, not from what you report happened. It also means you can
+say "see the run log" instead of listing every source you touched.
+
 ## Unattended (nightly) mode
 
 `run_deepdive.bat` runs this skill headlessly after the nightly scan, via a

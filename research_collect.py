@@ -24,11 +24,12 @@ Run standalone to eyeball / validate collection:
 
 import json
 import sys
+import time
 
 import pandas as pd
 import yfinance as yf
 
-from scanner_common import stmt_value
+from scanner_common import log_step, stmt_value
 
 
 # --------------------------------------------------------------------------
@@ -126,7 +127,7 @@ def _valuation(info: dict, tk: yf.Ticker, close: pd.Series | None) -> dict:
                 out["pe_2y_high"] = round(float(pe.max()), 1)
                 out["pe_percentile_2y"] = round(100 * (pe < cur).mean(), 1)
     except Exception as exc:  # noqa: BLE001
-        print(f"  pe_percentile failed: {exc}")
+        log_step("YAHOO", "failed", f"pe_percentile: {exc}")
     return out
 
 
@@ -261,7 +262,7 @@ def _financials(tk: yf.Ticker, years: int = 4, quarters: int = 4) -> dict:
             if isinstance(df, pd.DataFrame) and not df.empty:
                 return df
         except Exception as exc:  # noqa: BLE001 - a missing statement is not fatal
-            print(f"  {name} failed for {tk.ticker}: {exc}")
+            log_step("YAHOO", "failed", f"{name} for {tk.ticker}: {exc}")
         return pd.DataFrame()
 
     def series(income, cashflow, balance, count, label) -> list[dict]:
@@ -335,7 +336,7 @@ def _ownership(tk: yf.Ticker, info: dict) -> dict:
             if first:
                 shares_change_pct = round(100 * (latest - first) / first, 2)
     except Exception as exc:  # noqa: BLE001
-        print(f"  shares_full failed: {exc}")
+        log_step("YAHOO", "failed", f"shares_full: {exc}")
 
     return {
         "institutions_pct": _pct(info.get("heldPercentInstitutions")),
@@ -377,11 +378,12 @@ def collect_yahoo(ticker: str, close: pd.Series | None = None,
     percentile on the exact same series the screens use). If omitted, a 2y
     history is fetched here. `years`/`quarters` size the financials history.
     """
+    t0 = time.perf_counter()
     tk = yf.Ticker(ticker)
     try:
         info = tk.info or {}
     except Exception as exc:  # noqa: BLE001
-        print(f"  info failed for {ticker}: {exc}")
+        log_step("YAHOO", "failed", f"info for {ticker}: {exc}")
         info = {}
 
     if close is None:
@@ -389,7 +391,7 @@ def collect_yahoo(ticker: str, close: pd.Series | None = None,
             hist = tk.history(period="2y", auto_adjust=False)
             close = hist["Close"] if isinstance(hist, pd.DataFrame) and not hist.empty else None
         except Exception as exc:  # noqa: BLE001
-            print(f"  history failed for {ticker}: {exc}")
+            log_step("YAHOO", "failed", f"history for {ticker}: {exc}")
             close = None
 
     groups = {
@@ -403,17 +405,27 @@ def collect_yahoo(ticker: str, close: pd.Series | None = None,
         "ownership": (_ownership, (tk, info)),
     }
     out = {"ticker": ticker}
+    failed = []
     for name, (fn, args) in groups.items():
         try:
             out[name] = fn(*args)
         except Exception as exc:  # noqa: BLE001 - one bad group must not sink the ticker
-            print(f"  group '{name}' failed for {ticker}: {exc}")
+            log_step("YAHOO", "failed", f"group '{name}' for {ticker}: {exc}")
             out[name] = None
+            failed.append(name)
     try:
         out["news"] = _news(tk)
     except Exception as exc:  # noqa: BLE001
-        print(f"  group 'news' failed for {ticker}: {exc}")
+        log_step("YAHOO", "failed", f"group 'news' for {ticker}: {exc}")
         out["news"] = []
+        failed.append("news")
+    total = len(groups) + 1
+    # One summary line whether or not anything broke: "9/9 groups" is the
+    # evidence that a thin report had thin *inputs*, not a thin analysis.
+    log_step("YAHOO", "ok" if not failed else "partial",
+             f"{total - len(failed)}/{total} groups for {ticker}"
+             + (f" -- missing {', '.join(failed)}" if failed else ""),
+             ms=(time.perf_counter() - t0) * 1000)
     return out
 
 

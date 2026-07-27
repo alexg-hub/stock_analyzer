@@ -10,7 +10,11 @@ their own condition math and formatting; run_scanners.py orchestrates.
 import io
 import json
 import math
+import os
 import sys
+import time
+import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -90,6 +94,222 @@ def enable_utf8_output() -> None:
             stream.reconfigure(encoding="utf-8", errors="replace")
         except (AttributeError, ValueError):   # not a reconfigurable stream
             pass
+
+
+@contextmanager
+def stdout_to_stderr():
+    """Run a block with stdout aliased to stderr; yield the real stdout.
+
+    For a command whose stdout *is* its output -- `research_report.py context`
+    prints a JSON bundle the deep-dive skill parses. That bundle is assembled by
+    calling straight through tiers 1 and 2, whose progress lines
+    ("Downloading 2y of 1d data...", the unsettled-bar WARNING, the per-screen
+    counts) are written to stdout because for `run_scanners.py` stdout is the
+    log. Reached this way they land *in front of the JSON*, and the diagnostic
+    most worth seeing -- the WARNING that a bar was dropped -- is exactly the
+    one that breaks the parse.
+
+    Redirecting here rather than converting those prints keeps the fix at the
+    one boundary that knows stdout is structured, and holds for any future
+    callee too. Used from `__main__` only, like `enable_utf8_output`: importing
+    a module must never mutate global streams.
+    """
+    saved = sys.stdout
+    sys.stdout = sys.stderr
+    try:
+        yield saved
+    finally:
+        sys.stdout = saved
+
+
+# --------------------------------------------------------------------------
+# Step log (tier 3's record of what a deep-dive actually did)
+# --------------------------------------------------------------------------
+# One line per step -- timestamp, phase, status, a very short description --
+# appended live to `output/logs/<run_id>.log`. Tier 3 spans three processes
+# (this one, the headless `claude` run, and the `context` subprocess it
+# spawns), so a run needs an id they can all agree on: RUN_ID_ENV, exported by
+# the .bat and inherited straight through. Unset means "standalone" -- a
+# terminal `context`/`scan` mints its own id and gets its own log rather than
+# going unrecorded.
+#
+# Two rules this layer must never break:
+#   1. It writes to **stderr**, never stdout. `research_report.py context`
+#      prints its JSON bundle to stdout and the skill reads it; a diagnostic
+#      landing in the middle of that JSON is exactly the bug this replaced.
+#   2. It never raises. A log write failing must not take down a deep-dive, so
+#      every call is wrapped -- a broken logger costs you the record, not the
+#      report.
+
+RUN_ID_ENV = "STOCK_ANALYZER_RUN_ID"
+
+_LOG_STATE = {"cfg": None, "run_id": None}
+
+
+def new_run_id() -> str:
+    """A short id for one deep-dive run (8 hex chars is plenty at ~1/day)."""
+    return uuid.uuid4().hex[:8]
+
+
+def run_id() -> str:
+    """This process's run id: the inherited one, or a freshly minted one."""
+    if not _LOG_STATE["run_id"]:
+        _LOG_STATE["run_id"] = os.environ.get(RUN_ID_ENV) or new_run_id()
+    return _LOG_STATE["run_id"]
+
+
+def configure_logging(cfg: dict | None = None, rid: str | None = None) -> None:
+    """Pin the config and/or run id the step log uses (the tests redirect both)."""
+    if cfg is not None:
+        _LOG_STATE["cfg"] = cfg
+    if rid is not None:
+        _LOG_STATE["run_id"] = rid
+
+
+def _log_cfg(cfg: dict | None = None) -> dict:
+    if cfg is not None:
+        return cfg
+    if _LOG_STATE["cfg"] is None:
+        try:
+            _LOG_STATE["cfg"] = load_config()
+        except Exception:  # noqa: BLE001 - logging must not need a readable config
+            _LOG_STATE["cfg"] = {}
+    return _LOG_STATE["cfg"]
+
+
+def logging_cfg(cfg: dict | None = None) -> dict:
+    return _log_cfg(cfg).get("research", {}).get("logging", {})
+
+
+def logs_dir(cfg: dict | None = None, create: bool = True) -> Path:
+    """Where the run logs live (`research.logging.dir` under output/).
+
+    Same bare-name-resolved rule as `history_dir`: config stores a plain
+    folder name, an absolute path overrides it -- which is how the tests keep
+    their logs out of the real `output/`.
+    """
+    path = Path(logging_cfg(cfg).get("dir", "logs"))
+    if not path.is_absolute():
+        path = output_dir(create) / path
+    if create:
+        path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def run_log_path(cfg: dict | None = None, rid: str | None = None,
+                 create: bool = True) -> Path:
+    return logs_dir(cfg, create) / f"{rid or run_id()}.log"
+
+
+def run_result_path(cfg: dict | None = None, rid: str | None = None,
+                    create: bool = True) -> Path:
+    """Where the headless run's `--output-format json` blob is captured.
+
+    It used to be appended to `deepdive_log.txt`, which buried a readable log
+    under ~6 KB of JSON per run. Kept as its own file so the closing narrative
+    and the usage/cost figures survive without cluttering what you read.
+    """
+    return logs_dir(cfg, create) / f"{rid or run_id()}_result.json"
+
+
+# One row per deep-dive run. Keyed on run_id, so re-running `log-session` for
+# a run updates its row instead of adding a second one.
+RUN_KEYS = ["run_id"]
+
+
+def manifest_csv_path(cfg: dict | None = None, create: bool = True) -> Path:
+    """The run manifest -- what tier 3 did, how long it took, what it cost."""
+    path = Path(logging_cfg(cfg).get("manifest", "deepdive_runs.csv"))
+    return path if path.is_absolute() else logs_dir(cfg, create) / path
+
+
+TS_FMT = "%Y-%m-%d %H:%M:%S"
+# The date is part of every line on purpose: the nightly chain starts at 23:30
+# and a deep-dive routinely crosses midnight, so a bare clock time would sort
+# the run's own steps out of order when log-session merges them.
+
+
+def format_step(phase: str, status: str = "ok", detail: str = "",
+                ms: float | None = None, when: datetime | None = None) -> str:
+    """One log line. Fixed-width columns so a run scans vertically."""
+    stamp = (when or datetime.now()).strftime(TS_FMT)
+    detail = " ".join(str(detail).split())          # never let a step wrap
+    if ms is not None:
+        detail = f"{detail}  ({ms / 1000:.1f}s)".strip()
+    return f"{stamp}  {phase:<9.9s} {status:<7.7s} {detail}".rstrip()
+
+
+def log_step(phase: str, status: str = "ok", detail: str = "",
+             ms: float | None = None, cfg: dict | None = None,
+             echo: bool = True) -> None:
+    """Record one step. Silent no-op when logging is off; never raises."""
+    try:
+        if not logging_cfg(cfg).get("enabled", True):
+            return
+        line = format_step(phase, status, detail, ms)
+        with open(run_log_path(cfg), "a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+        if echo:
+            print(line, file=sys.stderr)
+    except Exception:  # noqa: BLE001 - a lost log line must not sink the run
+        pass
+
+
+class _Step:
+    """Handle a `step()` block fills in once it knows what happened."""
+
+    __slots__ = ("detail", "status")
+
+    def __init__(self, detail: str = "") -> None:
+        self.detail = detail
+        self.status = "ok"
+
+
+@contextmanager
+def step(phase: str, detail: str = "", cfg: dict | None = None):
+    """Time a block and log it as one step, then **re-raise** on failure.
+
+    Re-raising is the point: every caller in the tier-3 path already has its
+    own `except Exception` doing something n/a-tolerant, and this must record
+    the failure without changing that behaviour.
+
+        with step("YAHOO") as s:
+            ...
+            s.detail = f"{ok}/{total} groups"
+    """
+    handle = _Step(detail)
+    t0 = time.perf_counter()
+    try:
+        yield handle
+    except Exception as exc:  # noqa: BLE001
+        ms = (time.perf_counter() - t0) * 1000
+        note = f"{handle.detail} -- {exc}" if handle.detail else str(exc)
+        log_step(phase, "failed", note, ms, cfg)
+        raise
+    ms = (time.perf_counter() - t0) * 1000
+    log_step(phase, handle.status, handle.detail, ms, cfg)
+
+
+def prune_run_logs(cfg: dict | None = None) -> int:
+    """Keep the newest `research.logging.keep_runs` runs, drop the rest.
+
+    `deepdive_log.txt` grew without bound; per-run files would too. Called once
+    per run from `log-session`, never on the hot path.
+    """
+    try:
+        keep = int(logging_cfg(cfg).get("keep_runs", 200))
+        if keep <= 0:
+            return 0
+        logs = sorted(logs_dir(cfg, create=False).glob("*.log"),
+                      key=lambda p: p.stat().st_mtime, reverse=True)
+        removed = 0
+        for old in logs[keep:]:
+            old.with_name(f"{old.stem}_result.json").unlink(missing_ok=True)
+            old.unlink(missing_ok=True)
+            removed += 1
+        return removed
+    except Exception:  # noqa: BLE001
+        return 0
 
 
 # --------------------------------------------------------------------------
@@ -374,6 +594,16 @@ def fetch_fundamentals(tickers: list[str], fund_cfg: dict) -> pd.DataFrame:
             row.update(_statement_metrics(tk, stmt_cfg, info))
         rows[ticker] = row
     return pd.DataFrame.from_dict(rows, orient="index").rename_axis("Ticker")
+
+
+def fmt_bytes(n) -> str:
+    """Compact byte count for a log line (`435 KB`, `2.1 MB`)."""
+    if not isinstance(n, (int, float)):
+        return "n-a"
+    for unit, scale in (("MB", 1 << 20), ("KB", 1 << 10)):
+        if n >= scale:
+            return f"{n / scale:.1f} {unit}"
+    return f"{int(n)} B"
 
 
 def fmt_value(value) -> str:

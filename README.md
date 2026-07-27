@@ -257,6 +257,7 @@ python run_scanners.py            # tiers 1+2: full S&P 500 scan + Discord alert
 python research_report.py candidates                 # tier 3: who to deep-dive
 python research_report.py scan PGR                   # on-demand: tiers 1+2 for one ticker
 run_ondemand.bat PGR                                 # on-demand: all three tiers
+type output\logs\<run_id>.log                        # what that deep-dive actually did
 python backtest_breakout.py       # historical validation, breakout screen
 python backtest_pullback.py       # historical validation, pullback screen
 python backtest_reclaim.py        # historical validation, reclaim screen
@@ -291,8 +292,8 @@ price panel, and every backtest table and chart. The project root holds only
 inputs — code, `config.json`, docs. `config.json` keeps storing bare filenames
 (`backtest_universe_cache.pkl`, …) and `scanner_common.output_dir()` resolves
 them; an absolute path in config still overrides. There are **no exceptions** —
-the tier-3 reports (`output/reports/`) and the signal history
-(`output/history/`) live there too.
+the tier-3 reports (`output/reports/`), the signal history (`output/history/`)
+and the deep-dive step logs (`output/logs/`) live there too.
 
 ### Universe backtest — did the screens make money?
 
@@ -494,10 +495,80 @@ registered servers).
 Each report is written to `output/reports/<TICKER>_<scan_date>.md`, and the
 verdicts go to Discord — pre-authorized unattended by
 `research.auto.discord_send`, and only after you confirm in an interactive
-session. Logs land in `output/deepdive_log.txt`.
+session.
 
 `research.auto` config: `enabled`, `gate`, `max_reports`, `discord_send`,
 `model`.
+
+### The step log — what a deep-dive actually did
+
+A tier-3 run spans three processes (the batch file, the headless `claude`
+session, and the `research_report.py context` subprocess it spawns), so each run
+gets **one log**, `output/logs/<run_id>.log` — one line per step: timestamp,
+phase, status, a short description.
+
+```
+2026-07-27 00:59:19  START     ok      MU  on-demand  model=opus  run=a1b2c3d4
+2026-07-27 00:59:22  HANDOFF   miss    MU not in latest_hits.json
+2026-07-27 00:59:24  SCAN      ok      on-demand 2026-07-23  on_demand/none  quality PASS  (2.1s)
+2026-07-27 00:59:26  YAHOO     ok      9/9 groups for MU  (4.6s)
+2026-07-27 00:59:31  QUANT     ok      score 92.5
+2026-07-27 00:59:33  CHART     ok      MU_2026-07-23_financials.png
+2026-07-27 00:59:34  SEC       ok      CIK 0000723125 for MU
+2026-07-27 00:59:36  SEC       ok      10-K 200 2.3 MB  business 24000 / risk_factors 24000 / mdna 15925  (0.6s)
+2026-07-27 00:59:39  CONTEXT   ok      MU bundle ready  (13.2s)
+2026-07-27 01:00:29  BASH      DENIED  python -c "import json..." (permission-rule)
+2026-07-27 01:00:41  MCP       ok      search_contracts  (0.6s)
+2026-07-27 01:01:15  SEARCH    ok      "Micron fiscal Q3 2026 earnings..." 8 hits  (4.2s)
+2026-07-27 01:02:10  FETCH     ok      tradingkey.com/...cxmt-ipo  200  425.0 KB  (7.8s)
+2026-07-27 01:06:52  WRITE     ok      MU_2026-07-23.md  28.2 KB
+2026-07-27 01:07:44  VERDICT   ok      MU WATCH 84 -> on_demand_scans_results.csv
+2026-07-27 01:07:46  DISCORD   sent    MU  1 card(s), 1 chart(s)
+2026-07-27 01:07:50  END       ok      33 turns  507s  $4.06  30 model step(s)  1 DENIAL(S)
+```
+
+The **Python half** (`CONTEXT`, `HANDOFF`, `SCAN`, `YAHOO`, `QUANT`, `CHART`,
+`FACTS`, `SEC`, `RECORD`, `REPORT`, `VERDICT`, `DISCORD`) is written live as the
+run proceeds, so a run that dies still leaves everything up to that point.
+
+The **model half** (`BASH`, `READ`, `WRITE`, `GREP`, `SEARCH`, `FETCH`, `MCP`,
+and anything `DENIED`) is not collected at runtime — Claude Code already records
+it in the session transcript, and `log-session` renders one short line per tool
+call and merges the two halves by timestamp when the run ends. Nothing else from
+the transcript is kept; the point is which steps ran, when, and whether they
+worked.
+
+Two things this surfaces that were previously silent: a **refused tool** (the
+run still exits 0 — CLAUDE.md used to tell you to grep the JSON for
+`permission_denials`), and an **SEC section that came back `n-a`**, which is what
+makes a report thinner without saying so.
+
+**`output/logs/deepdive_runs.csv`** is one row per run — `run_id`, `started`,
+`finished`, `mode`, `tickers`, `model`, `session_id`, `exit_code`, `turns`,
+`duration_s`, `cost_usd`, `web_searches`, `web_fetches`, `denials`, `errors`,
+`reports`, `verdicts`:
+
+```python
+runs = pd.read_csv("output/logs/deepdive_runs.csv")
+runs.groupby("mode")[["cost_usd", "duration_s"]].sum()   # what tier 3 costs
+runs[runs.denials > 0]                                   # runs that were refused something
+```
+
+`output/deepdive_log.txt` keeps only the start/finish banners; the raw
+`--output-format json` blob now goes to `output/logs/<run_id>_result.json` so
+what you read stays readable. `research.logging`: `enabled`, `dir`, `manifest`,
+`keep_runs` (oldest run logs pruned beyond that count).
+
+Two wiring details worth knowing if you edit the batch files:
+
+- `--session-id` **must stay** on both. It is what makes the transcript findable
+  *before* the run starts, so a run killed mid-flight (result `3221225786`, a PC
+  shutdown) can still have its log completed by hand:
+  `python research_report.py log-session <run_id> <session_id>`. Drop the flag
+  and the model half goes missing with no error.
+- `STOCK_ANALYZER_RUN_ID` is exported by the batch file and inherited through
+  `claude` into the `context` subprocess — that is how three processes write one
+  log. Unset (a `context`/`scan` you run yourself) simply mints its own id.
 
 ### The financial trend chart
 
@@ -713,6 +784,10 @@ small differences as noise.
 | `research.history.enabled` | `true` | Archive every scan under `output/history/` |
 | `research.history.dir` / `.csv` | `history` / `signals.csv` | Archive location and the signal table's name |
 | `research.history.on_demand_csv` | `on_demand_scans_results.csv` | The on-demand scan table, in the same directory |
+| `research.logging.enabled` | `true` | Write the tier-3 step log; `false` makes every log call a no-op |
+| `research.logging.dir` | `logs` | Where run logs live, resolved inside `output/` |
+| `research.logging.manifest` | `deepdive_runs.csv` | One row per deep-dive run, in the same directory |
+| `research.logging.keep_runs` | `200` | Oldest run logs (and their result JSON) pruned beyond this count |
 | `research.financials.years` / `.quarters` | `4` / `4` | Periods on the financial-trend chart and table |
 | `research.financials.chart_dpi` | `120` | Resolution of that chart |
 | `research.synthesis.tiers[].color` | per tier | Hex side-bar colour of the Discord verdict card |
