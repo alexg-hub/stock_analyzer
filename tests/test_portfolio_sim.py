@@ -13,7 +13,15 @@ Invariants, not recorded numbers. The ones that matter:
   * a signal whose entry bar has not traded stays `pending` with no price, and
     is absent from every closed-trade statistic;
   * `sufficient_n` and the FDR-adjusted `q_value` gate every claim, so a thin
-    sample cannot produce a confident finding.
+    sample cannot produce a confident finding;
+  * the double-top exit **flags** a position rather than closing it, sells at
+    `Open[t+1]` like everything else, and is idempotent -- a second run adds no
+    second sell row and re-alerts nothing.
+
+The exit fixtures are built *from the thresholds in force*, never against
+hardcoded prices: `_m_series` derives its peak heights and trough depth from
+`cfg["exit_strategy"]`, so retuning the section moves the fixture with it
+instead of staling the test.
 """
 
 import copy
@@ -29,7 +37,7 @@ import pandas as pd
 from _harness import Checks, config
 
 import backtest_universe
-from portfolio_sim import analysis, ledger, marking
+from portfolio_sim import analysis, exits, ledger, marking
 from portfolio_sim.stats import (
     benjamini_hochberg,
     bootstrap_diff_ci,
@@ -37,6 +45,7 @@ from portfolio_sim.stats import (
     spearman,
 )
 from scanner_common import (
+    exits_csv_path,
     findings_csv_path,
     positions_csv_path,
     signals_csv_path,
@@ -55,7 +64,8 @@ def _fingerprint(path: Path):
 
 REAL = config()
 REAL_FILES = [positions_csv_path(REAL, create=False),
-              findings_csv_path(REAL, create=False)]
+              findings_csv_path(REAL, create=False),
+              exits_csv_path(REAL, create=False)]
 REAL_BEFORE = [_fingerprint(p) for p in REAL_FILES]
 
 TMP = Path(tempfile.mkdtemp(prefix="tier4_"))
@@ -136,7 +146,9 @@ def _no_network(*_args, **_kwargs):
     raise AssertionError("a test tried to download price data")
 
 
-marking.price_panel = lambda tickers, oldest, config_: PANEL
+# `extra_bars` is keyword-only at the call site in exits.py, so the stub has to
+# swallow it -- a positional-only stub would pass here and fail there.
+marking.price_panel = lambda tickers, oldest, config_, **_kw: PANEL
 marking.download_price_data = _no_network
 
 c.ok("panel and history built", len(PANEL) == 30 and len(rows) == 11,
@@ -368,6 +380,215 @@ c.ok("the ranking says plainly when nothing cleared FDR",
      "a ranking that reads like a result on a null sample is the failure mode")
 
 # --------------------------------------------------------------------------
+c.section("exit-scan -- the double top, built from the thresholds in force")
+
+EX = copy.deepcopy(cfg["exit_strategy"])
+EX.update({"recent_window_days": 5, "prior_window_days": 10})
+XDAYS = pd.bdate_range("2026-03-02", periods=34)
+BREAK_AT = 30                       # leaves one bar after it, so the sale fills
+
+
+def _m_series(n, t, ex, peak_diff=None, depth=None):
+    """An M whose geometry is derived from `ex`, breaking its neckline at `t`.
+
+    The windows the rule actually uses are, at bar `t`:
+        peak 1  = max over [t-recent-prior, t-recent-1]
+        peak 2  = max over [t-recent,       t-1]
+        trough  = min over [t-recent,       t-1]
+    so the second peak *and* the valley both live in the recent window. The
+    series is placed against those bounds rather than against a drawing of an
+    M, because that is what the code reads.
+    """
+    recent, prior = int(ex["recent_window_days"]), int(ex["prior_window_days"])
+    confirm = float(ex["break_confirm_pct"])
+    if peak_diff is None:                       # comfortably "equal" peaks
+        peak_diff = float(ex["max_peak_diff_pct"]) / 4
+    if depth is None:                           # comfortably deep valley
+        depth = float(ex["min_trough_depth_pct"]) * 2
+    peak1, peak2 = 100.0, 100.0 * (1 + peak_diff)
+    floor_ = min(peak1, peak2) * (1 - depth)
+
+    s = np.full(n, floor_)
+    s[t - recent - 2] = peak1                   # inside the prior window
+    s[t - recent] = peak2                       # first bar of the recent window
+    for k in range(t - recent + 1, t):          # decline into the trough at t-1
+        s[k] = peak2 + (floor_ - peak2) * (k - (t - recent)) / (recent - 1)
+    s[t:] = floor_ * (1 - confirm) * 0.99       # the break, then flat
+    assert prior >= 3, "the prior window must hold peak 1"
+    return s
+
+
+# One ticker per case. Open == High == Low == Close, so a peak is exactly the
+# number the fixture put there and the next open is exactly readable.
+XSERIES = {
+    "DTP": _m_series(len(XDAYS), BREAK_AT, EX),                       # fires
+    "PND": _m_series(len(XDAYS), len(XDAYS) - 1, EX),                 # fires last bar
+    "WIDE": _m_series(len(XDAYS), BREAK_AT, EX,
+                      peak_diff=float(EX["max_peak_diff_pct"]) * 3),  # peaks unequal
+    "SHLW": _m_series(len(XDAYS), BREAK_AT, EX,
+                      depth=float(EX["min_trough_depth_pct"]) / 3),   # valley too shallow
+    "UPP": np.linspace(80.0, 130.0, len(XDAYS)),                      # never fires
+    "SPY": np.linspace(100.0, 110.0, len(XDAYS)),
+}
+xframes = {}
+for ticker, series in XSERIES.items():
+    for field in ("Open", "Close", "High", "Low", "Adj Close"):
+        xframes[(field, ticker)] = series
+    xframes[("Volume", ticker)] = np.full(len(XDAYS), 1_000_000.0)
+XPANEL = pd.DataFrame(xframes, index=XDAYS)
+XPANEL.columns = pd.MultiIndex.from_tuples(XPANEL.columns)
+
+xsig = exits.compute_double_top(XPANEL, EX)["signal"]
+c.ok("the M fires exactly once, on the bar that breaks the neckline",
+     xsig["DTP"].sum() == 1 and xsig["DTP"].iloc[BREAK_AT],
+     f"{int(xsig['DTP'].sum())} signal(s), "
+     f"{[str(d.date()) for d in xsig.index[xsig['DTP']]]}")
+c.ok("a monotone uptrend never fires", not xsig["UPP"].any())
+c.ok("peaks further apart than max_peak_diff_pct do not fire",
+     not xsig["WIDE"].any(),
+     "two unequal highs are a trend that pulled back, not a double top")
+c.ok("a valley shallower than min_trough_depth_pct does not fire",
+     not xsig["SHLW"].any(),
+     "without it, sideways drift has 'equal peaks' and fires on every wobble")
+c.ok("required_history covers both windows",
+     exits.required_history(EX) == 1 + EX["recent_window_days"]
+     + EX["prior_window_days"])
+
+# A name that stays under its neckline satisfies the break test every night.
+loose = {**EX, "alert_only_on_break": False}
+c.ok("without the fresh-break guard the same break can repeat",
+     exits.compute_double_top(XPANEL, loose)["signal"]["DTP"].sum()
+     >= xsig["DTP"].sum(),
+     "which is exactly why alert_only_on_break defaults to true")
+
+# --------------------------------------------------------------------------
+c.section("exit-scan -- flags the position, sells at Open[t+1], never repeats")
+
+# Its own ledger, and horizons long enough that nothing settles -- an exit rule
+# only ever looks at positions still open, so a fixture whose positions all
+# closed would test nothing.
+xcfg = copy.deepcopy(cfg)
+xcfg["portfolio"] = {**cfg["portfolio"], "dir": str(TMP / "xportfolio"),
+                     "horizons": [40, 60], "exits_csv": "exits.csv"}
+xcfg["research"] = copy.deepcopy(cfg["research"])
+xcfg["research"]["history"]["dir"] = str(TMP / "xhistory")
+xcfg["exit_strategy"] = EX
+xcfg["charts"] = {**cfg.get("charts", {}), "enabled": False}
+# Empty webhook -> send_discord_alert prints instead of posting. The send path
+# is exercised; the network is not.
+xcfg["discord"] = {**cfg.get("discord", {}), "webhook_url": ""}
+
+Path(xcfg["research"]["history"]["dir"]).mkdir(parents=True, exist_ok=True)
+pd.DataFrame([{"scan_date": XDAYS[1].date().isoformat(),
+               "config_key": "breakout_strategy", "screen": "Breakout",
+               "ticker": ticker, "Company": f"{ticker} Inc", "Setup": "full",
+               "Missing": "", "Close": float(XSERIES[ticker][1])}
+              for ticker in ("DTP", "PND", "WIDE", "SHLW", "UPP")
+              ]).to_csv(signals_csv_path(xcfg), index=False)
+
+marking.price_panel = lambda tickers, oldest, config_, **_kw: XPANEL
+ledger.sync(xcfg)
+xbook = marking.mark(xcfg)
+c.ok("the exit fixture's positions are open and priced",
+     (xbook["status"].astype(str) == ledger.STATUS_OPEN).all()
+     and pd.to_numeric(xbook["entry_price"], errors="coerce").notna().all(),
+     str(dict(xbook["status"].astype(str).value_counts())))
+
+xbefore = xbook.copy()
+sold = exits.exit_scan(xcfg)
+xafter = ledger.load_positions(xcfg)
+flagged = xafter[xafter[ledger.EXIT_FLAG_COL].notna()]
+c.ok("only the two genuine double tops are flagged",
+     set(flagged["ticker"].astype(str)) == {"DTP", "PND"},
+     str(sorted(flagged["ticker"].astype(str))))
+
+dtp = flagged[flagged["ticker"] == "DTP"].iloc[0]
+c.same_date("the flag names the bar that broke the neckline",
+            pd.Timestamp(dtp[ledger.EXIT_FLAG_COL]), XDAYS[BREAK_AT])
+c.close("the sale is literally the next bar's open",
+        float(dtp["dt_exit_price"]), float(XPANEL["Open"]["DTP"].iloc[BREAK_AT + 1]),
+        tol=5e-5)
+c.close("the recorded return is exit over entry",
+        float(dtp["dt_ret_%"]),
+        100 * (float(dtp["dt_exit_price"]) / float(dtp["entry_price"]) - 1),
+        tol=1e-3)
+c.ok("the pattern's own numbers are recorded with it",
+     all(pd.notna(dtp[k]) for k in ("dt_peak1", "dt_peak2", "dt_neckline"))
+     and float(dtp["dt_neckline"]) < float(dtp["dt_peak1"]),
+     "so a later analysis can grade the pattern, not just its occurrence")
+
+# The whole point of the design: the fixed horizons keep running, so "sold on
+# the double top" and "held to the horizon" stay two measurements of one
+# position rather than two different populations.
+c.ok("the position is flagged, not closed",
+     str(dtp["status"]) == ledger.STATUS_OPEN, str(dtp["status"]))
+untouched = ["status", "entry_price", "entry_date", "shares"] + \
+    [ledger.horizon_cols(h)["ret"] for h in ledger.horizons_of(xcfg["portfolio"])]
+c.ok("no entry-side column is disturbed by an exit",
+     all(list(xafter[col].astype(str)) == list(xbefore[col].astype(str))
+         for col in untouched if col in xbefore.columns),
+     "flag-don't-close is the only reason the two exits stay comparable")
+
+# A break on the final bar has no next open to sell into. It is still a signal
+# worth announcing -- but a sell record with no exit price is not a sell.
+pnd = flagged[flagged["ticker"] == "PND"].iloc[0]
+c.ok("a break on the last bar is pending, not a sale at the close",
+     str(pnd["dt_status"]) == ledger.EXIT_PENDING, str(pnd["dt_status"]))
+c.ok("...and carries no exit price",
+     pd.isna(pd.to_numeric(pnd.get("dt_exit_price"), errors="coerce")))
+
+sells = ledger.read_table(exits_csv_path(xcfg))
+c.ok("the sell record holds only the settled sale",
+     set(sells["ticker"].astype(str)) == {"DTP"}, str(list(sells["ticker"])))
+c.ok("the sell record is the narrow schema asked for",
+     list(sells.columns) == ["position_id", "ticker", "name", "entry_date",
+                             "entry_price", "exit_date", "exit_price", "ret_%"],
+     str(list(sells.columns)))
+c.ok("it names the company, not just the symbol",
+     str(sells["name"].iloc[0]) == "DTP Inc")
+c.ok("exit_scan returns what it recorded", len(sold) == len(sells))
+
+# --------------------------------------------------------------------------
+c.section("exit-scan -- re-running changes nothing, and sync never erases it")
+
+again = exits.exit_scan(xcfg)
+sells2 = ledger.read_table(exits_csv_path(xcfg))
+c.ok("a second run records no second sell",
+     len(again) == 0 and len(sells2) == len(sells),
+     f"{len(sells2)} row(s) both times")
+c.ok("...and re-flags nothing",
+     len(ledger.load_positions(xcfg)[
+         ledger.load_positions(xcfg)[ledger.EXIT_FLAG_COL].notna()])
+     == len(flagged),
+     "an already-flagged position has had its answer")
+
+# `sync` rewrites the whole ledger from the source table every night. Without
+# EXIT_COLS in `protect`, that would erase a recorded exit with no error --
+# the same trap the tier-3 verdict carry exists to close.
+ledger.sync(xcfg)
+resynced = ledger.load_positions(xcfg)
+c.ok("a re-sync preserves every recorded exit column",
+     all(list(resynced[col].astype(str)) == list(xafter[col].astype(str))
+         for col in ledger.EXIT_COLS if col in xafter.columns),
+     "EXIT_COLS must stay inside mark_columns()")
+c.ok("the exit columns are reserved, so a source table cannot collide with them",
+     set(ledger.EXIT_COLS)
+     <= ledger.reserved_columns(ledger.horizons_of(xcfg["portfolio"])))
+
+# A closed position has no horizon left to shorten; a pending one has no entry
+# price to sell against. Neither is an exit candidate.
+mixed = resynced.copy()
+mixed["status"] = ledger.STATUS_CLOSED
+c.ok("closed positions are never exit candidates", not exits._held(mixed).any())
+mixed["status"] = ledger.STATUS_PENDING
+c.ok("pending positions are never exit candidates", not exits._held(mixed).any())
+
+off = copy.deepcopy(xcfg)
+off["exit_strategy"] = {**EX, "enabled": False}
+c.ok("exit_strategy.enabled false is a clean no-op",
+     exits.exit_scan(off).empty)
+
+# --------------------------------------------------------------------------
 c.section("nothing leaked into the real output/")
 
 c.ok("the ledger written is the redirected one",
@@ -376,6 +597,9 @@ c.ok("the ledger written is the redirected one",
 c.ok("the findings written are the redirected ones",
      str(findings_csv_path(cfg, create=False)).startswith(str(TMP))
      and findings_csv_path(cfg, create=False).exists())
+c.ok("the sell record written is the redirected one",
+     str(exits_csv_path(xcfg, create=False)).startswith(str(TMP))
+     and exits_csv_path(xcfg, create=False).exists())
 # A real ledger may legitimately exist already -- what must not happen is this
 # run touching it. Fingerprints, not existence.
 after_files = [_fingerprint(p) for p in REAL_FILES]

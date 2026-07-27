@@ -79,6 +79,26 @@ def horizon_cols(horizon: int) -> dict[str, str]:
 BASE_MARK_COLS = ["entry_date", "entry_price", "shares", "notional",
                   "mark_date", "last_close", "open_ret_%", "days_held"]
 
+# Everything only `exit-scan` ever writes: the double-top exit rule's verdict
+# on this position. Recorded here rather than in a table of its own because the
+# analysis asks which *entry* attribute predicted the return and this is the
+# competing exit -- it has to sit on the same row to be compared with the fixed
+# horizons.
+#
+# The position is flagged, never closed: `status` and every `ret_*d_%` keep
+# running, so "sold on the double top" and "held to the horizon" stay two
+# measurements of the same position rather than two different populations.
+EXIT_COLS = ["dt_signal_date", "dt_exit_date", "dt_exit_price", "dt_status",
+             "dt_ret_%", "dt_peak1", "dt_peak2", "dt_neckline"]
+
+# `dt_signal_date` is what makes the scan idempotent: a position that already
+# carries one is never re-examined, so a re-run adds no second sell row and
+# re-alerts nothing.
+EXIT_FLAG_COL = "dt_signal_date"
+
+EXIT_PENDING = "pending"     # the neckline broke; the exit bar has not traded
+EXIT_FILLED = "filled"       # sold at the next open
+
 # Columns the ledger owns, so a source table can never overwrite them by
 # happening to use the same label.
 IDENTITY_COLS = ["position_id", "scan_date", "ticker", "config_key", "source",
@@ -86,7 +106,14 @@ IDENTITY_COLS = ["position_id", "scan_date", "ticker", "config_key", "source",
 
 
 def mark_columns(horizons: list[int]) -> list[str]:
-    cols = list(BASE_MARK_COLS)
+    """Every column a *later* writer fills in, passed to `merge_history_csv`
+    as `protect=`.
+
+    `EXIT_COLS` belongs here for exactly the reason the prices do: `sync` runs
+    again every night over the whole source table, and without the carry a
+    re-sync would erase a recorded exit with no error at all.
+    """
+    cols = list(BASE_MARK_COLS) + list(EXIT_COLS)
     for h in horizons:
         cols.extend(horizon_cols(h).values())
     return cols

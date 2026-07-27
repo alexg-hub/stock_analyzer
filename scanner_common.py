@@ -1075,6 +1075,17 @@ def findings_csv_path(cfg: dict, create: bool = True) -> Path:
     return _portfolio_csv(cfg, "findings_csv", "findings.csv", create)
 
 
+def exits_csv_path(cfg: dict, create: bool = True) -> Path:
+    """The sell record -- one row per position an exit rule closed.
+
+    Deliberately its own narrow table rather than more columns on the ledger:
+    it exists to grade the *exit* rule, so it carries only what a sell is
+    (which name, in at what, out at what, when) and joins back to everything
+    else on `position_id`.
+    """
+    return _portfolio_csv(cfg, "exits_csv", "exits.csv", create)
+
+
 def history_rows(payload: dict) -> list[dict]:
     """Flatten one scan payload to one row per (scan_date, screen, ticker).
 

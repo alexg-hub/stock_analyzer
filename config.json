@@ -46,6 +46,18 @@
         "min_sma_slope_pct": null,
         "alert_only_on_cross": true
     },
+    "exit_strategy": {
+        "enabled": true,
+        "recent_window_days": 20,
+        "prior_window_days": 90,
+        "max_peak_diff_pct": 0.03,
+        "min_trough_depth_pct": 0.05,
+        "break_confirm_pct": 0.005,
+        "volume_sma_days": 30,
+        "min_volume_ratio": null,
+        "alert_only_on_break": true,
+        "discord_alert": true
+    },
     "charts": {
         "enabled": true,
         "partial_charts": true,
@@ -265,6 +277,7 @@
         "dir": "portfolio",
         "positions_csv": "positions.csv",
         "findings_csv": "findings.csv",
+        "exits_csv": "exits.csv",
         "entry": "next_open",
         "horizons": [10, 30, 60],
         "notional": 10000,

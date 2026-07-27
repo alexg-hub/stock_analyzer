@@ -23,7 +23,7 @@ the market actually did:
 | **1 — technical** | Is the chart set up? | `breakout_scanner` / `sma_pullback` / `sma_reclaim`, nightly over all 503 names | `Setup` (`full`/`partial`) + `Missing` |
 | **2 — quality** | Are the fundamentals sound? | `fundamentals.quality.rules` over the tier-1 hits only, one Yahoo pass | `Quality` (the ⭐ badge) + `Quality Missing` |
 | **3 — deep dive** | Is the *business* worth owning? | the `deep-dive` skill: Claude over Yahoo + IBKR + SEC filings + live web | a graded report + a tier/conviction verdict |
-| **4 — portfolio** | Was any of it *right*? | `portfolio_sim`: buy every recorded signal at the next open, then grade every recorded attribute against the realized return | `output/portfolio/positions.csv` + `findings.csv` |
+| **4 — portfolio** | Was any of it *right*? | `portfolio_sim`: buy every recorded signal at the next open, grade every recorded attribute against the realized return, and watch the book for a double-top exit | `output/portfolio/positions.csv` + `findings.csv` + `exits.csv` |
 
 Tiers 1 and 2 run together in `run_scanners.py` and hand off
 `output/latest_hits.json`. Tier 3 reads that file — automatically each night
@@ -61,6 +61,7 @@ Current screens:
 | `sec.py` | Tier 3 filings: EDGAR 10-Q/10-K MD&A / Risk Factors / Business sections + curated XBRL |
 | `.claude/skills/deep-dive/` | The tier-3 procedure itself — synthesis is Claude's reasoning, not a function |
 | `portfolio_sim/` | Tier 4: the virtual portfolio (`ledger` → `marking` → `analysis`, on `stats`) |
+| `portfolio_sim/exits.py` | Tier 4's exit side: the double-top detector, the sell record, the Discord warning |
 | `run_scanner.bat` / `run_deepdive.bat` | Task Scheduler entry point, and the tier-3 step it chains to |
 | `tests/` | Invariant test suite + `run_all.py` runner (no test dependency; plain scripts) |
 
@@ -585,6 +586,7 @@ leaves everything up to that point:
 | 2 | `YAHOO` (fundamentals), `QUALITY` (how many passed) |
 | 1+2 hand-off | `HANDOFF`, `ARCHIVE` |
 | 3 | `CONTEXT`, `HANDOFF`, `SCAN`, `YAHOO`, `QUANT`, `CHART`, `FACTS`, `SEC`, `RECORD`, `REPORT`, `VERDICT`, `DISCORD` |
+| 4 | `LEDGER`, `MARK`, `EXIT` (the double-top scan, plus its `DISCORD`), `ANALYZE` |
 
 The **model half** (`BASH`, `READ`, `WRITE`, `GREP`, `SEARCH`, `FETCH`, `MCP`,
 and anything `DENIED`) is not collected at runtime — Claude Code already records
@@ -710,15 +712,17 @@ trading day's open, tracks it, and — on demand — grades every attribute the
 pipeline recorded against what the stock actually did.
 
 ```powershell
-python -m portfolio_sim open      # recorded signals -> positions (no network)
-python -m portfolio_sim mark      # re-sync, fill entries, mark every horizon
-python -m portfolio_sim analyze   # -> output/portfolio/findings.csv
-python -m portfolio_sim status    # what is on the book, what can be asked yet
+python -m portfolio_sim open       # recorded signals -> positions (no network)
+python -m portfolio_sim mark       # re-sync, fill entries, mark every horizon
+python -m portfolio_sim exit-scan  # double tops on the book -> exits.csv + Discord
+python -m portfolio_sim analyze    # -> output/portfolio/findings.csv
+python -m portfolio_sim status     # what is on the book, what can be asked yet
 ```
 
-`open` and `mark` run in the nightly chain (`run_scanner.bat`, and `mark` again
-at the end of `run_deepdive.bat`). `analyze` is on demand. Nothing here ever
-touches Discord.
+`open`, `mark` and `exit-scan` run in the nightly chain (`run_scanner.bat`, and
+`mark` again at the end of `run_deepdive.bat`). `analyze` is on demand.
+`exit-scan` is the **only** command here that touches Discord — `open`, `mark`
+and `analyze` never do and must not start.
 
 ### The trade model
 
@@ -757,12 +761,92 @@ plus:
 | `qr_<rule>` | per quality rule: `True` = passed that night |
 | `Quality Rules` | the rule set in force when the signal was graded |
 | `quant_score`, `quant_<dimension>`, `qm_<metric>` | tier 3's breakdown |
+| `dt_*` | the double-top exit's verdict — see below |
 
 `qr_*` is exploded from the recorded `Quality Missing` list against the rule set
 **frozen with the position**, so retuning `fundamentals.quality.rules` later
 cannot rewrite past findings, and a rule invented after a signal was recorded
 never reads as "passed" on it. A row the scan never graded gets no `qr_*`
 columns at all — *not evaluated* is not *failed*.
+
+### The exit strategy: double top
+
+Everything above is entry-side, and the only exit is the clock. `exit-scan`
+adds a signal-driven one: it watches the names actually on the book and records
+a virtual sell when one completes a **double top** and breaks its neckline.
+
+Two equal-height peaks, a real valley between them, and a close below that
+valley:
+
+```
+    P1      P2
+     /\      /\
+    /  \    /  \
+   /    \  /    \
+  /      \/      \
+        trough    \
+  - - - - - - - - -\- - -   neckline
+                    X   <-  signal: close < trough
+```
+
+Computed vectorized over the whole panel, like every screen, as two disjoint
+trailing windows at bar `t`:
+
+| term | window |
+|---|---|
+| peak 2 | highest high of `[t-recent, t-1]` |
+| peak 1 | highest high of `[t-recent-prior, t-recent-1]` |
+| trough (neckline) | lowest low of `[t-recent, t-1]` |
+
+and four conditions: the peaks within `max_peak_diff_pct` of each other; the
+trough at least `min_trough_depth_pct` below the lower peak; the close below
+the trough by `break_confirm_pct`; and — under `alert_only_on_break` — only the
+*first* such close, so a name that stays under its neckline is announced once
+rather than every night. An optional `min_volume_ratio` adds a volume
+confirmation; `null` means the leg is off.
+
+This is a **rolling-extrema** double top, not a swing-pivot one. That is a
+deliberate approximation: it keeps the rule vectorized over the entire panel
+instead of walking each ticker's bars looking for pivots.
+
+**It flags the position; it does not close it.** `status` and every
+`ret_<h>d_%` keep running exactly as before, so the fixed horizon and the
+double-top exit become two measurements of the *same* position and a later
+analysis can ask which one you should have taken. A version that closed the
+position would answer that question by deleting the evidence.
+
+| column on the position | meaning |
+|---|---|
+| `dt_signal_date` | the bar the neckline broke |
+| `dt_exit_date` / `dt_exit_price` | the sale — `Open[t+1]`, the repo's one convention |
+| `dt_status` | `pending` (the exit bar has not traded) / `filled` |
+| `dt_ret_%` | the sale against the entry price |
+| `dt_peak1`, `dt_peak2`, `dt_neckline` | the pattern's own numbers |
+
+The sell record itself is a separate, deliberately narrow table —
+`output/portfolio/exits.csv`, one row per position ever exited:
+
+```
+position_id, ticker, name, entry_date, entry_price, exit_date, exit_price, ret_%
+```
+
+Narrow on purpose: it exists to grade the *exit* rule, and everything else
+about the position joins back on `position_id`. A `pending` exit writes no row
+— a sell with no exit price is not a sell — but the position is still flagged
+and the alert still fires, and the row lands on the next run.
+
+Detection scans every bar **since entry**, not just the last one. So the step
+is idempotent (a second run in the same night records nothing new and re-alerts
+nothing) and self-healing: a night the scan did not run is picked up by the
+next one instead of being lost.
+
+A red Discord card goes out for each newly flagged position, with a chart under
+`output/portfolio/exit_charts/`. `--no-send` records the exit without posting.
+
+> This is **not** a screen, and must not be registered in
+> `run_scanners.SCANNERS` or `backtest.screens`. Both consumers read a signal as
+> a *buy*: `backtest_universe.forward_trades` would happily score "buy the
+> neckline break, sell 30 days later", the exact inverse of what it means.
 
 ### The findings file
 
@@ -939,7 +1023,7 @@ small differences as noise.
 | `research.synthesis.*` | — | Quant-score dimensions/weights, conviction tier bands, narrative adjustment cap |
 | `portfolio.enabled` | `true` | Run tier 4 at all; `false` makes every subcommand a no-op |
 | `portfolio.dir` | `portfolio` | Ledger + findings directory, resolved inside `output/` |
-| `portfolio.positions_csv` / `.findings_csv` | `positions.csv` / `findings.csv` | The two tables, in that directory |
+| `portfolio.positions_csv` / `.findings_csv` / `.exits_csv` | `positions.csv` / `findings.csv` / `exits.csv` | The three tables, in that directory |
 | `portfolio.entry` | `next_open` | Fill convention, same values as `backtest.entry` |
 | `portfolio.horizons` | `[10, 30, 60]` | Holding periods in **trading** days that each position is marked at |
 | `portfolio.notional` | `10000` | Fixed cash per signal. No cash constraint, so a return never depends on which trade got funded first |
@@ -950,17 +1034,33 @@ small differences as noise.
 | `portfolio.analysis.bootstrap_iters` | `2000` | Resamples behind each difference-in-means CI |
 | `portfolio.analysis.fdr` | `true` | Key `significant` off `q_value`; `false` falls back to the raw p (don't) |
 | `portfolio.analysis.keep_dated_findings` | `true` | Also write `findings_<date>.csv` per run |
+| `exit_strategy.enabled` | `true` | Run `exit-scan` at all; `false` makes it a clean no-op |
+| `exit_strategy.recent_window_days` | `20` | Bars holding the second peak **and** the trough |
+| `exit_strategy.prior_window_days` | `90` | Bars before those, holding the first peak |
+| `exit_strategy.max_peak_diff_pct` | `0.03` | How near-equal the two peaks must be, or it is a trend that pulled back |
+| `exit_strategy.min_trough_depth_pct` | `0.05` | How far the valley must sit below the lower peak, or sideways drift fires |
+| `exit_strategy.break_confirm_pct` | `0.005` | How far below the neckline the close must be |
+| `exit_strategy.volume_sma_days` | `30` | Baseline for the optional volume confirmation |
+| `exit_strategy.min_volume_ratio` | `null` | Volume confirmation on the break; `null` = leg off |
+| `exit_strategy.alert_only_on_break` | `true` | Only the first close under the neckline, so a name below it is announced once |
+| `exit_strategy.discord_alert` | `true` | Post the exit card; `--no-send` overrides per run |
 
 ## Nightly schedule (Windows Task Scheduler)
 
 The scan runs Mon–Fri at **23:30 Israel time** (~30 min after the 16:00 ET US
 market close) via the task **"SP500 Breakout Scanner"**, which executes
 `run_scanner.bat` and appends all output to `output/scanner_log.txt`. That batch
-file then runs tier 4's `open` + `mark`, and chains to `run_deepdive.bat`
-(tier 3 → `output/deepdive_log.txt`, which ends with a second tier-4 `mark` so
-tonight's verdict lands on tonight's position). One task covers all four tiers:
-the scan alert reaches Discord within a couple of minutes, the deep-dive
-verdicts follow later, and the ledger is updated at both ends.
+file then runs tier 4's `open` + `mark` + `exit-scan`, and chains to
+`run_deepdive.bat` (tier 3 → `output/deepdive_log.txt`, which ends with a second
+tier-4 `mark` so tonight's verdict lands on tonight's position). One task covers
+all four tiers: the scan alert reaches Discord within a couple of minutes, an
+exit warning follows if a held name broke its neckline, the deep-dive verdicts
+follow later, and the ledger is updated at both ends.
+
+`exit-scan` runs after `mark` because it only looks at positions whose entry
+price has been filled. It needs no separate schedule: detection searches every
+bar since entry, so a night the task did not run is picked up by the next one
+rather than lost.
 
 > **`ExecutionTimeLimit` must cover tier 3.** The scan alone finishes in about a
 > minute, but five deep-dives take considerably longer, and Task Scheduler kills

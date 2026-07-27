@@ -1,14 +1,20 @@
 """Tier 4 CLI.
 
-    python -m portfolio_sim open      # recorded signals -> virtual positions
-    python -m portfolio_sim mark      # fill entries, mark every horizon
-    python -m portfolio_sim analyze   # the attribution report -> findings.csv
-    python -m portfolio_sim status    # what is on the book, what can be asked
+    python -m portfolio_sim open       # recorded signals -> virtual positions
+    python -m portfolio_sim mark       # fill entries, mark every horizon
+    python -m portfolio_sim exit-scan  # double tops on the book -> exits.csv
+    python -m portfolio_sim analyze    # the attribution report -> findings.csv
+    python -m portfolio_sim status     # what is on the book, what can be asked
 
-`open` and `mark` run in the nightly chain, so by default they **report** a
-failure and exit 0: a broken ledger must never take down the scan or the deep
-dive that produced the signals in the first place. `--strict` restores a
-nonzero exit for a manual run.
+`open`, `mark` and `exit-scan` run in the nightly chain, so by default they
+**report** a failure and exit 0: a broken ledger must never take down the scan
+or the deep dive that produced the signals in the first place. `--strict`
+restores a nonzero exit for a manual run.
+
+`exit-scan` is the only tier-4 command that sends to Discord, and the only one
+that can: a double top on a held name is actionable the day it happens, while
+`open`/`mark`/`analyze` are bookkeeping and a measurement does not need
+announcing. `--no-send` records the exit without posting.
 
 `mark` re-syncs the ledger before pricing it. That is not redundancy -- tier 3
 writes its verdict hours after tier 1 wrote the row, so a `mark` at the end of
@@ -23,13 +29,13 @@ import pandas as pd
 
 from scanner_common import enable_utf8_output, load_config, log_step, run_id
 
-from . import analysis, ledger, marking
+from . import analysis, exits, ledger, marking
 
 # The step-log phase each command reports under, so a line in
 # output/logs/<run_id>.log names what actually ran rather than which module
 # happened to own the entry point.
-PHASE = {"open": "LEDGER", "mark": "MARK", "analyze": "ANALYZE",
-         "status": "LEDGER"}
+PHASE = {"open": "LEDGER", "mark": "MARK", "exit-scan": "EXIT",
+         "analyze": "ANALYZE", "status": "LEDGER"}
 
 
 def _status(cfg: dict) -> int:
@@ -50,6 +56,14 @@ def _status(cfg: dict) -> int:
         settled = len(analysis.closed(positions, horizon))
         print(f"  {horizon:>3}d horizon: {settled} settled return(s)")
 
+    # The exit side. Reported next to the horizons because that is the
+    # comparison it exists to support: the same positions, exited two ways.
+    if ledger.EXIT_FLAG_COL in positions.columns:
+        flagged = positions[positions[ledger.EXIT_FLAG_COL].notna()]
+        sold = (flagged["dt_status"].astype(str) == ledger.EXIT_FILLED).sum() \
+            if "dt_status" in flagged.columns else 0
+        print(f"  double tops: {len(flagged)} flagged, {sold} sold")
+
     min_n = int(cfg.get("portfolio", {}).get("analysis", {}).get("min_n", 20))
     best = max((len(analysis.closed(positions, h)) for h in horizons), default=0)
     if best < min_n:
@@ -65,10 +79,14 @@ def main(argv: list[str] | None = None) -> int:
         description="Tier 4: virtually buy every recorded signal and grade "
                     "which of its attributes predicted the return.")
     parser.add_argument("command",
-                        choices=["open", "mark", "analyze", "status"])
+                        choices=["open", "mark", "exit-scan", "analyze",
+                                 "status"])
     parser.add_argument("--strict", action="store_true",
                         help="exit nonzero on failure (default: report and "
                              "exit 0, so the nightly chain survives)")
+    parser.add_argument("--no-send", action="store_true",
+                        help="exit-scan: record the exit but do not post it "
+                             "to Discord")
     parser.add_argument("--no-baseline", action="store_true",
                         help="analyze: skip the random-entry baseline, which "
                              "reads backtest_universe's cached panel")
@@ -93,6 +111,10 @@ def main(argv: list[str] | None = None) -> int:
             frame = marking.mark(cfg)
             if not frame.empty and "status" in frame:
                 print(dict(frame["status"].astype(str).value_counts()))
+            return 0
+        if args.command == "exit-scan":
+            sold = exits.exit_scan(cfg, send=not args.no_send)
+            print(f"exits: {len(sold)} sell(s) recorded")
             return 0
         findings = analysis.analyze(cfg, baseline=not args.no_baseline)
         if not findings.empty:

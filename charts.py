@@ -253,6 +253,58 @@ def plot_pullback(table: pd.DataFrame, strategy: dict, ticker: str,
 
 
 # --------------------------------------------------------------------------
+# Double-top exit chart
+# --------------------------------------------------------------------------
+
+def plot_double_top(table: pd.DataFrame, strategy: dict, ticker: str,
+                    out_path: Path, dpi: int = 120,
+                    lookback_days: int = 250) -> None:
+    """Price + volume chart of the double-top calc table
+    (columns as produced by portfolio_sim.exits.build_calc_table).
+
+    The only chart in this module that marks a *sell*. It uses the same two
+    hues as every other one -- blue for the series, orange for the event --
+    because the palette has exactly two, and the card's red side bar is what
+    carries the "this is an exit" meaning.
+    """
+    recent = strategy.get("recent_window_days", 20)
+    prior = strategy.get("prior_window_days", 90)
+    view = table.tail(lookback_days) if lookback_days else table
+    hits = view[view["SIGNAL"].fillna(False)]
+
+    fig, ax_p, ax_v = _two_panel_figure()
+
+    # -- price panel: the two peak levels, the neckline, close, the break --
+    ax_p.plot(view.index, view["PEAK2"], color=C["ink2"], linewidth=1.1,
+              linestyle=":", label=f"peak of last {recent}d")
+    ax_p.plot(view.index, view["PEAK1"], color=C["ink2"], linewidth=1.1,
+              linestyle="--", label=f"peak of prior {prior}d")
+    ax_p.plot(view.index, view["NECKLINE"], color=C["event"], linewidth=1.3,
+              linestyle="--", label="neckline")
+    ax_p.fill_between(view.index, view["NECKLINE"], view["PEAK2"],
+                      color=C["grid"], alpha=0.45, linewidth=0)
+    ax_p.plot(view.index, view["Close"], color=C["close"], linewidth=2,
+              label="close")
+    _mark_signals(ax_p, hits, "Close", "neckline break")
+    ax_p.set_ylabel("Price (USD)", color=C["ink2"], fontsize=10)
+    ax_p.legend(loc="upper left", frameon=False, fontsize=9, labelcolor=C["ink2"])
+
+    ax_v.bar(view.index, view["Volume"] / 1e6, color=C["axis"], width=1.0)
+    ax_v.set_ylabel("Volume (M)", color=C["ink2"], fontsize=10)
+
+    n_sig = len(hits)
+    subtitle = (f"{n_sig} break day(s)" if n_sig else "no break days") + \
+        f" -- peaks within {strategy.get('max_peak_diff_pct', 0.0):.1%}, " \
+        f"trough >= {strategy.get('min_trough_depth_pct', 0.0):.1%} below, " \
+        f"close < neckline by {strategy.get('break_confirm_pct', 0.0):.2%}"
+    _title(ax_p, f"{ticker} -- double top, neckline break", subtitle)
+
+    fig.savefig(out_path, dpi=dpi, bbox_inches="tight", facecolor=C["surface"])
+    plt.close(fig)
+    print(f"Chart saved to {out_path}")
+
+
+# --------------------------------------------------------------------------
 # Universe-backtest summary
 # --------------------------------------------------------------------------
 

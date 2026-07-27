@@ -28,6 +28,13 @@ rem the scan or the deep dive. Same 2>&1, same reason -- the step log is stderr.
 "C:\Users\Lenovo\AppData\Local\Microsoft\WindowsApps\python.exe" -m portfolio_sim open >> output\scanner_log.txt 2>&1
 "C:\Users\Lenovo\AppData\Local\Microsoft\WindowsApps\python.exe" -m portfolio_sim mark >> output\scanner_log.txt 2>&1
 
+rem The exit side: double tops on the names already held. After `mark`, because
+rem it only looks at positions whose entry price has been filled. This is the
+rem one tier-4 step that posts to Discord -- and it only does so for a position
+rem it has just flagged, so a name that stays under its neckline is announced
+rem once, not every night.
+"C:\Users\Lenovo\AppData\Local\Microsoft\WindowsApps\python.exe" -m portfolio_sim exit-scan >> output\scanner_log.txt 2>&1
+
 rem Tier 3 runs off the hand-off the scan just wrote, so the Discord alert lands
 rem first and the deep-dive verdicts follow a while later. It logs separately and
 rem skips itself when nothing qualifies.

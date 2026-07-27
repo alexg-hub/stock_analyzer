@@ -49,21 +49,29 @@ QUANT_PREFIX = "quant_"
 QUANT_METRIC_PREFIX = "qm_"
 
 
-def _period_for(oldest: pd.Timestamp, horizons: list[int]) -> str:
+def _period_for(oldest: pd.Timestamp, horizons: list[int],
+                extra_bars: int = 0) -> str:
     """A yfinance period long enough to cover the oldest open position.
 
     Padded by the longest horizon plus `warmup_months`' own slack, so the exit
     bar of the oldest position is inside the window even when it has not
     printed yet.
+
+    `extra_bars` is a *lookback* floor for a caller that needs history before
+    the oldest position rather than after it -- the exit scan's pattern window
+    has to be filled or the rolling extrema are NaN and it can never fire.
     """
     days = (pd.Timestamp.today().normalize() - oldest).days
     months = math.ceil(days / 30) + warmup_months(max(horizons)) + 1
+    if extra_bars:
+        months += warmup_months(extra_bars)
     if months <= 6:
         return "6mo"
     return f"{math.ceil(months / 12)}y"
 
 
-def price_panel(tickers: list[str], oldest: pd.Timestamp, cfg: dict) -> pd.DataFrame:
+def price_panel(tickers: list[str], oldest: pd.Timestamp, cfg: dict,
+                extra_bars: int = 0) -> pd.DataFrame:
     """Daily bars for the tickers actually held, plus the benchmark.
 
     Deliberately a fresh download rather than `backtest_universe`'s cached
@@ -74,7 +82,7 @@ def price_panel(tickers: list[str], oldest: pd.Timestamp, cfg: dict) -> pd.DataF
     """
     port_cfg = cfg.get("portfolio", {})
     interval = cfg.get("data", {}).get("download_interval", "1d")
-    period = _period_for(oldest, horizons_of(port_cfg))
+    period = _period_for(oldest, horizons_of(port_cfg), extra_bars)
     panel = download_price_data(tickers, period, interval)
     return drop_unsettled_tail(panel)
 

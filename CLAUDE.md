@@ -17,7 +17,9 @@ profit backtest, a threshold tuner).
 4. **Tier 4 — the virtual portfolio.** `portfolio_sim/` buys every recorded
    signal at the next open, tracks it, and grades which recorded attribute
    actually predicted the return. Tiers 1–3 decide what looks interesting;
-   this is the only thing that ever checks whether any of it was right.
+   this is the only thing that ever checks whether any of it was right. It also
+   owns the repo's **only exit rule** (`exits.py`, the double top) — everything
+   else here is entry-side.
 
 Tiers 1+2 are `run_scanners.py`: one combined Discord alert (text + per-signal
 chart images) and the `output/latest_hits.json` hand-off. Tier 3 reads that
@@ -84,10 +86,13 @@ type output\logs\<run_id>.log
 # in the "Deep-dive started" banner in output/deepdive_log.txt).
 python research_report.py log-session <run_id> <session_id>
 
-# Tier 4: the virtual portfolio. `open` and `mark` both run in the nightly
-# chain; `analyze` is on demand. No Discord, ever.
+# Tier 4: the virtual portfolio. `open`, `mark` and `exit-scan` run in the
+# nightly chain; `analyze` is on demand. `exit-scan` is the ONLY subcommand
+# that touches Discord -- the other three never do.
 python -m portfolio_sim open        # recorded signals -> positions (no network)
 python -m portfolio_sim mark        # re-sync, fill entries, mark every horizon
+python -m portfolio_sim exit-scan   # double tops on the book -> exits.csv + alert
+python -m portfolio_sim exit-scan --no-send     # record the exit, post nothing
 python -m portfolio_sim analyze     # -> output/portfolio/findings.csv
 python -m portfolio_sim analyze --no-baseline   # skip the cached-panel baseline
 python -m portfolio_sim status      # what is on the book, what can be asked yet
@@ -233,7 +238,7 @@ real send.
   `scanner_common.log_step` / `step()`. Tiers 1+2 use `SCAN`, `UNIVERSE`,
   `DOWNLOAD`, `SCREEN`, `YAHOO`, `QUALITY`, `HANDOFF`, `ARCHIVE`, `CHARTS`;
   tier 3 adds `CONTEXT`, `QUANT`, `SEC`, `FACTS`, `RECORD`, `REPORT`, `VERDICT`;
-  tier 4 adds `LEDGER`, `MARK`, `ANALYZE`.
+  tier 4 adds `LEDGER`, `MARK`, `EXIT`, `ANALYZE`.
   `run_scanner.bat` mints the id and exports it, and `run-id` **inherits** it
   (`run_id()`, not `new_run_id()`), so the whole nightly chain is one file.
   Three rules hold it together:
@@ -346,6 +351,40 @@ real send.
     rule as `_row_quality`/`_has_fundamentals`. `mark` adds tier 3's
     `quant_score`, per-dimension `quant_*` and `qm_*` metrics from
     `<T>_<date>_facts.json`.
+  - **`exits.py` is the exit side, and it flags rather than closes.** The
+    double-top rule writes `dt_*` onto the position and leaves `status` and
+    every `ret_*d_%` running, so the fixed horizon and the signal exit stay two
+    measurements of the **same** position — which is the only way a later
+    analysis can ask which one you should have taken. A version that closed the
+    position would answer that question by deleting the evidence. Four
+    consequences:
+    - **It is not a screen.** Never register it in `run_scanners.SCANNERS` or
+      `backtest.screens`: both read a signal as a *buy*, so
+      `backtest_universe.forward_trades` would score "buy the neckline break,
+      sell 30 days later" — the exact inverse of what it means.
+    - **`EXIT_COLS` must stay inside `ledger.mark_columns()`.** That is what
+      puts them in `sync`'s `protect=`, and without it the nightly re-sync
+      erases a recorded exit with no error at all — the same trap the tier-3
+      verdict carry exists to close. A test pins it.
+    - **Detection scans every bar since entry, not `.iloc[-1]`**, and a
+      position already carrying `dt_signal_date` is skipped. That is what makes
+      the step idempotent *and* lets a night the scan did not run be picked up
+      by the next one. Don't "optimize" it to the last bar.
+    - **A `pending` exit writes no `exits.csv` row** (a sell with no exit price
+      is not a sell) but is still flagged and still alerted — the signal is
+      what's actionable tonight. The row lands on the next run.
+    The condition math is a **rolling-extrema** double top (two disjoint
+    `shift().rolling()` windows), not a swing-pivot walk. That is a deliberate
+    approximation that keeps it vectorized over the whole panel like every
+    `compute_*`; don't turn it into a per-ticker loop.
+  - **`exit-scan` is the one tier-4 command that speaks to Discord.** `open`,
+    `mark` and `analyze` never do and must not start — they are bookkeeping,
+    and a measurement does not need announcing. An exit is different: it is the
+    only thing tier 4 produces that is actionable on the day it happens. It
+    alerts only for positions it flagged *on that run*, so a name that sits
+    under its neckline is announced once, not nightly. Its charts go to
+    `portfolio_dir(cfg)/exit_charts/`, **not** `output_dir()`, so redirecting
+    the ledger in a test redirects the PNGs with it.
   - **A zero-signal night writes a headerless `signals.csv`.** `archive_scan`
     with no rows hands `merge_history_csv` an empty frame, which `to_csv`
     writes as a **zero-byte** file, and `pd.read_csv` raises `EmptyDataError`
@@ -512,8 +551,9 @@ real send.
 - `config.json` holds the **live Discord webhook URL** and is committed on
   purpose (private repo). Never paste it into issues/PRs or public output.
 - Nightly run: Task Scheduler task **"SP500 Breakout Scanner"**, Mon–Fri 23:30
-  Israel time → `run_scanner.bat` (tiers 1+2, then tier 4's `open`+`mark` →
-  `output/scanner_log.txt`) → `run_deepdive.bat` (tier 3, then a second tier-4
+  Israel time → `run_scanner.bat` (tiers 1+2, then tier 4's
+  `open`+`mark`+`exit-scan` → `output/scanner_log.txt`) → `run_deepdive.bat`
+  (tier 3, then a second tier-4
   `mark` to pick up tonight's verdict → `output/deepdive_log.txt`). One task,
   all four tiers. README's "Nightly schedule" section has the exact
   `Register-ScheduledTask` command and diagnostics; keep it in sync if the
