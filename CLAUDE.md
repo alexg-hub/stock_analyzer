@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A **three-tier stock filter** running nightly on this Windows machine via Task
+A **four-tier stock filter** running nightly on this Windows machine via Task
 Scheduler, plus historical tooling (single-ticker backtesters, a universe-wide
 profit backtest, a threshold tuner).
 
@@ -14,11 +14,16 @@ profit backtest, a threshold tuner).
    hits only. Records `Quality` (the ⭐ badge) + `Quality Missing`.
 3. **Tier 3 — deep dive.** The `deep-dive` skill over Yahoo + IBKR + SEC + web,
    producing a graded report per ticker.
+4. **Tier 4 — the virtual portfolio.** `portfolio_sim/` buys every recorded
+   signal at the next open, tracks it, and grades which recorded attribute
+   actually predicted the return. Tiers 1–3 decide what looks interesting;
+   this is the only thing that ever checks whether any of it was right.
 
 Tiers 1+2 are `run_scanners.py`: one combined Discord alert (text + per-signal
 chart images) and the `output/latest_hits.json` hand-off. Tier 3 reads that
 hand-off, both automatically (`run_deepdive.bat`, chained from
-`run_scanner.bat`) and on demand.
+`run_scanner.bat`) and on demand. Tier 4 reads the two history CSVs and runs
+from both `.bat` files.
 
 Validation is `python tests/run_all.py` — plain scripts, no test dependency,
 asserting **invariants** rather than recorded output (config gets retuned
@@ -78,6 +83,14 @@ type output\logs\<run_id>.log
 # Complete the log of a run that was killed before log-session ran (the ids are
 # in the "Deep-dive started" banner in output/deepdive_log.txt).
 python research_report.py log-session <run_id> <session_id>
+
+# Tier 4: the virtual portfolio. `open` and `mark` both run in the nightly
+# chain; `analyze` is on demand. No Discord, ever.
+python -m portfolio_sim open        # recorded signals -> positions (no network)
+python -m portfolio_sim mark        # re-sync, fill entries, mark every horizon
+python -m portfolio_sim analyze     # -> output/portfolio/findings.csv
+python -m portfolio_sim analyze --no-baseline   # skip the cached-panel baseline
+python -m portfolio_sim status      # what is on the book, what can be asked yet
 ```
 
 To test alert formatting/sending without spamming the channel, monkeypatch
@@ -207,7 +220,8 @@ real send.
   one line per step — timestamp, phase, status, short description — built by
   `scanner_common.log_step` / `step()`. Tiers 1+2 use `SCAN`, `UNIVERSE`,
   `DOWNLOAD`, `SCREEN`, `YAHOO`, `QUALITY`, `HANDOFF`, `ARCHIVE`, `CHARTS`;
-  tier 3 adds `CONTEXT`, `QUANT`, `SEC`, `FACTS`, `RECORD`, `REPORT`, `VERDICT`.
+  tier 3 adds `CONTEXT`, `QUANT`, `SEC`, `FACTS`, `RECORD`, `REPORT`, `VERDICT`;
+  tier 4 adds `LEDGER`, `MARK`, `ANALYZE`.
   `run_scanner.bat` mints the id and exports it, and `run-id` **inherits** it
   (`run_id()`, not `new_run_id()`), so the whole nightly chain is one file.
   Three rules hold it together:
@@ -286,11 +300,74 @@ real send.
   (`Setup: "none"`), because the quality check is usually the point of asking.
   Its `scan_date` comes from its own price data, not from `latest_hits.json`:
   the stale nightly date would collapse two separate looks into one CSV row.
+- **Tier 4 is `portfolio_sim/`** — the only package in the repo; everything else
+  stays flat in the root, and `scanner_common.PROJECT_ROOT` still depends on
+  that, so don't "fix" it. `python -m portfolio_sim <open|mark|analyze|status>`;
+  `portfolio_sim/__init__.py` puts the root on `sys.path` so an invocation from
+  another cwd still resolves the flat modules. Its own output directory,
+  `output/portfolio/` (`scanner_common.portfolio_dir`), because a position is
+  rewritten on every mark while `history/` records what the scan saw and is
+  never revised. The rules that hold it together:
+  - **`open` and `mark` are separate because the entry price does not exist
+    yet.** The nightly run fires after the US close, so `Open[t+1]` is most of
+    a day away: `open` records the position as `pending` and `mark` fills it
+    later. A pending row has no entry price and is in no statistic — never
+    "fill" one at the signal close to make the ledger look complete.
+  - **The arithmetic is `backtest_universe.forward_trades`, not a second copy.**
+    One next-day-open convention in the repo (buy `Open[i+1]`, sell
+    `Close[i+1+h]`, MFE/MAE rolled-then-shifted) means a ledger return and a
+    universe-backtest return are the same measurement. A test asserts they
+    agree cell for cell. `mark` downloads only the held tickers + benchmark
+    rather than reading `backtest_universe_cache.pkl`, which is a day stale at
+    best and keyed to a fixed universe.
+  - **`mark` re-syncs the ledger first**, which is why it also runs at the end
+    of `run_deepdive.bat`: tier 3 writes its verdict hours after tier 1 wrote
+    the row, and the verdict is exactly the attribute tier 4 exists to grade.
+    Both commands **exit 0 on failure** by design (`--strict` flips it) — a
+    broken ledger must never take down the scan or the deep dive.
+  - **The row carries the whole source row plus point-in-time derivations.**
+    `Quality Missing` is exploded into `qr_<rule>` booleans against the rule set
+    **recorded with the position** (`Quality Rules`, frozen at first sight), so
+    retuning `fundamentals.quality.rules` cannot rewrite past findings and a
+    rule invented later never reads as "passed" on an older signal. Absent
+    quality means *no* `qr_*` columns — "not evaluated" is not "failed", same
+    rule as `_row_quality`/`_has_fundamentals`. `mark` adds tier 3's
+    `quant_score`, per-dimension `quant_*` and `qm_*` metrics from
+    `<T>_<date>_facts.json`.
+  - **A zero-signal night writes a headerless `signals.csv`.** `archive_scan`
+    with no rows hands `merge_history_csv` an empty frame, which `to_csv`
+    writes as a **zero-byte** file, and `pd.read_csv` raises `EmptyDataError`
+    on it. Every read of a history table goes through `ledger.read_table`,
+    which treats missing, zero-byte and headerless alike as "nothing recorded
+    yet". Found by the 2026-07-27 nightly shakedown: a fresh install whose
+    first night was quiet would have logged a ledger failure every night until
+    something finally fired. A test pins it.
+  - **`analyze` never over-claims.** Significance is keyed off a
+    Benjamini–Hochberg `q_value` over the whole file, not a raw p — it runs
+    dozens of tests on one thin sample, and ranking by p would reliably crown
+    noise. Every row also carries `sufficient_n`; a thin one is still written,
+    marked, and says so in its own `conclusion`. Ticker-level attributes are
+    de-duplicated on `(scan_date, ticker)` first (the two-screen problem above),
+    and on-demand rows are excluded from "which screen paid" — they had no
+    trigger, so they are not a screen. **Every conclusion sentence is generated
+    in Python.** Same rule as tier 3's chart: a measurement narrated by a model
+    is a measurement you cannot check.
+  - **The `roadmap` section is why an empty report is still legible.** A cohort
+    with no settled returns produces no statistics, so without it the question
+    would simply be *missing* and a reader could not tell that from "asked and
+    came back empty". It lists every question, its recorded group sizes, and
+    what each is still short of. Today that section *is* the report.
+  - No scipy: `portfolio_sim/stats.py` implements Mann-Whitney (tie-corrected,
+    continuity-corrected), Welch's t, Spearman, a bootstrap CI and BH-FDR, each
+    pinned against a hand-computed value in the tests. p-values are normal
+    approximations — acceptable only because `sufficient_n` and `q_value` gate
+    every claim.
 - **Every generated file goes to `output/`** via
   `scanner_common.output_dir()` — logs, `latest_hits.json`, the cached price
   panel, all backtest tables/charts, the tier-3 reports (`output/reports/`), the
-  signal history (`output/history/`) and the deep-dive step logs
-  (`output/logs/`). There are no exceptions; Google Drive
+  signal history (`output/history/`), the deep-dive step logs
+  (`output/logs/`) and the tier-4 ledger and findings (`output/portfolio/`).
+  There are no exceptions; Google Drive
   was one until 2026-07-26 and was removed, partly because Claude Code cannot
   `--add-dir` a path containing the U+200F mark in that folder's name. The
   project root holds only inputs (code, `config.json`, docs); `output/` is
@@ -300,7 +377,9 @@ real send.
   `reports`, `history`, …) which `output_dir()` resolves, so an absolute path in
   config keeps overriding it (which is how the tests redirect them) and no
   sub-paths leak into config. `PROJECT_ROOT` assumes the code is flat in the
-  repo root — the one line to revisit if modules ever move into a package. All
+  repo root and **still holds** — `portfolio_sim/` is a package but
+  `scanner_common.py` is not in it; that line only needs revisiting if the flat
+  modules themselves move. All
   three `.bat` files must keep their `if not exist output md output` guard:
   `cmd` expands `>>` before Python runs, so `output_dir()`'s `mkdir` would be
   too late.
@@ -421,9 +500,10 @@ real send.
 - `config.json` holds the **live Discord webhook URL** and is committed on
   purpose (private repo). Never paste it into issues/PRs or public output.
 - Nightly run: Task Scheduler task **"SP500 Breakout Scanner"**, Mon–Fri 23:30
-  Israel time → `run_scanner.bat` (tiers 1+2 → `output/scanner_log.txt`) →
-  `run_deepdive.bat` (tier 3 → `output/deepdive_log.txt`). One task, all three
-  tiers. README's "Nightly schedule" section has the exact
+  Israel time → `run_scanner.bat` (tiers 1+2, then tier 4's `open`+`mark` →
+  `output/scanner_log.txt`) → `run_deepdive.bat` (tier 3, then a second tier-4
+  `mark` to pick up tonight's verdict → `output/deepdive_log.txt`). One task,
+  all four tiers. README's "Nightly schedule" section has the exact
   `Register-ScheduledTask` command and diagnostics; keep it in sync if the
   schedule changes. Result code `3221225786` in `Get-ScheduledTaskInfo` means
   the run was killed mid-scan (usually PC shutdown), and that night's alert is

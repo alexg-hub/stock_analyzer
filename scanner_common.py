@@ -1040,6 +1040,41 @@ def on_demand_csv_path(cfg: dict, create: bool = True) -> Path:
                         create)
 
 
+# -- Tier 4: the virtual portfolio -----------------------------------------
+#
+# Its own directory rather than a fourth file in `history/`, because the
+# ledger is a *derived* table with a different lifecycle: history records what
+# the scan saw and is never revised, while a position is rewritten on every
+# mark. Same config convention as everything else -- bare filenames that
+# `output_dir()` resolves, absolute paths still overriding (how the tests
+# redirect them).
+
+def portfolio_dir(cfg: dict, create: bool = True) -> Path:
+    """Where the virtual portfolio lives (`portfolio.dir` under output/)."""
+    path = Path(cfg.get("portfolio", {}).get("dir", "portfolio"))
+    if not path.is_absolute():
+        path = output_dir(create) / path
+    if create:
+        path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _portfolio_csv(cfg: dict, key: str, default: str, create: bool = True) -> Path:
+    port_cfg = cfg.get("portfolio", {})
+    path = Path(port_cfg.get(key, default))
+    return path if path.is_absolute() else portfolio_dir(cfg, create) / path
+
+
+def positions_csv_path(cfg: dict, create: bool = True) -> Path:
+    """The ledger -- one row per virtually bought (signal_date, ticker, screen)."""
+    return _portfolio_csv(cfg, "positions_csv", "positions.csv", create)
+
+
+def findings_csv_path(cfg: dict, create: bool = True) -> Path:
+    """The attribution report the analysis writes."""
+    return _portfolio_csv(cfg, "findings_csv", "findings.csv", create)
+
+
 def history_rows(payload: dict) -> list[dict]:
     """Flatten one scan payload to one row per (scan_date, screen, ticker).
 

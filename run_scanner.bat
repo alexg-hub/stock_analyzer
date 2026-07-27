@@ -19,6 +19,15 @@ rem 2>&1 matters: the step log writes to stderr, so scanner_log.txt keeps it.
 "C:\Users\Lenovo\AppData\Local\Microsoft\WindowsApps\python.exe" run_scanners.py >> output\scanner_log.txt 2>&1
 echo ==== Scan finished %date% %time% (exit %errorlevel%) ==== >> output\scanner_log.txt
 
+rem Tier 4: ledger tonight's signals as virtual positions straight away, then
+rem price the book. `open` first and on its own line so the signal is recorded
+rem even if the download in `mark` fails -- the ledger is the thing that cannot
+rem be reconstructed later, the prices always can. Both exit 0 on failure by
+rem design (see portfolio_sim/__main__.py): a broken ledger must never take down
+rem the scan or the deep dive. Same 2>&1, same reason -- the step log is stderr.
+"C:\Users\Lenovo\AppData\Local\Microsoft\WindowsApps\python.exe" -m portfolio_sim open >> output\scanner_log.txt 2>&1
+"C:\Users\Lenovo\AppData\Local\Microsoft\WindowsApps\python.exe" -m portfolio_sim mark >> output\scanner_log.txt 2>&1
+
 rem Tier 3 runs off the hand-off the scan just wrote, so the Discord alert lands
 rem first and the deep-dive verdicts follow a while later. It logs separately and
 rem skips itself when nothing qualifies.

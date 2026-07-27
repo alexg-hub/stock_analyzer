@@ -259,5 +259,23 @@
                 }
             }
         }
+    },
+    "portfolio": {
+        "enabled": true,
+        "dir": "portfolio",
+        "positions_csv": "positions.csv",
+        "findings_csv": "findings.csv",
+        "entry": "next_open",
+        "horizons": [10, 30, 60],
+        "notional": 10000,
+        "benchmark_ticker": "SPY",
+        "measure_excursions": true,
+        "analysis": {
+            "min_n": 20,
+            "alpha": 0.05,
+            "bootstrap_iters": 2000,
+            "fdr": true,
+            "keep_dated_findings": true
+        }
     }
 }

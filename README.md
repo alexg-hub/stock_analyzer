@@ -12,22 +12,26 @@ Each screen reports **one signal list with two tiers** (there is no separate
 when the setup is incomplete, with `Missing` naming the failing test. Full
 setups are listed first. See [Signal tiers](#signal-tiers).
 
-## The three-tier pipeline
+## The four-tier pipeline
 
-The scan is the first of three filters, each narrowing the last and each
-recording its verdict so the next one can read it:
+The scan is the first of four stages. The first three narrow, each recording
+its verdict so the next can read it; the fourth grades all three against what
+the market actually did:
 
 | tier | what it asks | how | output |
 |---|---|---|---|
 | **1 — technical** | Is the chart set up? | `breakout_scanner` / `sma_pullback` / `sma_reclaim`, nightly over all 503 names | `Setup` (`full`/`partial`) + `Missing` |
 | **2 — quality** | Are the fundamentals sound? | `fundamentals.quality.rules` over the tier-1 hits only, one Yahoo pass | `Quality` (the ⭐ badge) + `Quality Missing` |
 | **3 — deep dive** | Is the *business* worth owning? | the `deep-dive` skill: Claude over Yahoo + IBKR + SEC filings + live web | a graded report + a tier/conviction verdict |
+| **4 — portfolio** | Was any of it *right*? | `portfolio_sim`: buy every recorded signal at the next open, then grade every recorded attribute against the realized return | `output/portfolio/positions.csv` + `findings.csv` |
 
 Tiers 1 and 2 run together in `run_scanners.py` and hand off
 `output/latest_hits.json`. Tier 3 reads that file — automatically each night
 (`run_deepdive.bat`) and on demand — and is the only tier that costs real time
-per name, which is why the first two exist. See
-[Tier 3](#tier-3-deep-dive-research) and [Signal history](#signal-history).
+per name, which is why the first two exist. Tier 4 reads the history CSVs the
+first three wrote. See
+[Tier 3](#tier-3-deep-dive-research), [Tier 4](#tier-4-the-virtual-portfolio)
+and [Signal history](#signal-history).
 
 Current screens:
 
@@ -56,6 +60,7 @@ Current screens:
 | `research_collect.py` | Tier 3 data collection: everything Yahoo has on one ticker (valuation, estimates, analyst, earnings, ownership, news) |
 | `sec.py` | Tier 3 filings: EDGAR 10-Q/10-K MD&A / Risk Factors / Business sections + curated XBRL |
 | `.claude/skills/deep-dive/` | The tier-3 procedure itself — synthesis is Claude's reasoning, not a function |
+| `portfolio_sim/` | Tier 4: the virtual portfolio (`ledger` → `marking` → `analysis`, on `stats`) |
 | `run_scanner.bat` / `run_deepdive.bat` | Task Scheduler entry point, and the tier-3 step it chains to |
 | `tests/` | Invariant test suite + `run_all.py` runner (no test dependency; plain scripts) |
 
@@ -394,6 +399,7 @@ Plain scripts, no test dependency — each prints `OK`/`FAIL` per check and exit
 | `test_forward_trades.py` | nothing | Trade arithmetic on a synthetic panel: entry/exit offsets for both conventions and any delay, the excursion window, tail NaNs, `delay=0` identity, input rejection |
 | `test_signal_contract.py` | cached panel | `fires_mask` is `signal` or exactly `signal \| partial`; tiers disjoint; `Setup`/`Missing` agree; one card per signal with the grey bar + **Missing** line on partials; hand-off is a single list; `find_ticker` resolves either tier; an empty day doesn't crash. Then with stubbed fundamentals: the tier-2 verdict survives the JSON round trip, the ⭐ badge is exactly that verdict, the archive accumulates without duplicating a re-run, and the gate ranks/filters candidates |
 | `test_research_output.py` | nothing | Tier-3 output: the margin falls back to pretax exactly when Operating Income is absent and names its basis; an empty trailing period doesn't consume a slot; the chart renders for complete/bank/single-period/all-missing/no-data input without raising; `_statement_metrics` stays untouched by the fallback; verdict cards bind their chart, read figures from the facts file, and fit the embed budget |
+| `test_portfolio_sim.py` | nothing | Tier 4 on a synthetic panel and synthetic history: the entry price is `Open[t+1]` and agrees with `forward_trades` cell for cell; a re-`open` refreshes attributes but never erases a mark or re-freezes the recorded quality rule set; a signal whose entry bar has not traded stays `pending` and is in no statistic; `qr_*` distinguishes failed from not-evaluated; Mann-Whitney/Spearman/BH match hand-computed values; nothing under `min_n` is ever called significant, and every section (including `roadmap`) is present |
 | `test_backtest_stats.py` | cached panel | `cohort_values` == the `collect_trades` path at several (wait, hold) cells; real rows re-derive from the panel at a nonzero delay; the trades CSV reconciles with the summary grid |
 | `test_path_equivalence.py` | **network** | Screening out of the bulk panel gives the same dates as the single-ticker download, plus the documented JNJ/MSFT/META cases |
 
@@ -696,6 +702,120 @@ verdicts.groupby("Verdict")["Conviction"].describe()
 Multi-year metrics and `Quality Missing` are stored as JSON strings in the CSVs
 (`json.loads` them back); the dated snapshots keep them as real nested lists.
 
+## Tier 4: the virtual portfolio
+
+Tiers 1–3 decide what looks interesting. Nothing until now ever checked whether
+any of it was right. Tier 4 buys every recorded signal on paper at the next
+trading day's open, tracks it, and — on demand — grades every attribute the
+pipeline recorded against what the stock actually did.
+
+```powershell
+python -m portfolio_sim open      # recorded signals -> positions (no network)
+python -m portfolio_sim mark      # re-sync, fill entries, mark every horizon
+python -m portfolio_sim analyze   # -> output/portfolio/findings.csv
+python -m portfolio_sim status    # what is on the book, what can be asked yet
+```
+
+`open` and `mark` run in the nightly chain (`run_scanner.bat`, and `mark` again
+at the end of `run_deepdive.bat`). `analyze` is on demand. Nothing here ever
+touches Discord.
+
+### The trade model
+
+Buy `Open[t+1]`, hold a fixed number of trading days, sell at the close —
+`backtest_universe.forward_trades` unchanged, so a ledger return and a
+universe-backtest return are literally the same measurement. Fixed notional per
+signal (`portfolio.notional`), unlimited capital, no stops, no targets, no
+costs. That is deliberate: with no cash constraint a return depends only on the
+signal, never on which trade happened to get funded first, which is what makes
+the attribution below readable.
+
+Every position is marked at each `portfolio.horizons` entry (10/30/60 trading
+days by default) plus a live mark to the last settled close, and against the
+benchmark over the same bars (`excess_<h>d_%`).
+
+**`open` and `mark` are separate because the entry price does not exist yet.**
+The nightly run fires after the US close, so `Open[t+1]` is most of a day away.
+`open` records the position as `pending` with no price; `mark` fills it on a
+later run. A pending position is on the book and in no statistic.
+
+### What each position carries
+
+`output/portfolio/positions.csv`, one row per `(scan_date, ticker, config_key)`
+— the same grain as `signals.csv`, so a ticker that fired on two screens is two
+positions. Each row carries the **entire** source row (all of tier 1's
+technicals, tier 2's badge, the config-labelled fundamentals, tier 3's verdict)
+plus:
+
+| column | meaning |
+|---|---|
+| `status` | `pending` → `open` → `closed` (every horizon has an exit bar) |
+| `entry_date` / `entry_price` / `shares` / `notional` | the fill |
+| `ret_<h>d_%`, `exit_price_<h>d`, `mfe_<h>d_%`, `mae_<h>d_%` | per horizon |
+| `bench_ret_<h>d_%`, `excess_<h>d_%` | the benchmark over the same bars |
+| `open_ret_%`, `last_close`, `days_held` | the live mark |
+| `qr_<rule>` | per quality rule: `True` = passed that night |
+| `Quality Rules` | the rule set in force when the signal was graded |
+| `quant_score`, `quant_<dimension>`, `qm_<metric>` | tier 3's breakdown |
+
+`qr_*` is exploded from the recorded `Quality Missing` list against the rule set
+**frozen with the position**, so retuning `fundamentals.quality.rules` later
+cannot rewrite past findings, and a rule invented after a signal was recorded
+never reads as "passed" on it. A row the scan never graded gets no `qr_*`
+columns at all — *not evaluated* is not *failed*.
+
+### The findings file
+
+`analyze` writes one tidy CSV, one row per finding, in sections:
+
+| section | answers |
+|---|---|
+| `CAVEAT` | the caveats, first in the file so they cannot be missed |
+| `portfolio` | what the whole book returned, per horizon, versus the benchmark |
+| `roadmap` | every question this file will answer, and what each is still short of |
+| `cohort` | grouped stats by screen, setup tier, quality badge, verdict, source |
+| `split` | **which signals were better** — full vs partial, quality pass vs fail, deep-dived vs not, verdict tiers |
+| `rule_impact` | **which quality rule mattered** — per rule, the tickers that passed it against those that failed |
+| `dimension_impact` | **which deep-dive check was worth anything** — per quant dimension, rank correlation plus a top-vs-bottom-tercile split |
+| `metric_corr` | every recorded fundamental and technical against the return |
+| `baseline` | the random-entry bar from `backtest_universe`'s cached panel |
+| `ranking` | the direct answer: everything ranked, most significant first |
+
+Each row carries `n`, the descriptive statistics, an `effect` with its units, a
+bootstrap CI, `p_value`, `q_value`, `sufficient_n`, `significant`, and a
+`conclusion` sentence. Every conclusion is generated in Python — same rule as
+tier 3's chart: a measurement narrated by a model is a measurement you cannot
+check.
+
+### How it avoids lying to you
+
+The honest problem with this analysis is that it runs dozens of tests against a
+sample that starts at zero and grows by a handful of rows a night. Four things
+hold the line:
+
+- **Significance is keyed off a Benjamini–Hochberg `q_value`** across the whole
+  file, not a raw p. Ranked by p, the largest effect on a thin sample is
+  reliably the luckiest one.
+- **`sufficient_n`** (`portfolio.analysis.min_n`, default 20 per side) gates
+  every claim. A thinner finding is still written — omitting it would hide the
+  question — but it is marked and says so in its own conclusion.
+- **Ticker-level attributes are de-duplicated on `(scan_date, ticker)`** before
+  grouping, or a name that fired on two screens votes twice in exactly the
+  cohorts a deep dive was most likely to touch.
+- **The `roadmap` section** lists every question with its current group sizes
+  and shortfall, so an empty report reads as "not yet" rather than as "nothing
+  there". Until the ledger fills, that section *is* the report.
+
+Statistics are hand-rolled in `portfolio_sim/stats.py` (Mann-Whitney with tie
+and continuity corrections, Welch's t, Spearman, a bootstrap CI, BH-FDR) rather
+than adding scipy for five functions; each is pinned against a hand-computed
+value in `tests/test_portfolio_sim.py`. The p-values are normal approximations,
+which is acceptable only because of the two gates above.
+
+Caveats that stay in the output, not just here: paper fills with no costs,
+slippage or dividends; overlapping and clustered trades that are not
+independent samples; survivorship (today's index membership).
+
 ## Tuning a screen (`tune_screen.py`)
 
 The backtest tells you how a screen performs *as configured*. This answers the
@@ -817,15 +937,30 @@ small differences as noise.
 | `research.synthesis.tiers[].color` | per tier | Hex side-bar colour of the Discord verdict card |
 | `research.sec.*` | — | EDGAR user agent (must carry an email), forms, section size cap, XBRL concepts |
 | `research.synthesis.*` | — | Quant-score dimensions/weights, conviction tier bands, narrative adjustment cap |
+| `portfolio.enabled` | `true` | Run tier 4 at all; `false` makes every subcommand a no-op |
+| `portfolio.dir` | `portfolio` | Ledger + findings directory, resolved inside `output/` |
+| `portfolio.positions_csv` / `.findings_csv` | `positions.csv` / `findings.csv` | The two tables, in that directory |
+| `portfolio.entry` | `next_open` | Fill convention, same values as `backtest.entry` |
+| `portfolio.horizons` | `[10, 30, 60]` | Holding periods in **trading** days that each position is marked at |
+| `portfolio.notional` | `10000` | Fixed cash per signal. No cash constraint, so a return never depends on which trade got funded first |
+| `portfolio.benchmark_ticker` | `SPY` | Marked over the same bars as each position, giving `excess_<h>d_%` |
+| `portfolio.measure_excursions` | `true` | Record MFE/MAE per horizon |
+| `portfolio.analysis.min_n` | `20` | Per-side sample a cohort needs before a finding may be called significant |
+| `portfolio.analysis.alpha` | `0.05` | Significance threshold, applied to the FDR-adjusted `q_value` |
+| `portfolio.analysis.bootstrap_iters` | `2000` | Resamples behind each difference-in-means CI |
+| `portfolio.analysis.fdr` | `true` | Key `significant` off `q_value`; `false` falls back to the raw p (don't) |
+| `portfolio.analysis.keep_dated_findings` | `true` | Also write `findings_<date>.csv` per run |
 
 ## Nightly schedule (Windows Task Scheduler)
 
 The scan runs Mon–Fri at **23:30 Israel time** (~30 min after the 16:00 ET US
 market close) via the task **"SP500 Breakout Scanner"**, which executes
 `run_scanner.bat` and appends all output to `output/scanner_log.txt`. That batch
-file then chains to `run_deepdive.bat` (tier 3 →
-`output/deepdive_log.txt`), so one task covers all three tiers: the scan alert
-reaches Discord within a couple of minutes, the deep-dive verdicts follow later.
+file then runs tier 4's `open` + `mark`, and chains to `run_deepdive.bat`
+(tier 3 → `output/deepdive_log.txt`, which ends with a second tier-4 `mark` so
+tonight's verdict lands on tonight's position). One task covers all four tiers:
+the scan alert reaches Discord within a couple of minutes, the deep-dive
+verdicts follow later, and the ledger is updated at both ends.
 
 > **`ExecutionTimeLimit` must cover tier 3.** The scan alone finishes in about a
 > minute, but five deep-dives take considerably longer, and Task Scheduler kills

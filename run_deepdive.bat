@@ -72,3 +72,10 @@ echo ==== Deep-dive finished %date% %time% (exit %errorlevel%) ==== >> output\de
 
 rem Merge the model's steps into the run log, write the END line, record the run.
 "C:\Users\Lenovo\AppData\Local\Microsoft\WindowsApps\python.exe" research_report.py log-session %STOCK_ANALYZER_RUN_ID% %SESSION_ID% --mode nightly >> output\deepdive_log.txt 2>&1
+
+rem Tier 4 again, now that post-verdicts has written tonight's tier and
+rem conviction. `mark` re-syncs the ledger before pricing it, so this is what
+rem gets tonight's verdict onto tonight's position instead of tomorrow's -- and
+rem the verdict is exactly the attribute the attribution analysis exists to
+rem grade. Exits 0 on failure, like the copy in run_scanner.bat.
+"C:\Users\Lenovo\AppData\Local\Microsoft\WindowsApps\python.exe" -m portfolio_sim mark >> output\deepdive_log.txt 2>&1

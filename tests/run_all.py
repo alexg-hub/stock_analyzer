@@ -19,6 +19,7 @@ HERE = Path(__file__).resolve().parent
 TESTS = [
     ("test_forward_trades.py", "offline -- synthetic panel arithmetic"),
     ("test_research_output.py", "offline -- tier-3 financials, chart, verdict cards"),
+    ("test_portfolio_sim.py", "offline -- tier-4 ledger, marking, attribution"),
     ("test_signal_contract.py", "cached panel -- signal tiers, alert, hand-off"),
     ("test_backtest_stats.py", "cached panel -- statistics and trade rows"),
 ]

@@ -407,6 +407,13 @@ def _facts(ticker: str, scan_date: str, yahoo: dict, quant: dict,
     `source` records whether the trigger came from the nightly hand-off or from
     an on-demand scan. It is the routing key for the permanent record, decided
     here because this is the only place that knows the answer.
+
+    The quant *breakdown* is written alongside the aggregate score even though
+    no card shows it: tier 4 grades which dimension actually predicted return,
+    and a dimension that was never recorded can never be graded. Recomputing it
+    later would answer with today's fundamentals rather than the ones the
+    verdict was made on, which is exactly the drift `_row_quality` exists to
+    avoid -- so it is captured here, once, at the moment of judgment.
     """
     valuation = yahoo.get("valuation") or {}
     targets = (yahoo.get("analyst") or {}).get("targets") or {}
@@ -425,6 +432,8 @@ def _facts(ticker: str, scan_date: str, yahoo: dict, quant: dict,
         "next_earnings_date": earnings.get("next_date"),
         "days_to_earnings": earnings.get("days_to_next"),
         "quant_score": quant.get("score"),
+        "quant_dimensions": quant.get("dimensions"),
+        "quant_metrics": quant.get("metrics"),
         "screen": (trigger or {}).get("screen"),
         "setup": (trigger or {}).get("kind"),
         "quality": quality,
