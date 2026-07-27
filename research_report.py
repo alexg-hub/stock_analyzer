@@ -1289,8 +1289,12 @@ def main() -> int:
     # here rather than hardcoded in cmd so `research.logging.dir` stays a real
     # setting: hardcode it there and moving the directory silently orphans
     # every result file from the run log it belongs to.
+    # `run_id()`, not `new_run_id()`: run_scanner.bat mints and exports the id
+    # before chaining here, so the whole nightly chain -- tiers 1, 2 and 3 --
+    # lands in one log for the night. Standalone (env unset) this still mints
+    # its own, so an ad-hoc deep dive gets its own file.
     if args[0] == "run-id":
-        rid = new_run_id()
+        rid = run_id()
         print(f"{rid} {uuid.uuid4()} {run_result_path(load_config(), rid)}")
         return 0
 

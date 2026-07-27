@@ -22,6 +22,7 @@ Usage:
 
 import sys
 import tempfile
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -31,6 +32,7 @@ import breakout_scanner
 import sma_pullback
 import sma_reclaim
 from scanner_common import (
+    QUALITY_COL,
     ScanResult,
     annotate_quality,
     archive_scan,
@@ -41,7 +43,10 @@ from scanner_common import (
     fetch_fundamentals,
     get_sp500_tickers,
     load_config,
+    log_step,
     output_dir,
+    quality_enabled,
+    run_id,
     send_discord_alert,
     write_latest_hits,
 )
@@ -87,7 +92,8 @@ def scan_ticker(ticker: str, cfg: dict) -> dict:
     for module in SCANNERS:
         strategy = cfg.get(module.CONFIG_KEY)
         if not strategy:
-            print(f"No '{module.CONFIG_KEY}' section in config.json -- skipping.")
+            log_step("SCREEN", "skip",
+                     f"no '{module.CONFIG_KEY}' section in config.json", cfg=cfg)
             continue
         result = module.scan(data, strategy)
         if result.hits.empty:
@@ -97,7 +103,8 @@ def scan_ticker(ticker: str, cfg: dict) -> dict:
         results.append((module, result))
 
     if not results:
-        print(f"{ticker}: no screen fires today -- grading fundamentals only.")
+        log_step("SCREEN", "none", f"{ticker}: no screen fires -- tier 2 only",
+                 cfg=cfg)
         row = pd.DataFrame(index=pd.Index([ticker], name="Ticker"))
         row["Setup"] = "none"
         row["Missing"] = ""
@@ -112,12 +119,36 @@ def scan_ticker(ticker: str, cfg: dict) -> dict:
             result.hits = result.hits.join(fundamentals)
     for _, result in results:
         annotate_quality(result.hits, fund_cfg)
+    log_quality(results, fund_cfg, cfg)
 
     return build_hits_payload(scan_date, results)
 
 
+def log_quality(results: list, fund_cfg: dict, cfg: dict) -> None:
+    """One `QUALITY` line: how many of the tier-1 hits tier 2 passed.
+
+    Counted off the recorded `Quality` column rather than re-grading, so the
+    log states the same verdict the badge and the hand-off carry -- the whole
+    reason grading happens exactly once.
+    """
+    if not quality_enabled(fund_cfg):
+        log_step("QUALITY", "skip", "quality layer is off -- not evaluated",
+                 cfg=cfg)
+        return
+    graded = {t: bool(v) for _, result in results
+              for t, v in result.hits.get(QUALITY_COL, {}).items()}
+    passed = sum(graded.values())
+    log_step("QUALITY", "ok" if graded else "none",
+             f"{passed}/{len(graded)} ticker(s) passed"
+             + (f" -- {', '.join(t for t, ok in graded.items() if ok)}"
+                if passed else ""),
+             cfg=cfg)
+
+
 def main() -> int:
     cfg = load_config()
+    t0 = time.perf_counter()
+    log_step("SCAN", "start", f"nightly scan (tiers 1+2)  run={run_id()}", cfg=cfg)
 
     tickers = get_sp500_tickers(cfg["data"]["sp500_source_url"])
     data = download_price_data(
@@ -132,10 +163,14 @@ def main() -> int:
     for module in SCANNERS:
         strategy = cfg.get(module.CONFIG_KEY)
         if not strategy:
-            print(f"No '{module.CONFIG_KEY}' section in config.json -- skipping.")
+            log_step("SCREEN", "skip",
+                     f"no '{module.CONFIG_KEY}' section in config.json", cfg=cfg)
             continue
         if not strategy.get("enabled", True):
-            print(f"'{module.CONFIG_KEY}' is disabled -- skipping.")
+            # Recorded, not silent: a screen switched off is the most likely
+            # explanation for a night that found nothing.
+            log_step("SCREEN", "off", f"{module.CONFIG_KEY} disabled in config",
+                     cfg=cfg)
             continue
         results.append((module, module.scan(data, strategy)))
 
@@ -147,7 +182,6 @@ def main() -> int:
             if ticker not in wanted:
                 wanted.append(ticker)
     if fund_cfg["enabled"] and wanted:
-        print("Fetching fundamentals for signalling tickers...")
         fundamentals = fetch_fundamentals(wanted, fund_cfg)
         for _, result in results:
             result.hits = result.hits.join(fundamentals)
@@ -156,6 +190,7 @@ def main() -> int:
     #    the hand-off read the recorded verdict, so they cannot disagree --
     for _, result in results:
         annotate_quality(result.hits, fund_cfg)
+    log_quality(results, fund_cfg, cfg)
 
     for _, result in results:
         if not result.hits.empty:
@@ -174,6 +209,11 @@ def main() -> int:
 
     all_empty = all(r.hits.empty for _, r in results)
     if all_empty and not cfg["discord"]["send_message_when_no_breakouts"]:
+        log_step("DISCORD", "skip",
+                 "nothing fired and send_message_when_no_breakouts is false",
+                 cfg=cfg)
+        log_step("SCAN", "ok", "tiers 1+2 complete, no alert sent",
+                 ms=(time.perf_counter() - t0) * 1000, cfg=cfg)
         print("Nothing found by any screen and empty alerts are disabled -- done.")
         return 0
 
@@ -181,7 +221,10 @@ def main() -> int:
     #    rendered first so its embed can reference it --
     chart_cfg = cfg.get("charts", {})
     chart_files = {}  # module CONFIG_KEY -> {ticker: Path}
-    if chart_cfg.get("enabled", True):
+    if not chart_cfg.get("enabled", True):
+        log_step("CHARTS", "skip", "charts.enabled is false", cfg=cfg)
+    else:
+        chart_t0, n_failed = time.perf_counter(), 0
         chart_dir = Path(tempfile.mkdtemp(prefix="scanner_charts_"))
         for module, result in results:
             per_screen = {}
@@ -194,8 +237,14 @@ def main() -> int:
                     module.plot_hit(data, ticker, result.strategy, chart_cfg, out_path)
                     per_screen[ticker] = out_path
                 except Exception as exc:  # noqa: BLE001 - a chart must not kill the alert
-                    print(f"  chart failed for {ticker}: {exc}")
+                    log_step("CHARTS", "failed",
+                             f"{module.CONFIG_KEY} {ticker}: {exc}", cfg=cfg)
+                    n_failed += 1
             chart_files[module.CONFIG_KEY] = per_screen
+        n_ok = sum(len(v) for v in chart_files.values())
+        log_step("CHARTS", "ok" if not n_failed else "partial",
+                 f"{n_ok} rendered, {n_failed} failed",
+                 ms=(time.perf_counter() - chart_t0) * 1000, cfg=cfg)
 
     # -- header/summary text + one embed card per ticker --
     summary = [f"**S&P 500 Scan -- {scan_date}**"]
@@ -214,6 +263,9 @@ def main() -> int:
         image_paths += per_screen.values()
 
     send_discord_alert("\n".join(summary), cfg["discord"], embeds, image_paths)
+    log_step("SCAN", "ok", f"tiers 1+2 complete, {scan_date}, "
+             f"{sum(len(r.hits) for _, r in results)} signal(s)",
+             ms=(time.perf_counter() - t0) * 1000, cfg=cfg)
     return 0
 
 

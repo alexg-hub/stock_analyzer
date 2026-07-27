@@ -28,6 +28,7 @@ must never send.
 """
 
 import builtins
+import io
 import json
 import sys
 import tempfile
@@ -35,6 +36,7 @@ from pathlib import Path
 
 import pandas as pd
 
+import _harness
 from _harness import Checks, busiest_day, cached_panel_or_skip, screens
 
 import research_report
@@ -153,12 +155,9 @@ run_cfg["research"]["latest_hits_path"] = str(handoff)
 run_cfg["research"].setdefault("history", {})
 run_cfg["research"]["history"].update(enabled=True, dir=str(sandbox / "history"),
                                       csv="signals.csv")
-# Same rule for the step log: it falls back to the real config when no cfg is
-# passed, so it is pinned here rather than relying on nothing in this file
-# happening to log today.
-run_cfg["research"]["logging"] = {"enabled": True, "dir": str(sandbox / "logs"),
-                                  "manifest": "runs.csv", "keep_runs": 20}
-scanner_common.configure_logging(run_cfg, rid="test_signal_contract")
+# The step log needs no redirect here: `_harness` pins it at import (before the
+# cached panel is even loaded, which already logs) and `config()` redirects the
+# config this is deep-copied from, so run_cfg inherits it.
 
 run_scanners.load_config = lambda: run_cfg
 run_scanners.get_sp500_tickers = lambda url: list(panel["Close"].columns)
@@ -169,8 +168,29 @@ run_scanners.send_discord_alert = \
 
 _print = builtins.print
 builtins.print = lambda *a, **k: None
-rc = run_scanners.main()
-builtins.print = _print
+# Capture the step log's stderr echo alongside the run: the nightly .bat
+# redirects 2>&1 into scanner_log.txt, so stderr is where tiers 1+2 now speak.
+_log_file = Path(_harness.LOG_DIR) / f"{scanner_common.run_id()}.log"
+_log_before = _log_file.read_text(encoding="utf-8") if _log_file.exists() else ""
+_err_buf, _stderr = io.StringIO(), sys.stderr
+sys.stderr = _err_buf
+try:
+    rc = run_scanners.main()
+finally:
+    sys.stderr = _stderr
+    builtins.print = _print
+
+scan_log = _log_file.read_text(encoding="utf-8")[len(_log_before):].splitlines()
+scan_err = _err_buf.getvalue()
+
+
+def log_phases(lines) -> list:
+    return [ln.split(None, 3)[2] for ln in lines if len(ln.split()) > 2]
+
+
+def log_lines_for(lines, phase) -> list:
+    return [ln for ln in lines if len(ln.split()) > 2
+            and ln.split(None, 3)[2] == phase]
 
 embeds = captured.get("embeds", [])
 n_rows = sum(len(f) for f in alerted.values())
@@ -200,6 +220,67 @@ suppressed = sum(len(frames[k]) for k in silenced)
 c.ok("a disabled screen's signals are held back, every other card kept",
      len(embeds) + suppressed == sum(len(f) for f in frames.values()),
      f"disabled={silenced or 'none'}, {suppressed} row(s) held back")
+
+# --------------------------------------------------------------------------
+# Tiers 1+2 write the same step log tier 3 does, so one file per run covers the
+# whole nightly chain. Invariants only -- which phases a scan records and where
+# they go, never how many signals fired.
+c.section("the step log covers tiers 1 and 2")
+
+phases = log_phases(scan_log)
+c.ok("a scan records its own end, after everything else",
+     phases and phases[-1] == "SCAN" and scan_log[-1].split()[3] == "ok",
+     " -> ".join(phases))
+c.ok("each SCREEN line names its config key and the scan date",
+     all(ln.split()[4] in run_cfg and str(day.date()) in ln
+         for ln in log_lines_for(scan_log, "SCREEN")
+         if ln.split()[3] == "ok"),
+     " | ".join(ln.split(None, 4)[-1] for ln in log_lines_for(scan_log, "SCREEN")))
+c.ok("every screen that ran reports its count",
+     len(log_lines_for(scan_log, "SCREEN")) >= len(
+         [m for m, _ in [(m, None) for m in run_scanners.SCANNERS]
+          if run_cfg.get(m.CONFIG_KEY)]),
+     f"{len(log_lines_for(scan_log, 'SCREEN'))} SCREEN line(s)")
+c.ok("a disabled screen is recorded as off, not silently skipped",
+     all(any(f"{k} disabled" in ln for ln in log_lines_for(scan_log, "SCREEN"))
+         for k in silenced),
+     f"disabled={silenced or 'none'} -- a screen switched off is the likeliest "
+     f"reason a night finds nothing")
+c.ok("the hand-off and the archive are both recorded",
+     log_lines_for(scan_log, "HANDOFF") and log_lines_for(scan_log, "ARCHIVE"))
+c.ok("tier 2 records its verdict count even with fundamentals off",
+     len(log_lines_for(scan_log, "QUALITY")) == 1,
+     "absent quality columns mean 'not evaluated', which the log must say")
+
+# The nightly .bat redirects 2>&1 into scanner_log.txt, and `context` needs
+# stdout for its JSON bundle -- so tiers 1+2 must speak on stderr, like tier 3.
+# (Checked with a direct call: the run above stubs builtins.print, which is what
+# swallows the echo, not the stream choice.)
+_echo_err, _stderr = io.StringIO(), sys.stderr
+_echo_out, _stdout = io.StringIO(), sys.stdout
+sys.stderr, sys.stdout = _echo_err, _echo_out
+try:
+    scanner_common.log_step("SCREEN", "ok", "a tier-1 step", cfg=run_cfg)
+finally:
+    sys.stderr, sys.stdout = _stderr, _stdout
+c.ok("a tier-1 step echoes to stderr, keeping stdout free for structured output",
+     "a tier-1 step" in _echo_err.getvalue() and not _echo_out.getvalue(),
+     "run_scanner.bat redirects 2>&1, so scanner_log.txt still captures it")
+
+# The single most valuable line in the file: a bar Yahoo has not settled makes
+# every condition NaN, which reads as "no signal" -- a confident zero on data
+# that looks complete. It has to be visible, and it has to be a warning.
+_unsettled = truncated.copy()
+_unsettled.loc[_unsettled.index[-1], "Close"] = float("nan")
+_probe = Path(_harness.LOG_DIR) / f"{scanner_common.run_id()}.log"
+_before = _probe.read_text(encoding="utf-8")
+_kept = drop_unsettled_tail(_unsettled)
+_drop_lines = _probe.read_text(encoding="utf-8")[len(_before):].splitlines()
+c.ok("dropping an unsettled bar is logged as a warning, naming the bar",
+     len(_kept) == len(_unsettled) - 1
+     and any(ln.split()[3] == "warn" and str(_unsettled.index[-1].date()) in ln
+             for ln in log_lines_for(_drop_lines, "DOWNLOAD")),
+     " | ".join(_drop_lines) or "nothing logged")
 
 # --------------------------------------------------------------------------
 c.section("hand-off file and deep-dive lookup")

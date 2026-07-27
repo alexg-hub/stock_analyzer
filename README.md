@@ -500,76 +500,6 @@ session.
 `research.auto` config: `enabled`, `gate`, `max_reports`, `discord_send`,
 `model`.
 
-### The step log — what a deep-dive actually did
-
-A tier-3 run spans three processes (the batch file, the headless `claude`
-session, and the `research_report.py context` subprocess it spawns), so each run
-gets **one log**, `output/logs/<run_id>.log` — one line per step: timestamp,
-phase, status, a short description.
-
-```
-2026-07-27 00:59:19  START     ok      MU  on-demand  model=opus  run=a1b2c3d4
-2026-07-27 00:59:22  HANDOFF   miss    MU not in latest_hits.json
-2026-07-27 00:59:24  SCAN      ok      on-demand 2026-07-23  on_demand/none  quality PASS  (2.1s)
-2026-07-27 00:59:26  YAHOO     ok      9/9 groups for MU  (4.6s)
-2026-07-27 00:59:31  QUANT     ok      score 92.5
-2026-07-27 00:59:33  CHART     ok      MU_2026-07-23_financials.png
-2026-07-27 00:59:34  SEC       ok      CIK 0000723125 for MU
-2026-07-27 00:59:36  SEC       ok      10-K 200 2.3 MB  business 24000 / risk_factors 24000 / mdna 15925  (0.6s)
-2026-07-27 00:59:39  CONTEXT   ok      MU bundle ready  (13.2s)
-2026-07-27 01:00:29  BASH      DENIED  python -c "import json..." (permission-rule)
-2026-07-27 01:00:41  MCP       ok      search_contracts  (0.6s)
-2026-07-27 01:01:15  SEARCH    ok      "Micron fiscal Q3 2026 earnings..." 8 hits  (4.2s)
-2026-07-27 01:02:10  FETCH     ok      tradingkey.com/...cxmt-ipo  200  425.0 KB  (7.8s)
-2026-07-27 01:06:52  WRITE     ok      MU_2026-07-23.md  28.2 KB
-2026-07-27 01:07:44  VERDICT   ok      MU WATCH 84 -> on_demand_scans_results.csv
-2026-07-27 01:07:46  DISCORD   sent    MU  1 card(s), 1 chart(s)
-2026-07-27 01:07:50  END       ok      33 turns  507s  $4.06  30 model step(s)  1 DENIAL(S)
-```
-
-The **Python half** (`CONTEXT`, `HANDOFF`, `SCAN`, `YAHOO`, `QUANT`, `CHART`,
-`FACTS`, `SEC`, `RECORD`, `REPORT`, `VERDICT`, `DISCORD`) is written live as the
-run proceeds, so a run that dies still leaves everything up to that point.
-
-The **model half** (`BASH`, `READ`, `WRITE`, `GREP`, `SEARCH`, `FETCH`, `MCP`,
-and anything `DENIED`) is not collected at runtime — Claude Code already records
-it in the session transcript, and `log-session` renders one short line per tool
-call and merges the two halves by timestamp when the run ends. Nothing else from
-the transcript is kept; the point is which steps ran, when, and whether they
-worked.
-
-Two things this surfaces that were previously silent: a **refused tool** (the
-run still exits 0 — CLAUDE.md used to tell you to grep the JSON for
-`permission_denials`), and an **SEC section that came back `n-a`**, which is what
-makes a report thinner without saying so.
-
-**`output/logs/deepdive_runs.csv`** is one row per run — `run_id`, `started`,
-`finished`, `mode`, `tickers`, `model`, `session_id`, `exit_code`, `turns`,
-`duration_s`, `cost_usd`, `web_searches`, `web_fetches`, `denials`, `errors`,
-`reports`, `verdicts`:
-
-```python
-runs = pd.read_csv("output/logs/deepdive_runs.csv")
-runs.groupby("mode")[["cost_usd", "duration_s"]].sum()   # what tier 3 costs
-runs[runs.denials > 0]                                   # runs that were refused something
-```
-
-`output/deepdive_log.txt` keeps only the start/finish banners; the raw
-`--output-format json` blob now goes to `output/logs/<run_id>_result.json` so
-what you read stays readable. `research.logging`: `enabled`, `dir`, `manifest`,
-`keep_runs` (oldest run logs pruned beyond that count).
-
-Two wiring details worth knowing if you edit the batch files:
-
-- `--session-id` **must stay** on both. It is what makes the transcript findable
-  *before* the run starts, so a run killed mid-flight (result `3221225786`, a PC
-  shutdown) can still have its log completed by hand:
-  `python research_report.py log-session <run_id> <session_id>`. Drop the flag
-  and the model half goes missing with no error.
-- `STOCK_ANALYZER_RUN_ID` is exported by the batch file and inherited through
-  `claude` into the `context` subprocess — that is how three processes write one
-  log. Unset (a `context`/`scan` you run yourself) simply mints its own id.
-
 ### The financial trend chart
 
 Alongside the report, `assemble_context` renders
@@ -602,6 +532,100 @@ and six decision fields — quant score with the narrative adjustment, the trigg
 price vs analyst target, P/E with its 2-year percentile, and next earnings.
 `send_discord_alert` batches them under Discord's caps, so a five-report night
 still fits (~1.1k of the ~5500-char embed budget).
+
+## The step log — what a run actually did
+
+All three tiers write **one log per run**, `output/logs/<run_id>.log` — one line
+per step: timestamp, phase, status, a short description. The nightly chain mints
+a single run id in `run_scanner.bat` and exports it, so tiers 1, 2 and 3 all
+append to the same file and one night is one log.
+
+```
+2026-07-27 23:30:01  SCAN      start   nightly scan (tiers 1+2)  run=a1b2c3d4
+2026-07-27 23:30:03  UNIVERSE  ok      503 S&P 500 tickers from Wikipedia
+2026-07-27 23:30:22  DOWNLOAD  ok      2y of 1d: 503/503 ticker(s), 501 bars  (18.6s)
+2026-07-27 23:30:22  DOWNLOAD  warn    dropped 2026-07-24 -- no settled close for most tickers; scanning 2026-07-23 instead
+2026-07-27 23:30:25  SCREEN    ok      breakout_strategy 2026-07-23: 4 signal(s) (2 full, 2 partial)
+2026-07-27 23:30:27  SCREEN    ok      pullback_strategy 2026-07-23: 2 signal(s) (all full)
+2026-07-27 23:30:27  SCREEN    off     reclaim_strategy disabled in config
+2026-07-27 23:30:39  YAHOO     ok      fundamentals for 6/6 ticker(s)  (12.1s)
+2026-07-27 23:30:39  QUALITY   ok      1/6 ticker(s) passed -- RL
+2026-07-27 23:30:39  HANDOFF   ok      latest_hits.json: 6 row(s) across 2 screen(s)
+2026-07-27 23:30:39  ARCHIVE   ok      6 row(s) -> hits_2026-07-23.json; signals.csv now 63 row(s)
+2026-07-27 23:30:45  CHARTS    ok      6 rendered, 0 failed  (5.8s)
+2026-07-27 23:30:47  DISCORD   sent    1 message(s), 2 card(s), 6 chart(s)
+2026-07-27 23:30:47  SCAN      ok      tiers 1+2 complete, 2026-07-23, 6 signal(s)  (46.1s)
+2026-07-27 23:31:02  CONTEXT   start   RL  run=a1b2c3d4
+2026-07-27 23:31:05  HANDOFF   hit     RL 2026-07-23  pullback_strategy/full  quality PASS
+2026-07-27 23:31:10  YAHOO     ok      9/9 groups for RL  (4.6s)
+2026-07-27 23:31:11  QUANT     ok      score 80.7
+2026-07-27 23:31:13  SEC       ok      10-K 200 2.3 MB  business 24000 / risk_factors n-a / mdna 15925  (0.6s)
+2026-07-27 23:31:14  CONTEXT   ok      RL bundle ready  (12.1s)
+2026-07-27 23:32:29  BASH      DENIED  python -c "import json..." (permission-rule)
+2026-07-27 23:33:15  SEARCH    ok      "Ralph Lauren FY26 guidance..." 8 hits  (4.2s)
+2026-07-27 23:34:10  FETCH     ok      reuters.com/...tariffs  200  425.0 KB  (7.8s)
+2026-07-27 23:38:52  WRITE     ok      RL_2026-07-23.md  28.2 KB
+2026-07-27 23:39:44  VERDICT   ok      RL STRONG 75 -> signals.csv (1 row(s))
+2026-07-27 23:39:46  DISCORD   sent    RL  1 card(s), 1 chart(s)
+2026-07-27 23:39:50  END       ok      33 turns  507s  $4.06  30 model step(s)  1 DENIAL(S)
+```
+
+The **Python half** is written live as the run proceeds, so a run that dies still
+leaves everything up to that point:
+
+| tier | phases |
+|---|---|
+| 1 | `SCAN`, `UNIVERSE`, `DOWNLOAD` (incl. the unsettled-bar `warn`), `SCREEN` (one per screen, `off` when disabled), `CHARTS` |
+| 2 | `YAHOO` (fundamentals), `QUALITY` (how many passed) |
+| 1+2 hand-off | `HANDOFF`, `ARCHIVE` |
+| 3 | `CONTEXT`, `HANDOFF`, `SCAN`, `YAHOO`, `QUANT`, `CHART`, `FACTS`, `SEC`, `RECORD`, `REPORT`, `VERDICT`, `DISCORD` |
+
+The **model half** (`BASH`, `READ`, `WRITE`, `GREP`, `SEARCH`, `FETCH`, `MCP`,
+and anything `DENIED`) is not collected at runtime — Claude Code already records
+it in the session transcript, and `log-session` renders one short line per tool
+call and merges the two halves by timestamp when the run ends. Nothing else from
+the transcript is kept; the point is which steps ran, when, and whether they
+worked.
+
+Three things this surfaces that were previously silent: a **refused tool** (the
+run still exits 0 — CLAUDE.md used to tell you to grep the JSON for
+`permission_denials`); an **SEC section that came back `n-a`**, which is what
+makes a report thinner without saying so; and the **unsettled-bar drop**, which
+is the first thing to check when a night reports a confident zero.
+
+`output/scanner_log.txt` is unchanged as tiers 1+2's transcript — the step log
+writes to **stderr** and `run_scanner.bat` already redirects `2>&1`, so it
+captures every step alongside the hits tables. Keep that `2>&1`.
+
+**`output/logs/deepdive_runs.csv`** is one row per run — `run_id`, `started`,
+`finished`, `mode`, `tickers`, `model`, `session_id`, `exit_code`, `turns`,
+`duration_s`, `cost_usd`, `web_searches`, `web_fetches`, `denials`, `errors`,
+`reports`, `verdicts`:
+
+```python
+runs = pd.read_csv("output/logs/deepdive_runs.csv")
+runs.groupby("mode")[["cost_usd", "duration_s"]].sum()   # what tier 3 costs
+runs[runs.denials > 0]                                   # runs that were refused something
+```
+
+`output/deepdive_log.txt` keeps only the start/finish banners; the raw
+`--output-format json` blob now goes to `output/logs/<run_id>_result.json` so
+what you read stays readable. `research.logging`: `enabled`, `dir`, `manifest`,
+`keep_runs` (oldest run logs pruned beyond that count).
+
+Two wiring details worth knowing if you edit the batch files:
+
+- `--session-id` **must stay** on both. It is what makes the transcript findable
+  *before* the run starts, so a run killed mid-flight (result `3221225786`, a PC
+  shutdown) can still have its log completed by hand:
+  `python research_report.py log-session <run_id> <session_id>`. Drop the flag
+  and the model half goes missing with no error.
+- `STOCK_ANALYZER_RUN_ID` is minted in `run_scanner.bat`, exported, and
+  inherited all the way through `claude` into the `context` subprocess — that is
+  how four processes write one log. `run_deepdive.bat`'s `run-id` *inherits* it
+  rather than minting, which is what joins tier 3 to the same night. Unset (a
+  `context`/`scan`/`run_ondemand.bat` you run yourself) simply mints its own.
+
 
 ## On-demand: one ticker, all three tiers
 

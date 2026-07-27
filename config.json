@@ -167,7 +167,7 @@
         "auto": {
             "enabled": true,
             "gate": "all",
-            "max_reports": 1,
+            "max_reports": 3,
             "discord_send": true,
             "model": "opus"
         },

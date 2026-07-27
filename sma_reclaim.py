@@ -49,7 +49,7 @@ All parameters live in the `reclaim_strategy` section of config.json.
 import pandas as pd
 
 import charts
-from scanner_common import ScanResult, fmt_value, single_ticker_panel
+from scanner_common import ScanResult, fmt_value, log_step, single_ticker_panel
 
 # Config section this screen reads (run_scanners.py registry contract).
 CONFIG_KEY = "reclaim_strategy"
@@ -232,10 +232,11 @@ def find_reclaims(data: pd.DataFrame, strategy: dict) -> pd.DataFrame:
     """
     needed = required_history(strategy)
     if len(data) <= needed:
-        print(f"WARNING: only {len(data)} rows of history but the reclaim "
-              f"screen needs > {needed} ({strategy['sma_days']}d SMA + "
-              f"{strategy['below_lookback_days']}d below-lookback) -- NO "
-              f"signal can ever fire. Increase data.download_period in config.json.")
+        log_step("SCREEN", "warn",
+                 f"{CONFIG_KEY}: only {len(data)} rows but needs > {needed} "
+                 f"({strategy['sma_days']}d SMA + "
+                 f"{strategy['below_lookback_days']}d below-lookback) -- NO "
+                 f"signal can ever fire; raise data.download_period")
 
     signals = compute_reclaim_signals(data, strategy)
     last = {name: df.iloc[-1] for name, df in signals.items()}
@@ -285,8 +286,8 @@ def find_reclaims(data: pd.DataFrame, strategy: dict) -> pd.DataFrame:
 
     n_full = int((hits["Setup"] == "full").sum()) if not hits.empty else 0
     scan_date = data.index[-1].date()
-    print(f"Scan date: {scan_date} -- {len(hits)} SMA-reclaim signal(s) "
-          f"({n_full} full, {len(hits) - n_full} partial).")
+    log_step("SCREEN", "ok", f"{CONFIG_KEY} {scan_date}: {len(hits)} signal(s) "
+             f"({n_full} full, {len(hits) - n_full} partial)")
     return hits
 
 

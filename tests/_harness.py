@@ -11,6 +11,7 @@ be stale within a session; every check here has to hold at any thresholds.
 """
 
 import sys
+import tempfile
 from pathlib import Path
 
 import pandas as pd
@@ -23,9 +24,36 @@ if str(ROOT) not in sys.path:
 # hands them the locale codepage -- which cannot encode the quality badge a
 # check may want to print. Test scripts are entry points, so they get the same
 # treatment the production ones do.
-from scanner_common import enable_utf8_output  # noqa: E402
+from scanner_common import configure_logging, enable_utf8_output  # noqa: E402
 
 enable_utf8_output()
+
+# Redirect the step log here, at the first import any test performs, and before
+# any of them touches production code. It has to be this early: loading the
+# cached panel runs `drop_unsettled_tail`, which logs, so a redirect installed
+# in the test body would already be too late. Covers every `log_step` call that
+# passes no cfg (the screens and the download layer log that way); a call that
+# passes its own cfg is covered by that cfg carrying a redirected
+# `research.logging`, which each test file sets on the config it copies from.
+LOG_DIR = Path(tempfile.mkdtemp(prefix="test_logs_"))
+configure_logging({"research": {"logging": {"enabled": True, "dir": str(LOG_DIR),
+                                            "manifest": "runs.csv",
+                                            "keep_runs": 50}}},
+                  rid="tests")
+
+
+def redirect_logging(cfg: dict) -> dict:
+    """Point one config's step log at the test log dir. Returns the same dict.
+
+    Apply to the config a test file copies its per-section configs from, so
+    every derived deep copy inherits the redirect and no explicit `cfg=` call
+    can escape into the real `output/logs`.
+    """
+    cfg.setdefault("research", {})["logging"] = {
+        "enabled": True, "dir": str(LOG_DIR), "manifest": "runs.csv",
+        "keep_runs": 50}
+    return cfg
+
 
 SKIP = 2
 
@@ -73,7 +101,7 @@ class Checks:
 
 def config():
     from scanner_common import load_config
-    return load_config()
+    return redirect_logging(load_config())
 
 
 def cached_panel_or_skip():

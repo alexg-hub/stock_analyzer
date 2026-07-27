@@ -357,7 +357,7 @@ def get_sp500_tickers(source_url: str) -> list[str]:
         .str.replace(".", "-", regex=False)
         .tolist()
     )
-    print(f"Fetched {len(tickers)} S&P 500 tickers from Wikipedia.")
+    log_step("UNIVERSE", "ok", f"{len(tickers)} S&P 500 tickers from Wikipedia")
     return tickers
 
 
@@ -390,9 +390,12 @@ def drop_unsettled_tail(data: pd.DataFrame, max_missing_pct: float = 0.5) -> pd.
         raise RuntimeError(
             f"No bar has a settled close (checked {len(dropped)}) -- Yahoo is "
             f"serving unsettled rows; retry later.")
-    print(f"WARNING: {', '.join(dropped)} has no settled close for most tickers "
-          f"(Yahoo has not published it) -- dropping and scanning "
-          f"{data.index[keep - 1].date()} instead.")
+    # Logged at `warn`, not printed: this is the single diagnostic most worth
+    # finding after a suspicious zero-signal night, and burying it in a wall of
+    # stdout is how it got missed before.
+    log_step("DOWNLOAD", "warn",
+             f"dropped {', '.join(dropped)} -- no settled close for most "
+             f"tickers; scanning {data.index[keep - 1].date()} instead")
     return data.iloc[:keep]
 
 
@@ -402,7 +405,7 @@ def download_price_data(tickers: list[str], period: str, interval: str) -> pd.Da
     Returns a DataFrame with a (Field, Ticker) column MultiIndex, e.g.
     data["Close"]["AAPL"] is the close series for AAPL.
     """
-    print(f"Downloading {period} of {interval} data for {len(tickers)} tickers...")
+    t0 = time.perf_counter()
     data = yf.download(
         tickers,
         period=period,
@@ -413,7 +416,18 @@ def download_price_data(tickers: list[str], period: str, interval: str) -> pd.Da
         progress=sys.stdout.isatty(),  # no progress-bar spam in log files
     )
     if data.empty:
+        log_step("DOWNLOAD", "failed",
+                 f"{period}/{interval} for {len(tickers)} ticker(s): no data",
+                 ms=(time.perf_counter() - t0) * 1000)
         raise RuntimeError("yfinance returned no data -- check connectivity.")
+    # Logged after the call, so the line carries what actually came back --
+    # a short panel is the tell for a screen that "never fires".
+    got = len(data["Close"].columns) if "Close" in data.columns.get_level_values(0) \
+        else len(tickers)
+    log_step("DOWNLOAD", "ok",
+             f"{period} of {interval}: {got}/{len(tickers)} ticker(s), "
+             f"{len(data)} bars",
+             ms=(time.perf_counter() - t0) * 1000)
     if len(tickers) == 1 and not isinstance(data.columns, pd.MultiIndex):
         # yfinance flattens the column index for a one-ticker request, and the
         # whole data contract downstream is (Field, Ticker) -- restore it, the
@@ -436,8 +450,9 @@ def download_history(ticker: str, start: pd.Timestamp, end: pd.Timestamp,
     the scanners use, so the compute_* functions run unchanged."""
     months = warmup_months(window)
     dl_start = start - pd.DateOffset(months=months)
-    print(f"Downloading {ticker} daily data {dl_start.date()} .. {end.date()} "
-          f"(includes {months} months of warm-up for the {window}-day rolling window)")
+    log_step("DOWNLOAD", "ok",
+             f"{ticker} {dl_start.date()}..{end.date()} "
+             f"(+{months}mo warm-up for a {window}-day window)")
     data = yf.download(
         ticker,
         start=dl_start,
@@ -500,7 +515,7 @@ def _statement_metrics(tk: "yf.Ticker", stmt_cfg: dict, info: dict) -> dict:
             if isinstance(df, pd.DataFrame) and not df.empty:
                 return df
         except Exception as exc:  # noqa: BLE001 - missing statements must not kill the alert
-            print(f"  {name} failed for {tk.ticker}: {exc}")
+            log_step("YAHOO", "failed", f"{name} for {tk.ticker}: {exc}")
         return pd.DataFrame()
 
     income = statement("income_stmt")
@@ -576,13 +591,15 @@ def fetch_fundamentals(tickers: list[str], fund_cfg: dict) -> pd.DataFrame:
     percent_fields = fund_cfg.get("percent_fields", [])
     stmt_cfg = fund_cfg.get("statements", {})
 
-    rows = {}
+    t0 = time.perf_counter()
+    rows, failed = {}, []
     for ticker in tickers:
         tk = yf.Ticker(ticker)
         try:
             info = tk.info
         except Exception as exc:  # noqa: BLE001 - a bad ticker must not kill the alert
-            print(f"  fundamentals failed for {ticker}: {exc}")
+            log_step("YAHOO", "failed", f"fundamentals for {ticker}: {exc}")
+            failed.append(ticker)
             info = {}
         row = {COMPANY_COL: info.get("longName") or info.get("shortName")}
         for key, label in fields.items():
@@ -593,6 +610,10 @@ def fetch_fundamentals(tickers: list[str], fund_cfg: dict) -> pd.DataFrame:
         if stmt_cfg.get("enabled"):
             row.update(_statement_metrics(tk, stmt_cfg, info))
         rows[ticker] = row
+    log_step("YAHOO", "ok" if not failed else "partial",
+             f"fundamentals for {len(rows) - len(failed)}/{len(tickers)} ticker(s)"
+             + (f" -- missing {', '.join(failed)}" if failed else ""),
+             ms=(time.perf_counter() - t0) * 1000)
     return pd.DataFrame.from_dict(rows, orient="index").rename_axis("Ticker")
 
 
@@ -825,6 +846,8 @@ def send_discord_alert(content: str, discord_cfg: dict, embeds: list[dict] = (),
     paths = {Path(p).name: Path(p) for p in image_paths}
 
     if not url or "PASTE_YOUR" in url:
+        log_step("DISCORD", "dry-run",
+                 f"no webhook configured -- {len(embeds)} card(s) printed instead")
         print("\nDiscord webhook URL not configured -- printing message instead:\n")
         print(content)
         for embed in embeds:
@@ -866,8 +889,8 @@ def send_discord_alert(content: str, discord_cfg: dict, embeds: list[dict] = (),
         else:
             resp = requests.post(url, json=payload, timeout=timeout)
         resp.raise_for_status()
-    print(f"Discord alert sent ({len(batches)} message(s), "
-          f"{len(embeds)} card(s), {len(paths)} chart(s)).")
+    log_step("DISCORD", "sent", f"{len(batches)} message(s), "
+             f"{len(embeds)} card(s), {len(paths)} chart(s)")
 
 
 # --------------------------------------------------------------------------
@@ -952,7 +975,8 @@ def write_latest_hits(path: Path, scan_date, results) -> dict:
     Path(path).write_text(json.dumps(payload, indent=2, ensure_ascii=False),
                           encoding="utf-8")
     n = sum(len(s["hits"]) for s in payload["screens"])
-    print(f"Wrote {path} ({n} ticker row(s) across {len(payload['screens'])} screen(s)).")
+    log_step("HANDOFF", "ok", f"{Path(path).name}: {n} row(s) across "
+             f"{len(payload['screens'])} screen(s)")
     return payload
 
 
@@ -1144,6 +1168,7 @@ def archive_scan(payload: dict, cfg: dict) -> None:
     """
     hist_cfg = cfg.get("research", {}).get("history", {})
     if not hist_cfg.get("enabled", True):
+        log_step("ARCHIVE", "skip", "research.history.enabled is false", cfg=cfg)
         return
     out = history_dir(cfg)
 
@@ -1155,5 +1180,5 @@ def archive_scan(payload: dict, cfg: dict) -> None:
     rows = history_rows(payload)
     csv_path = signals_csv_path(cfg)
     frame = merge_history_csv(csv_path, rows, HISTORY_KEYS, protect=VERDICT_COLS)
-    print(f"Archived {len(rows)} row(s) to {snapshot.name}; "
-          f"{len(frame)} row(s) total in {csv_path.name}.")
+    log_step("ARCHIVE", "ok", f"{len(rows)} row(s) -> {snapshot.name}; "
+             f"{csv_path.name} now {len(frame)} row(s)", cfg=cfg)

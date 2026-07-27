@@ -203,23 +203,37 @@ real send.
   there rather than by grepping the result JSON — but the underlying trap is
   unchanged: **the run exits 0 with denials in it**, so the exit code alone
   still proves nothing.
-- **Tier 3 writes one step log per run** (`output/logs/<run_id>.log`): one line
-  per step — timestamp, phase, status, short description — built by
-  `scanner_common.log_step` / `step()`. Three rules hold it together:
-  - **It writes to stderr, never stdout.** `research_report.py context` prints a
-    JSON bundle the skill parses, and the `context` branch of `main()` wraps the
-    assembly in `stdout_to_stderr()` for exactly that reason: it calls straight
-    through tiers 1+2, whose progress lines (`Downloading 2y…`, the
-    `drop_unsettled_tail` WARNING, the per-screen counts) go to stdout because
-    for `run_scanners.py` stdout *is* the log. Reached this way they landed in
-    front of the JSON — and the WARNING, the one diagnostic most worth seeing,
-    was the one that broke the parse. Don't move that guard into
-    `assemble_context`: like `enable_utf8_output`, mutating global streams
-    belongs in `__main__`, not at import or in a library call.
+- **All three tiers write one step log per run** (`output/logs/<run_id>.log`):
+  one line per step — timestamp, phase, status, short description — built by
+  `scanner_common.log_step` / `step()`. Tiers 1+2 use `SCAN`, `UNIVERSE`,
+  `DOWNLOAD`, `SCREEN`, `YAHOO`, `QUALITY`, `HANDOFF`, `ARCHIVE`, `CHARTS`;
+  tier 3 adds `CONTEXT`, `QUANT`, `SEC`, `FACTS`, `RECORD`, `REPORT`, `VERDICT`.
+  `run_scanner.bat` mints the id and exports it, and `run-id` **inherits** it
+  (`run_id()`, not `new_run_id()`), so the whole nightly chain is one file.
+  Three rules hold it together:
+  - **It writes to stderr, never stdout**, in every tier. That is what lets
+    `research_report.py context` print a JSON bundle on stdout while the whole
+    assembly — including tiers 1+2, reached through `scan_ticker` — logs freely.
+    Tiers 1+2's progress lines used to be `print`s, i.e. stdout, because for
+    `run_scanners.py` stdout *is* the log; reached through `context` they landed
+    in front of the JSON, and the `drop_unsettled_tail` WARNING — the diagnostic
+    most worth seeing — was the one that broke the parse. Two consequences:
+    **`run_scanner.bat` must keep its `2>&1`** or `scanner_log.txt` loses every
+    step, and the `context` branch of `main()` keeps its `stdout_to_stderr()`
+    guard as belt-and-braces for anything that still prints. Don't move that
+    guard into `assemble_context`: like `enable_utf8_output`, mutating global
+    streams belongs in `__main__`, not at import or in a library call.
   - **It never raises**, and `research.logging.enabled: false` is a full no-op.
     A lost log line must cost you the record, never the report. `step()` is the
     exception that proves it: it logs the failure *and* re-raises, so every
     caller's existing n/a-tolerant `except` behaves exactly as before.
+  - **Tests must redirect it before touching production code.** `tests/_harness`
+    pins it at import via `configure_logging`, and `config()` runs every config
+    it hands out through `redirect_logging` so per-section deep copies inherit
+    it. Both halves are needed: `log_step` with no `cfg` falls back to the real
+    `config.json`, and loading the cached panel logs (`drop_unsettled_tail`)
+    *before* a test body could redirect anything. `output_fingerprint()` in
+    `test_signal_contract.py` catches it when this slips — it already has.
   - **Three processes, one log.** `STOCK_ANALYZER_RUN_ID` is exported by the
     `.bat` and inherited through `claude` into the `context` subprocess. Unset
     means standalone — an ad-hoc `context`/`scan` mints its own id rather than
@@ -432,10 +446,11 @@ real send.
   complete** — no error, no warning. `scanner_common.drop_unsettled_tail` (a
   *fraction*-of-tickers test, since individual tickers legitimately go missing)
   strips such trailing bars in both download functions and on every cache load,
-  printing which bar it dropped; that also makes an intraday run scan the last
-  settled session instead of a partial one. If a zero-signal night ever looks
-  wrong, check `output/scanner_log.txt` for that WARNING first, and never assume
-  a NaN close means a failed condition.
+  logging which bar it dropped (`DOWNLOAD warn`); that also makes an intraday
+  run scan the last settled session instead of a partial one. If a zero-signal
+  night ever looks wrong, check that run's `output/logs/<run_id>.log` for the
+  `DOWNLOAD warn` line first (or `output/scanner_log.txt`, which captures the
+  same steps via `2>&1`), and never assume a NaN close means a failed condition.
 - Windows box, Microsoft Store Python 3.13 (`python` on PATH). yfinance's
   progress bar is disabled for non-TTY output so `output/scanner_log.txt` stays
   readable. matplotlib uses the Agg backend (set in `charts.py`).

@@ -32,7 +32,7 @@ All parameters live in the `pullback_strategy` section of config.json.
 import pandas as pd
 
 import charts
-from scanner_common import ScanResult, fmt_value, single_ticker_panel
+from scanner_common import ScanResult, fmt_value, log_step, single_ticker_panel
 
 # Config section this screen reads (run_scanners.py registry contract).
 CONFIG_KEY = "pullback_strategy"
@@ -172,10 +172,11 @@ def find_pullbacks(data: pd.DataFrame, strategy: dict) -> pd.DataFrame:
     """
     needed = required_history(strategy)
     if len(data) <= needed:
-        print(f"WARNING: only {len(data)} rows of history but the pullback "
-              f"screen needs > {needed} ({strategy['sma_days']}d SMA + "
-              f"{strategy['trend_lookback_days']}d trend lookback) -- NO "
-              f"signal can ever fire. Increase data.download_period in config.json.")
+        log_step("SCREEN", "warn",
+                 f"{CONFIG_KEY}: only {len(data)} rows but needs > {needed} "
+                 f"({strategy['sma_days']}d SMA + "
+                 f"{strategy['trend_lookback_days']}d trend lookback) -- NO "
+                 f"signal can ever fire; raise data.download_period")
 
     signals = compute_pullback_signals(data, strategy)
     last = {name: df.iloc[-1] for name, df in signals.items()}
@@ -201,7 +202,9 @@ def find_pullbacks(data: pd.DataFrame, strategy: dict) -> pd.DataFrame:
     hits["Missing"] = ""
 
     scan_date = data.index[-1].date()
-    print(f"Scan date: {scan_date} -- {len(hits)} SMA-pullback signal(s).")
+    # No full/partial split: this screen stays strict, so every row is `full`.
+    log_step("SCREEN", "ok",
+             f"{CONFIG_KEY} {scan_date}: {len(hits)} signal(s) (all full)")
     return hits
 
 
