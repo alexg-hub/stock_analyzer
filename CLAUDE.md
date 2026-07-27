@@ -247,7 +247,7 @@ real send.
     assembly — including tiers 1+2, reached through `scan_ticker` — logs freely.
     Tiers 1+2's progress lines used to be `print`s, i.e. stdout, because for
     `run_scanners.py` stdout *is* the log; reached through `context` they landed
-    in front of the JSON, and the `drop_unsettled_tail` WARNING — the diagnostic
+    in front of the JSON, and the `drop_unsettled_bars` WARNING — the diagnostic
     most worth seeing — was the one that broke the parse. Two consequences:
     **`run_scanner.bat` must keep its `2>&1`** or `scanner_log.txt` loses every
     step, and the `context` branch of `main()` keeps its `stdout_to_stderr()`
@@ -262,7 +262,7 @@ real send.
     pins it at import via `configure_logging`, and `config()` runs every config
     it hands out through `redirect_logging` so per-section deep copies inherit
     it. Both halves are needed: `log_step` with no `cfg` falls back to the real
-    `config.json`, and loading the cached panel logs (`drop_unsettled_tail`)
+    `config.json`, and loading the cached panel logs (`drop_unsettled_bars`)
     *before* a test body could redirect anything. `output_fingerprint()` in
     `test_signal_contract.py` catches it when this slips — it already has.
   - **Three processes, one log.** `STOCK_ANALYZER_RUN_ID` is exported by the
@@ -568,21 +568,34 @@ real send.
   have no Debt/Equity); individual ticker download failures just drop out of
   the scan; Wikipedia scraping needs the browser-like User-Agent header;
   tickers use `-` not `.` (BRK-B).
-- **Unsettled last bar.** Yahoo serves a session it has not settled as an
-  ordinary daily row — Open/High/Low/Volume present, **`Close` null** — and it
-  sometimes *reverts an already-settled bar to that form hours later* (seen
-  2026-07-24: 503 of 504 closes withdrawn on the Saturday, after Friday's
-  nightly run had scanned that same bar fine). Every condition compares against
-  `Close`, so the row makes each test NaN, `fillna(False)` reads that as "no
-  signal", and **the scan reports a confident 0 signals on data that looks
-  complete** — no error, no warning. `scanner_common.drop_unsettled_tail` (a
+- **Unsettled bars, trailing *and* interior.** Yahoo serves a session it has not
+  settled as an ordinary daily row — Open/High/Low/Volume present, **`Close`
+  null** — and it sometimes *reverts an already-settled bar to that form hours
+  later* (seen 2026-07-24: 503 of 504 closes withdrawn on the Saturday, after
+  Friday's nightly run had scanned that same bar fine). Every condition compares
+  against `Close`, so the row makes each test NaN, `fillna(False)` reads that as
+  "no signal", and **the scan reports a confident 0 signals on data that looks
+  complete** — no error, no warning. `scanner_common.drop_unsettled_bars` (a
   *fraction*-of-tickers test, since individual tickers legitimately go missing)
-  strips such trailing bars in both download functions and on every cache load,
-  logging which bar it dropped (`DOWNLOAD warn`); that also makes an intraday
-  run scan the last settled session instead of a partial one. If a zero-signal
-  night ever looks wrong, check that run's `output/logs/<run_id>.log` for the
-  `DOWNLOAD warn` line first (or `output/scanner_log.txt`, which captures the
-  same steps via `2>&1`), and never assume a NaN close means a failed condition.
+  strips such bars in both download functions and on every cache load, logging
+  which ones it dropped (`DOWNLOAD warn`); for a trailing bar that also makes an
+  intraday run scan the last settled session instead of a partial one.
+  **It must keep dropping interior bars, not just the tail.** A withdrawn bar
+  stops being the tail the moment the next session lands on top of it, but every
+  `compute_*` builds its baselines with `rolling(window)` at the default
+  `min_periods=window` — so one NaN *inside* the window voids the output for the
+  next `window` sessions. That is the 2026-07-27 night: the guard was tail-only,
+  Yahoo still had 2026-07-24 blank for 502 of 503 tickers, Monday's bar sat on
+  top, `prior_high` went NaN for 502 tickers, and the alert said "nothing today"
+  while suppressing 6 real signals — with 312 more sessions of the same queued up
+  before the bad bar aged out of the breakout window. The bar is **dropped, not
+  forward-filled**: a session Yahoo withdrew is not a session, and a synthetic
+  flat bar would corrupt the volume baselines and candle tests rather than just
+  shorten the window by a day. Tests pin both the interior case and the
+  rolling-window recovery. If a zero-signal night ever looks wrong, check that
+  run's `output/logs/<run_id>.log` for the `DOWNLOAD warn` line first (or
+  `output/scanner_log.txt`, which captures the same steps via `2>&1`), and never
+  assume a NaN close means a failed condition.
 - Windows box, Microsoft Store Python 3.13 (`python` on PATH). yfinance's
   progress bar is disabled for non-TTY output so `output/scanner_log.txt` stays
   readable. matplotlib uses the Agg backend (set in `charts.py`).

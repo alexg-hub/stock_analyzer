@@ -760,8 +760,8 @@ def _baseline_rows(positions: pd.DataFrame, horizons: list[int],
         path = bu.cache_path(cfg["backtest"])
         if not path.exists():
             return []
-        from scanner_common import drop_unsettled_tail
-        panel = drop_unsettled_tail(pd.read_pickle(path))
+        from scanner_common import drop_unsettled_bars
+        panel = drop_unsettled_bars(pd.read_pickle(path))
         benchmark = cfg["backtest"].get("benchmark_ticker", "SPY")
         universe = [t for t in panel["Close"].columns if t != benchmark]
         start = panel.index[-1] - pd.DateOffset(years=int(cfg["backtest"].get("years", 3)))

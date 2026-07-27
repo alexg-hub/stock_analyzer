@@ -43,7 +43,7 @@ import sma_pullback
 import sma_reclaim
 from scanner_common import (
     download_price_data,
-    drop_unsettled_tail,
+    drop_unsettled_bars,
     get_sp500_tickers,
     load_config,
     output_dir,
@@ -92,7 +92,7 @@ def cached_panel(bt_cfg: dict) -> pd.DataFrame:
             f"No cached price panel at {path}.\n"
             f"Run `python backtest_universe.py` (optionally with --years N) "
             f"once to download and cache it.")
-    panel = drop_unsettled_tail(pd.read_pickle(path))
+    panel = drop_unsettled_bars(pd.read_pickle(path))
     print(f"Using cached panel {path.name} ({panel.shape[1] // 6} tickers, "
           f"{len(panel)} days, {panel.index[0].date()} .. "
           f"{panel.index[-1].date()})")
@@ -118,7 +118,7 @@ def load_panel(bt_cfg: dict, cfg: dict, years: int, warmup_days: int,
         age_days = (time.time() - path.stat().st_mtime) / 86400
         # A cache written mid-session can end on an unsettled bar; clean it on
         # load so an old pickle behaves like a fresh download.
-        cached = drop_unsettled_tail(pd.read_pickle(path))
+        cached = drop_unsettled_bars(pd.read_pickle(path))
         span_years = (cached.index[-1] - cached.index[0]).days / 365.25
         if age_days <= max_age_days and span_years >= period_years - 0.2:
             print(f"Using cached panel {path.name} "

@@ -30,7 +30,7 @@ enable_utf8_output()
 
 # Redirect the step log here, at the first import any test performs, and before
 # any of them touches production code. It has to be this early: loading the
-# cached panel runs `drop_unsettled_tail`, which logs, so a redirect installed
+# cached panel runs `drop_unsettled_bars`, which logs, so a redirect installed
 # in the test body would already be too late. Covers every `log_step` call that
 # passes no cfg (the screens and the download layer log that way); a call that
 # passes its own cfg is covered by that cfg carrying a redirected
@@ -115,14 +115,14 @@ def cached_panel_or_skip():
     otherwise hands every test a last row with no closes.
     """
     import backtest_universe
-    from scanner_common import drop_unsettled_tail
+    from scanner_common import drop_unsettled_bars
     cfg = config()
     path = backtest_universe.cache_path(cfg["backtest"])
     if not path.exists():
         print(f"SKIP: no cached panel at {path}\n"
               f"      run `python backtest_universe.py` once first.")
         sys.exit(SKIP)
-    panel = drop_unsettled_tail(pd.read_pickle(path))
+    panel = drop_unsettled_bars(pd.read_pickle(path))
     print(f"panel: {panel.shape[1] // 6} tickers, {len(panel)} days, "
           f"{panel.index[0].date()} .. {panel.index[-1].date()}")
     return panel, cfg

@@ -50,7 +50,7 @@ from scanner_common import (
     QUALITY_COL,
     QUALITY_MISSING_COL,
     VERDICT_COL,
-    drop_unsettled_tail,
+    drop_unsettled_bars,
     quality_check,
     update_csv_rows,
 )
@@ -274,7 +274,7 @@ _unsettled = truncated.copy()
 _unsettled.loc[_unsettled.index[-1], "Close"] = float("nan")
 _probe = Path(_harness.LOG_DIR) / f"{scanner_common.run_id()}.log"
 _before = _probe.read_text(encoding="utf-8")
-_kept = drop_unsettled_tail(_unsettled)
+_kept = drop_unsettled_bars(_unsettled)
 _drop_lines = _probe.read_text(encoding="utf-8")[len(_before):].splitlines()
 c.ok("dropping an unsettled bar is logged as a warning, naming the bar",
      len(_kept) == len(_unsettled) - 1
@@ -341,13 +341,13 @@ def with_unsettled(frame, bars=1, missing=None):
 
 
 c.ok("a clean panel is returned untouched",
-     drop_unsettled_tail(panel).index.equals(panel.index))
+     drop_unsettled_bars(panel).index.equals(panel.index))
 c.ok("a fully unsettled bar is dropped",
-     drop_unsettled_tail(with_unsettled(panel)).index.equals(panel.index))
+     drop_unsettled_bars(with_unsettled(panel)).index.equals(panel.index))
 c.ok("several unsettled bars are all dropped",
-     drop_unsettled_tail(with_unsettled(panel, bars=3)).index.equals(panel.index))
+     drop_unsettled_bars(with_unsettled(panel, bars=3)).index.equals(panel.index))
 c.ok("a few missing tickers do not discard the bar",
-     len(drop_unsettled_tail(
+     len(drop_unsettled_bars(
          with_unsettled(panel, missing=max(1, len(all_tickers) // 10)))
      ) == len(panel) + 1,
      "per-ticker download failures are normal and must not lose the day")
@@ -358,10 +358,83 @@ for module, compute, strategy in screens(cfg):
         return module.fires_mask(
             frame, compute(frame, strategy), strategy).fillna(False).iloc[-1]
 
-    raw, guarded = last_fires(unsettled), last_fires(drop_unsettled_tail(unsettled))
+    raw, guarded = last_fires(unsettled), last_fires(drop_unsettled_bars(unsettled))
     c.ok(f"{module.CONFIG_KEY}: unsettled bar would scan as zero, guard restores it",
          int(raw.sum()) == 0 and guarded.equals(last_fires(panel)),
          f"unguarded={int(raw.sum())} guarded={int(guarded.sum())}")
+
+# --------------------------------------------------------------------------
+# The same withdrawn bar, one session later. It is no longer the tail, so a
+# tail-only guard walks straight past it -- but every compute_* builds its
+# baselines with `rolling(window)` at the default `min_periods=window`, so one
+# NaN *inside* the window voids the output for the next `window` sessions
+# rather than for that day alone. That is the 2026-07-27 night: Yahoo still had
+# 2026-07-24 blank for 502 of 503 tickers, Monday sat on top of it, and the
+# alert said "nothing today" while suppressing 6 real signals. A bar no longer
+# being last is not a bar becoming valid.
+c.section("an unsettled interior bar is dropped too")
+
+_INTERIOR_BACK = 3   # well inside every screen's rolling window
+
+
+def with_interior_unsettled(frame, back=_INTERIOR_BACK, fields=None):
+    """`frame` with the bar `back` from the end blanked out for every ticker.
+
+    Blanks **all** OHLCV fields by default, which is the shape actually
+    observed on 2026-07-24 (Open/High/Low/Volume withdrawn along with Close,
+    not just Close) -- and the shape that voids the breakout screen's
+    High-derived baselines as well as the pullback screen's Close-derived SMA.
+    """
+    out = frame.copy()
+    fields = fields or list(dict.fromkeys(frame.columns.get_level_values(0)))
+    cols = pd.MultiIndex.from_product([fields, all_tickers])
+    out.loc[[out.index[-back]], cols.intersection(frame.columns)] = float("nan")
+    return out
+
+
+poisoned = with_interior_unsettled(truncated)
+# What the panel should look like afterwards: the phantom session gone, every
+# real one untouched.
+without = truncated.drop(index=truncated.index[-_INTERIOR_BACK])
+
+_before = _probe.read_text(encoding="utf-8")
+_cleaned = drop_unsettled_bars(poisoned)
+_drop_lines = _probe.read_text(encoding="utf-8")[len(_before):].splitlines()
+c.ok("the interior bar is dropped and no other bar is",
+     _cleaned.index.equals(without.index),
+     f"{len(_cleaned)} bars vs {len(without)} expected")
+c.ok("dropping an interior bar is logged as a warning, naming the bar",
+     any(ln.split()[3] == "warn"
+         and str(truncated.index[-_INTERIOR_BACK].date()) in ln
+         for ln in log_lines_for(_drop_lines, "DOWNLOAD")),
+     " | ".join(_drop_lines) or "nothing logged")
+c.ok("a Close-only interior blank is caught as well",
+     drop_unsettled_bars(
+         with_interior_unsettled(truncated, fields=["Close"])
+     ).index.equals(without.index),
+     "the guard keys off Close, whatever else Yahoo left behind")
+c.ok("a few missing tickers do not discard an interior bar",
+     len(drop_unsettled_bars(pd.concat([
+         poisoned.iloc[:-_INTERIOR_BACK],
+         truncated.iloc[-_INTERIOR_BACK:],
+     ]))) == len(truncated),
+     "per-ticker gaps mid-panel are normal and must not lose the day")
+
+for module, compute, strategy in screens(cfg):
+    def last_fires(frame):
+        return module.fires_mask(
+            frame, compute(frame, strategy), strategy).fillna(False).iloc[-1]
+
+    raw, guarded = last_fires(poisoned), last_fires(_cleaned)
+    # Compared against `without`, not `truncated`: dropping a bar legitimately
+    # slides every rolling window one session further back, so "unchanged
+    # output" is the wrong bar to hold the guard to. What must hold is that the
+    # result is exactly the one a panel that never carried the phantom would
+    # have produced.
+    c.ok(f"{module.CONFIG_KEY}: an interior NaN voids the window, guard restores it",
+         int(raw.sum()) == 0 and guarded.equals(last_fires(without)),
+         f"unguarded={int(raw.sum())} guarded={int(guarded.sum())} "
+         f"expected={int(last_fires(without).sum())}")
 
 # --------------------------------------------------------------------------
 # Tier 2: the quality verdict, the archive, and the deep-dive gate.

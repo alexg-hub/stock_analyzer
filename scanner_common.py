@@ -361,8 +361,8 @@ def get_sp500_tickers(source_url: str) -> list[str]:
     return tickers
 
 
-def drop_unsettled_tail(data: pd.DataFrame, max_missing_pct: float = 0.5) -> pd.DataFrame:
-    """Drop trailing bars that have no settled close.
+def drop_unsettled_bars(data: pd.DataFrame, max_missing_pct: float = 0.5) -> pd.DataFrame:
+    """Drop every bar that has no settled close -- trailing *or* interior.
 
     Yahoo serves an unsettled session as an ordinary daily row with Open/High/
     Low/Volume filled in but **Close null** -- and it sometimes reverts an
@@ -374,29 +374,52 @@ def drop_unsettled_tail(data: pd.DataFrame, max_missing_pct: float = 0.5) -> pd.
     looks complete. Scanning the last *settled* bar instead is also the right
     behaviour for an intraday run.
 
+    **Interior bars matter as much as trailing ones, and for longer.** A
+    withdrawn bar stops being the tail as soon as the next session lands on top
+    of it, and every `compute_*` builds its baselines with `rolling(window)` at
+    the default `min_periods=window` -- so one NaN *inside* the window makes the
+    output NaN for the next `window` sessions, not just for that day. That is
+    the 2026-07-27 night: Yahoo still had 2026-07-24 blank for 502 of 503
+    tickers, Monday's bar sat on top of it, and the tail-only guard no longer
+    applied. `prior_high` went NaN for 502 tickers, every condition followed,
+    and the scan announced "nothing today" -- suppressing 6 real signals, with
+    312 more sessions of the same to come before the bad bar aged out of the
+    breakout window. A bar no longer being last is not a bar becoming valid.
+
+    Dropped, not forward-filled: a session Yahoo has withdrawn is not a session,
+    and inventing a flat bar there would corrupt the volume baselines and the
+    candle tests instead of just shortening the window by a day.
+
     A fraction, not `any`: individual tickers legitimately go missing
     (delistings, per-ticker download failures) and must not discard the day.
     """
     if "Close" not in data.columns.get_level_values(0):
         return data
     missing = data["Close"].isna().mean(axis=1)   # NaN fraction per bar
-    keep = len(data)
-    while keep and missing.iloc[keep - 1] > max_missing_pct:
-        keep -= 1
-    if keep == len(data):
+    bad = missing > max_missing_pct
+    if not bad.any():
         return data
-    dropped = [str(d.date()) for d in data.index[keep:]]
-    if not keep:
+    if bad.all():
         raise RuntimeError(
-            f"No bar has a settled close (checked {len(dropped)}) -- Yahoo is "
+            f"No bar has a settled close (checked {len(data)}) -- Yahoo is "
             f"serving unsettled rows; retry later.")
+
+    kept = data.loc[~bad]
+    dropped = [str(d.date()) for d in data.index[bad]]
+    # Trailing drops change *which* bar gets scanned; interior ones silently
+    # poison the rolling windows. Both are worth a line, but they are different
+    # failures and the log has to say which one happened.
+    tail_dropped = bool(bad.iloc[-1])
     # Logged at `warn`, not printed: this is the single diagnostic most worth
     # finding after a suspicious zero-signal night, and burying it in a wall of
     # stdout is how it got missed before.
     log_step("DOWNLOAD", "warn",
-             f"dropped {', '.join(dropped)} -- no settled close for most "
-             f"tickers; scanning {data.index[keep - 1].date()} instead")
-    return data.iloc[:keep]
+             f"dropped {len(dropped)} bar(s) with no settled close for most "
+             f"tickers: {', '.join(dropped)}"
+             + (f"; scanning {kept.index[-1].date()} instead" if tail_dropped
+                else " (interior -- would have voided every rolling window "
+                     "spanning it)"))
+    return kept
 
 
 def download_price_data(tickers: list[str], period: str, interval: str) -> pd.DataFrame:
@@ -434,7 +457,7 @@ def download_price_data(tickers: list[str], period: str, interval: str) -> pd.Da
         # same normalization `download_history` does. Matters for the
         # on-demand single-ticker scan.
         data.columns = pd.MultiIndex.from_product([data.columns, list(tickers)])
-    return drop_unsettled_tail(data)
+    return drop_unsettled_bars(data)
 
 
 def warmup_months(window: int) -> int:
@@ -466,7 +489,7 @@ def download_history(ticker: str, start: pd.Timestamp, end: pd.Timestamp,
         raise SystemExit(f"No data returned for {ticker} -- check the ticker/dates.")
     if not isinstance(data.columns, pd.MultiIndex):
         data.columns = pd.MultiIndex.from_product([data.columns, [ticker]])
-    return drop_unsettled_tail(data)
+    return drop_unsettled_bars(data)
 
 
 def single_ticker_panel(data: pd.DataFrame, ticker: str) -> pd.DataFrame:

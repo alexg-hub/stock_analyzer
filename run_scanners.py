@@ -84,7 +84,7 @@ def scan_ticker(ticker: str, cfg: dict) -> dict:
         interval=cfg["data"]["download_interval"],
     )
     # From the price data, never from latest_hits.json: this is the last
-    # *settled* bar (drop_unsettled_tail already ran), and it makes a re-look
+    # *settled* bar (drop_unsettled_bars already ran), and it makes a re-look
     # next week a new row rather than a collision with today's.
     scan_date = data.index[-1].date()
 

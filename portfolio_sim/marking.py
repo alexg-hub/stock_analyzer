@@ -26,7 +26,7 @@ from backtest_universe import forward_trades
 from research_report import load_facts
 from scanner_common import (
     download_price_data,
-    drop_unsettled_tail,
+    drop_unsettled_bars,
     positions_csv_path,
     step,
     warmup_months,
@@ -84,7 +84,7 @@ def price_panel(tickers: list[str], oldest: pd.Timestamp, cfg: dict,
     interval = cfg.get("data", {}).get("download_interval", "1d")
     period = _period_for(oldest, horizons_of(port_cfg), extra_bars)
     panel = download_price_data(tickers, period, interval)
-    return drop_unsettled_tail(panel)
+    return drop_unsettled_bars(panel)
 
 
 def _cell(frame: pd.DataFrame, day, ticker):
