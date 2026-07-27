@@ -56,11 +56,15 @@ rem *silently*, and a subcommand-only Bash rule -- never `Bash(python *)`, which
 rem would be arbitrary code execution.
 rem --session-id must stay: drop it and log-session has no transcript to find,
 rem so the model's half of the step log goes missing without an error.
+rem Keep this allow-list identical to run_deepdive.bat's -- same enumerated IBKR
+rem tools (the `get_account_*`/`get_pa_*` family is deliberately excluded; the
+rem user's real book is out of scope, see SKILL.md step 2) and the same Edit,
+rem which grants nothing Write does not already grant over the same paths.
 type output\ondemand_prompt.txt | claude -p ^
   --model %MODEL% ^
   --session-id %SESSION_ID% ^
   --permission-mode dontAsk ^
-  --allowedTools "Bash(python research_report.py *) Read Write Glob Grep WebSearch WebFetch mcp__claude_ai_Interactive_Brokers_IBKR__*" ^
+  --allowedTools "Bash(python research_report.py *) Read Write Edit Glob Grep WebSearch WebFetch mcp__claude_ai_Interactive_Brokers_IBKR__search_contracts mcp__claude_ai_Interactive_Brokers_IBKR__get_company_connections mcp__claude_ai_Interactive_Brokers_IBKR__get_company_themes mcp__claude_ai_Interactive_Brokers_IBKR__get_theme_details mcp__claude_ai_Interactive_Brokers_IBKR__search_investment_topics mcp__claude_ai_Interactive_Brokers_IBKR__get_price_snapshot mcp__claude_ai_Interactive_Brokers_IBKR__get_price_history mcp__claude_ai_Interactive_Brokers_IBKR__get_option_parameters mcp__claude_ai_Interactive_Brokers_IBKR__get_option_data" ^
   --output-format json > "%RESULT_JSON%" 2>>output\deepdive_log.txt
 echo ==== On-demand deep-dive finished %date% %time% (exit %errorlevel%) ==== >> output\deepdive_log.txt
 

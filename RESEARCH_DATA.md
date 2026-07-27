@@ -46,7 +46,7 @@ JNJ 8719, JPM 1520593.
 | Market stats & IV | `get_price_snapshot` | ✅ | working: 52w hi/lo range, historical_vol (annualized), IV percentile (13/26/52w), avg_90d_usd_volume, dividend_yield, change, volume |
 | Market stats (gated) | `get_price_snapshot` | ❌ | `cumulative_perf_*`, `year_to_date_change`, `prior_close` came back **empty on every name** — market-data-subscription gated; do not depend |
 | Options / sentiment | `get_option_parameters` → `get_option_data` → snapshot IV/OI | ✅ | chain + IV/open-interest via the same snapshot path |
-| Account context | `get_account_summary` / `get_account_positions` / `get_account_balances` | ✅ | returns net-liq, buying power, margin, positions → "already held" / size-vs-portfolio flags (values are the user's live financials — never commit them) |
+| Account context | `get_account_summary` / `get_account_positions` / `get_account_balances` / `get_account_trades` / `get_pa_*` | 🚫 | **Out of scope — do not call.** They work, and they return the user's live book (net-liq, buying power, margin, positions), but the user asked for the real portfolio to stay out of the analysis: a deep-dive grades the *security* and tier 4 grades the signal against a fixed-notional virtual ledger, so what is already held changes neither. `SKILL.md` step 2 states the same prohibition. |
 
 **IBKR does not provide:** financial statements, analyst EPS/revenue estimates,
 earnings dates/surprise, or a news feed (→ all Yahoo's job).

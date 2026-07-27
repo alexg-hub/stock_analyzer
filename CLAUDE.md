@@ -201,7 +201,19 @@ real send.
   source can and cannot supply. **The IBKR MCP tools must stay in
   `run_deepdive.bat`'s `--allowedTools`** — under `--permission-mode dontAsk` an
   un-allowed tool is refused *silently*, which would drop the moat/competitor
-  section from every report with no error to explain it.
+  section from every report with no error to explain it. They are **enumerated,
+  not wildcarded**, and `run_ondemand.bat` must carry the identical list: the
+  `get_account_*` / `get_pa_*` family is deliberately excluded because **the
+  user's real IBKR book is out of scope** — a deep-dive grades the security and
+  tier 4 grades the signal against a fixed-notional virtual ledger, so what is
+  already held changes neither, and reports must not mention holdings, position
+  size or concentration. `SKILL.md` step 2 and `RESEARCH_DATA.md` say the same;
+  the allow-list is what enforces it when nobody is watching. The cost is that a
+  genuinely new IBKR tool has to be added in both `.bat` files — it surfaces as
+  a `DENIED` line in the run log, so check there when a section goes missing.
+  `Edit` is allowed: it grants nothing `Write` does not already grant over the
+  same paths, and without it a refusal costs a whole report re-issued through
+  `Write` (run `710e2c61` lost GM's final revision that way).
 - **The unattended run only speaks in subcommands.** `Bash(python
   research_report.py *)` is a prefix rule, and Claude Code requires *every*
   segment of a compound command to be allowed — so `cmd > file`, `cmd; echo $?`,

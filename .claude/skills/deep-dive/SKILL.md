@@ -81,9 +81,14 @@ tier 2 said about it. If the gate holds everything back, say so and offer
    `get_company_connections(conid, include=["link_info"])` (moat, competitors,
    products/revenue mix, geography — with evidence), `get_company_themes(conid)`
    (ranked peers / secular themes), `get_price_snapshot(conid, [...])` (52w range,
-   historical_vol, implied_volatility_percentile, avg_90d_usd_volume, dividend_yield),
-   and — if relevant — `get_account_positions`/`get_account_summary` to flag
-   "already held" / size vs portfolio.
+   historical_vol, implied_volatility_percentile, avg_90d_usd_volume, dividend_yield).
+   **Never call `get_account_positions`, `get_account_balances`,
+   `get_account_summary`, `get_account_trades` or `get_pa_*`.** The user's real
+   IBKR book is out of scope: a deep-dive grades the *security*, and tier 4
+   grades the signal against a fixed-notional virtual ledger, so what is or is
+   not already held changes neither one. Do not mention holdings, position size
+   or concentration in the report — flagging "already held" is exactly what is
+   being asked for here, and it is not wanted.
 3. **Live web research.** `WebSearch` (and `WebFetch` on the best sources) for the
    last ~30-60 days: earnings/guidance, M&A or **rumors**, product news, analyst
    upgrades/downgrades, insider/buyback, litigation/regulatory. **Link each item to
