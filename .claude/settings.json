@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__stock_analyzer__scan_status",
+      "mcp__stock_analyzer__scan_tickers",
+      "mcp__stock_analyzer__deepdive_candidates",
+      "mcp__stock_analyzer__deepdive_context",
+      "mcp__stock_analyzer__deepdive_complete_log",
+      "mcp__stock_analyzer__portfolio_status",
+      "mcp__stock_analyzer__portfolio_open",
+      "mcp__stock_analyzer__portfolio_mark",
+      "mcp__stock_analyzer__portfolio_positions",
+      "mcp__stock_analyzer__portfolio_analyze",
+      "mcp__stock_analyzer__backtest_universe",
+      "mcp__stock_analyzer__backtest_ticker",
+      "mcp__stock_analyzer__tune_screen",
+      "mcp__stock_analyzer__config_get",
+      "mcp__stock_analyzer__job_status",
+      "mcp__stock_analyzer__job_result",
+      "mcp__stock_analyzer__list_jobs"
+    ]
+  }
+}

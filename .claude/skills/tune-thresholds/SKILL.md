@@ -12,6 +12,11 @@ python tune_screen.py grid breakout_strategy --csv
 python tune_screen.py delay reclaim_strategy
 ```
 
+Interactively you may use the `stock_analyzer` MCP tool `tune_screen` instead —
+same script, run as a background job, and it checks for the cached panel up
+front rather than dying minutes in. Read the results with `tune_results`'s CSV
+via `Read`, or from the job's output.
+
 - **`tune_screen.py` is the threshold tuner** — sweeps one screen's parameters
   (`sensitivity` one at a time / `grid` crossing 2-3 / `delay` wait×hold) over
   the **cached** panel via `backtest_universe.cached_panel()`, which raises

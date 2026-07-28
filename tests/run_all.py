@@ -17,6 +17,7 @@ HERE = Path(__file__).resolve().parent
 # In dependency order: cheapest and most fundamental first, so a broken
 # forward_trades shows up before the tests that build on it.
 TESTS = [
+    ("test_mcp_server.py", "offline -- MCP tool contract, stdout purity, dry-run"),
     ("test_forward_trades.py", "offline -- synthetic panel arithmetic"),
     ("test_research_output.py", "offline -- tier-3 financials, chart, verdict cards"),
     ("test_portfolio_sim.py", "offline -- tier-4 ledger, marking, attribution"),

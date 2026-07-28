@@ -18,6 +18,11 @@ python backtest_universe.py --split-by-tier                     # full vs partia
 python backtest_universe.py --refresh                           # re-download the panel
 ```
 
+Interactively you may use the `stock_analyzer` MCP tool `backtest_universe`
+instead — the same script with the same flags, run as a background job so the
+session stays responsive; poll `job_status`. Read the resulting
+`output/backtest_universe_summary.csv` with `Read`.
+
 Caches the price panel to `output/backtest_universe_cache.pkl`, so re-runs
 after a config tweak take seconds. `tune_screen.py` and the tests read that same
 cache — run this once before either.

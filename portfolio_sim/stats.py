@@ -102,7 +102,12 @@ def spearman(x, y) -> dict:
     out = {"n": len(frame), "rho": float("nan"), "p": float("nan")}
     if len(frame) < 3 or frame["x"].nunique() < 2 or frame["y"].nunique() < 2:
         return out
-    rho = frame["x"].corr(frame["y"], method="spearman")
+    # Pearson on ranks *is* Spearman, and pandas' `.rank()` uses average ranks,
+    # which is exactly the tie correction. Spelled out this way because
+    # `.corr(method="spearman")` reaches for `scipy.stats.spearmanr`, and this
+    # module hand-rolls its statistics precisely so scipy stays out of the
+    # dependency list.
+    rho = frame["x"].rank().corr(frame["y"].rank())
     out["rho"] = float(rho)
     if abs(rho) >= 1.0:
         out["p"] = 0.0

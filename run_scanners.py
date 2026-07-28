@@ -17,9 +17,11 @@ Adding a new scanner:
 
 Usage:
     pip install -r requirements.txt
-    python run_scanners.py
+    python run_scanners.py              # the production path -- posts to Discord
+    python run_scanners.py --no-send    # same scan, cards printed instead of posted
 """
 
+import argparse
 import sys
 import tempfile
 import time
@@ -58,6 +60,21 @@ SCANNERS = [breakout_scanner, sma_pullback, sma_reclaim]
 # mostly about tier 2, so the payload still needs somewhere to put the row.
 NO_SIGNAL_KEY = "on_demand"
 NO_SIGNAL_TITLE = "No active technical signal"
+
+
+def parse_args(argv: list[str] | None = None):
+    """The nightly scan's only CLI surface.
+
+    Deliberately one flag. `run_scanner.bat` and Task Scheduler invoke this
+    with no arguments and must keep behaving exactly as before, so anything
+    added here has to be optional and default to the production path.
+    """
+    parser = argparse.ArgumentParser(
+        description="Nightly S&P 500 scan (tiers 1 and 2).")
+    parser.add_argument(
+        "--no-send", action="store_true",
+        help="print the Discord cards instead of posting them (dry run)")
+    return parser.parse_args(argv)
 
 
 def scan_ticker(ticker: str, cfg: dict) -> dict:
@@ -145,8 +162,14 @@ def log_quality(results: list, fund_cfg: dict, cfg: dict) -> None:
              cfg=cfg)
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
     cfg = load_config()
+    if args.no_send:
+        # Reuse the dry-run branch `send_discord_alert` already has for an
+        # unconfigured webhook rather than adding a second suppression path:
+        # blanking the URL makes it print the cards instead of posting them.
+        cfg["discord"] = {**cfg.get("discord", {}), "webhook_url": ""}
     t0 = time.perf_counter()
     log_step("SCAN", "start", f"nightly scan (tiers 1+2)  run={run_id()}", cfg=cfg)
 

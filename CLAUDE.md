@@ -46,6 +46,7 @@ python tests/run_all.py --network      # adds the Yahoo round-trip test
 # to the user's channel (config.json contains a live webhook URL). Don't run
 # it casually.
 python run_scanners.py
+python run_scanners.py --no-send   # same scan, cards printed instead of posted
 
 # Historical validation of the same logic on one ticker (no Discord send);
 # each writes output/backtest_*.csv and output/backtest_*.png
@@ -96,6 +97,12 @@ python -m portfolio_sim exit-scan --no-send     # record the exit, post nothing
 python -m portfolio_sim analyze     # -> output/portfolio/findings.csv
 python -m portfolio_sim analyze --no-baseline   # skip the cached-panel baseline
 python -m portfolio_sim status      # what is on the book, what can be asked yet
+
+# The MCP server: the same four tiers, driven from a Claude Code session.
+# `.mcp.json` launches it; `/mcp` shows it connected. Read reports, logs and
+# CSVs under output/ with Read/Glob -- there are deliberately no tools for that.
+python mcp_server.py --selftest     # list tools, call the read-only ones, exit
+python mcp_server.py                # stdio (what .mcp.json runs)
 ```
 
 To test alert formatting/sending without spamming the channel, monkeypatch
@@ -413,6 +420,31 @@ real send.
     pinned against a hand-computed value in the tests. p-values are normal
     approximations — acceptable only because `sufficient_n` and `q_value` gate
     every claim.
+- **`mcp_server.py` is the Claude Code surface**, flat in the repo root for the
+  same reason everything else is — `PROJECT_ROOT` depends on it. `mcp_tools/` is
+  a package (like `portfolio_sim/`) and copies its `sys.path` header. Two
+  invariants hold it together, and both fail *silently* when broken:
+  - **Nothing may write to stdout in the server process.** The transport speaks
+    JSON-RPC over fd 1, and the production code these tools call prints freely
+    (`run_scanners.main` prints hit tables, `download_price_data` prints
+    progress). `_serve_stdio` quarantines fd 1 at both the OS and Python level
+    and hands the transport a private `os.dup` of the real stdout — do **not**
+    replace this with per-tool `stdout_to_stderr()`, which swaps a global while
+    FastMCP runs tool bodies on worker threads and the job pool adds more.
+    `tests/test_mcp_server.py` pins it; that check is the most important one in
+    the file.
+  - **Side-effecting tools default to dry-run.** `send: bool = False` on
+    anything that can reach Discord, `confirm: bool = False` on `config_set`.
+    `.claude/settings.json` also omits those four tools so they always prompt —
+    but the default is the real guard, because **a permission rule that fails to
+    match fails silently**. MCP rules are `mcp__stock_analyzer__<tool>`; a bare
+    tool name matches nothing. `config_set` additionally refuses `discord.*` and
+    `research.auto.discord_send` outright: a tool that could flip the send gate
+    would make every other dry-run default decorative.
+  There are deliberately **no file-reading tools** — reports, logs, CSVs and
+  charts under `output/` are read with `Read`/`Glob`, which do it better. A
+  `read_report`/`tail_log`/`backtest_results` reappearing means the surface
+  crept; a test asserts they have not.
 - **Every generated file goes to `output/`** via
   `scanner_common.output_dir()` — logs, `latest_hits.json`, the cached price
   panel, all backtest tables/charts, the tier-3 reports (`output/reports/`), the

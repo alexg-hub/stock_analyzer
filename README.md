@@ -260,6 +260,7 @@ what tier 2 decided:
 ```
 pip install -r requirements.txt
 python run_scanners.py            # tiers 1+2: full S&P 500 scan + Discord alert
+python run_scanners.py --no-send  # the same scan, cards printed instead of posted
 python research_report.py candidates                 # tier 3: who to deep-dive
 python research_report.py scan PGR                   # on-demand: tiers 1+2 for one ticker
 run_ondemand.bat PGR                                 # on-demand: all three tiers
@@ -271,6 +272,61 @@ python backtest_universe.py       # universe-wide profit backtest (all screens)
 python tune_screen.py sensitivity reclaim_strategy   # which thresholds matter?
 python tests/run_all.py                              # the test suite
 ```
+
+### Driving it from Claude Code (the MCP server)
+
+`mcp_server.py` exposes all four tiers as MCP tools, so the pipeline can be run
+from a Claude Code session instead of by hand. `.mcp.json` in the repo root is
+the entire install — open the project and `/mcp` shows `stock_analyzer`
+connected. To check it without a client:
+
+```
+python mcp_server.py --selftest    # list the tools, call the read-only ones
+```
+
+**Reports, logs, CSVs and charts are read with `Read`/`Glob`, not through
+tools.** Everything generated lands under `output/` and is plain text or PNG, so
+a wrapper would only get in the way. The tools are the things a file read cannot
+do: run something, run it safely, or run it without blocking.
+
+| Tool | What |
+|---|---|
+| `scan_status` | latest scan: date, per-screen counts, tickers |
+| `scan_tickers` | tiers 1+2 for named tickers, on demand |
+| `run_nightly_scan` | the full S&P 500 scan **(prompts)** |
+| `deepdive_candidates` | who is worth a deep dive, per the tier-2 gate |
+| `deepdive_context` | the deterministic tier-3 research bundle |
+| `deepdive_post_verdicts` | record verdicts, optionally post them **(prompts)** |
+| `deepdive_complete_log` | finish the log of a run that was killed mid-flight |
+| `portfolio_status` / `portfolio_positions` | what is on the virtual book |
+| `portfolio_open` / `portfolio_mark` | signals → positions; fill and mark them |
+| `portfolio_exit_scan` | double tops on the book **(prompts)** |
+| `portfolio_analyze` | which recorded attribute predicted the return |
+| `backtest_universe` / `backtest_ticker` | the profit backtests |
+| `tune_screen` | sweep one screen's thresholds |
+| `config_get` / `config_set` | read config (webhook redacted); edit it **(prompts)** |
+| `job_status` / `job_result` / `list_jobs` | poll the long runs |
+
+Anything that takes minutes — the nightly scan, the universe backtest, tuning,
+marking, deep-dive context — returns a **`job_id`** immediately rather than
+blocking the session. Poll `job_status(job_id)`; it returns the tail of that
+run's step log, which is the only progress these runs emit.
+
+**Four tools are deliberately left off the allow-list in
+`.claude/settings.json`, so they prompt every time:** `run_nightly_scan`,
+`portfolio_exit_scan`, `deepdive_post_verdicts` and `config_set`. The first
+three can post to the live Discord channel and the fourth rewrites `config.json`.
+They also all default to dry-run (`send=False` / `confirm=False`), which is the
+guard that matters — a permission rule that fails to match fails silently, but a
+default cannot. `config_set` refuses `discord.*` and `research.auto.discord_send`
+outright, previews a diff unless `confirm=True`, and backs up to
+`output/config_backups/` before every write.
+
+The three skills (`deep-dive`, `tune-thresholds`, `universe-backtest`) still
+drive the CLI rather than these tools. That is intentional: the unattended
+nightly run executes those same skill bodies through `claude -p` behind a
+`Bash(python research_report.py *)` allow-list, and a mis-specified allow-list
+there fails silently. Interactively you can use either.
 
 ### Backtests
 

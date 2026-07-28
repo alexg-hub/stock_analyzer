@@ -31,6 +31,13 @@ yours.
 The "verdict" is an analytical rating, never a buy/sell instruction. Put the
 disclaimer line (below) in every report and the Discord summary.
 
+**Which surface to use.** The commands below are the CLI, and the unattended
+nightly run executes this skill through `claude -p` behind a
+`Bash(python research_report.py *)` allow-list — so they must stay as they are.
+Interactively you may use the `stock_analyzer` MCP tools instead
+(`deepdive_candidates`, `deepdive_context`, `deepdive_post_verdicts`); they call
+the same functions. Either is correct; do not mix them within one report.
+
 ## Prerequisites
 
 - `output/latest_hits.json` exists (run `python run_scanners.py` first, or work
