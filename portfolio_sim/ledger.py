@@ -225,8 +225,12 @@ def _position_rows(frame: pd.DataFrame, source: str, cfg: dict,
     """Turn one source table into ledger rows."""
     if frame.empty:
         return []
-    configured = list(cfg.get("fundamentals", {})
-                      .get("quality", {}).get("rules", {}).keys())
+    # The gate-bearing parameters as configured *now*; a position already on
+    # file keeps the set frozen with it (below), so retuning the registry can
+    # never rewrite a past finding.
+    configured = [k for k, spec in (cfg.get("quality", {})
+                                    .get("parameters") or {}).items()
+                  if spec.get("enabled", True) and spec.get("gate")]
     horizons = horizons_of(cfg.get("portfolio", {}))
     opened_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     entry_rule = cfg.get("portfolio", {}).get("entry", "next_open")

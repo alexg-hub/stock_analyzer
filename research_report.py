@@ -1,33 +1,37 @@
 """
-Deep-dive pipeline -- Stage 2 toolkit.
+Tier 3 -- the graded investment case.
 
-Synthesis is a *skill-driven procedure* (`.claude/skills/deep-dive`), not one
-Python function: Claude reasons in-session over the collected data + IBKR Tier-B
-(interactive MCP) + live web research to write the investment case and set the
-verdict. This module provides the deterministic pieces around that reasoning:
+**The verdict is deterministic.** `deterministic_verdict` collects the `deep`
+half of the quality registry, scores it, renders the financials chart and sets
+`conviction = score`, `tier = tier_for(score)`. It runs inside the nightly scan,
+so tonight's verdict travels in the same Discord message as the signal that
+produced it and is recorded whether or not anything else runs:
 
-  * list_candidates(hits, cfg) -> tonight's deep-dive candidates, gated by tier 2
-  * assemble_context(ticker) -> the data bundle Claude reasons over
-      (trigger + Yahoo Tier-A + deterministic quant score + SEC 10-Q/10-K filings),
-      running tiers 1+2 on demand for a ticker the nightly scan never surfaced
-  * compute_quant_score(yahoo, cfg) -> the config-driven 0-100 anchor
-  * report_dir / write_report -> archive the full report under output/
-  * post_summary / post_verdict -> deliver to Discord (reuse send_discord_alert)
-  * record_verdicts -> the permanent record of tier + conviction
+  * resolve_trigger(ticker, cfg)  -> the trigger, scanning on demand if the
+      nightly scan never surfaced this ticker
+  * deterministic_verdict(...)    -> score, tier, conviction, facts file, chart
+  * verdicts_for(tickers, cfg)    -> a batch, recorded to output/history/
+  * list_candidates(hits, cfg)    -> who is worth the deep pass, gated by tier 2
+  * report_dir / write_report     -> archive a full report under output/
+  * post_summary / post_verdict   -> deliver to Discord (send_discord_alert)
+  * record_verdicts               -> the permanent record of tier + conviction
 
-The verdict = tier + conviction: conviction = clamp(quant + narrative_adj, 0,
-100), narrative_adj (bounded by config) is Claude's qualitative adjustment; the
-tier comes from config conviction bands.
+**The narrative pass is optional and revises rather than originates.**
+`.claude/skills/deep-dive` reads `assemble_context` (the same numbers plus the
+SEC filings), adds IBKR's qualitative graph and live web research, and may move
+the conviction by a bounded `narrative_adj`. When it does not run -- because it
+is switched off, or the model was unavailable -- the verdict already exists and
+nothing downstream is missing.
 
 CLI:
     python research_report.py candidates [--all] [--json]   # who to deep-dive
-    python research_report.py auto-prompt                   # the nightly prompt
+    python research_report.py verdicts [TICKER ...]         # deterministic, now
+    python research_report.py auto-prompt                   # the narrative prompt
     python research_report.py scan PGR [RL ...]             # on-demand tiers 1+2
     python research_report.py context MSFT [JNJ ...]        # the data bundle
 """
 
 import json
-import math
 import re
 import sys
 import time
@@ -36,12 +40,13 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 import charts
+import quality
 import run_scanners
 import sec
-from research_collect import collect_yahoo
 from scanner_common import (
     COMPANY_COL,
     CONVICTION_COL,
+    DISCLAIMER,
     ON_DEMAND_KEYS,
     QUALITY_COL,
     QUALITY_MISSING_COL,
@@ -52,7 +57,6 @@ from scanner_common import (
     fmt_bytes,
     fmt_compact,
     format_step,
-    fundamentals_fields,
     history_rows,
     load_config,
     log_step,
@@ -62,8 +66,6 @@ from scanner_common import (
     on_demand_csv_path,
     output_dir,
     prune_run_logs,
-    quality_enabled,
-    quality_failures,
     run_id,
     run_log_path,
     run_result_path,
@@ -124,11 +126,11 @@ def find_ticker(hits: dict, ticker: str, cfg: dict | None = None) -> dict | None
             continue
         recorded = row.get(QUALITY_COL)
         recorded_missing = row.get(QUALITY_MISSING_COL)
-        quality, missing = (_row_quality(row, cfg) if cfg
-                            else (recorded, recorded_missing))
+        passed, missing = (_row_quality(row, cfg) if cfg
+                           else (recorded, recorded_missing))
         return {"screen": screen["title"], "config_key": screen["config_key"],
                 "kind": row.get("Setup", "full"),
-                "quality": quality,
+                "quality": passed,
                 "quality_missing": missing,
                 "quality_recorded": recorded,
                 "quality_missing_recorded": recorded_missing,
@@ -146,9 +148,9 @@ def _trigger_summary(trigger: dict | None, payload: dict) -> str:
     if trigger is None:
         return "no trigger"
     screens = len(payload.get("screens", []))
-    quality = trigger.get("quality")
-    verdict = ("not evaluated" if quality is None
-               else "PASS" if quality
+    passed = trigger.get("quality")
+    verdict = ("not evaluated" if passed is None
+               else "PASS" if passed
                else f"fails {', '.join(trigger.get('quality_missing') or []) or '?'}")
     return (f"{trigger.get('config_key')}/{trigger.get('kind')}  "
             f"{screens} screen(s)  quality {verdict}")
@@ -164,38 +166,15 @@ GATES = ("all", "quality_pass")
 def _row_quality(row: dict, cfg: dict) -> tuple[bool | None, list]:
     """The row's tier-2 verdict under the rules in force **now**.
 
-    Deliberately re-evaluates rather than trusting the verdict the scan
-    recorded. The hand-off is stamped with a scan date but the rules get
-    retuned between scans, and a gate that answered with last night's bar
-    would silently ignore a threshold change until the next scan -- the exact
-    confusion of loosening a rule and watching `candidates` report the old
-    answer. The archived snapshot in `output/history/` keeps the original
-    verdict, so nothing historical is rewritten.
-
-    `quality_failures` works unchanged on a JSON-round-tripped row -- it looks
-    values up by display label and indexes the multi-year series positionally,
-    so nested arrays behave exactly like the original tuples. That is also
-    what lets a hand-off written before the verdict existed still be graded.
+    A thin wrapper over `quality.verdict_of` kept because the gate, the facts
+    bundle and the candidate list all call it and read better for the name.
+    It re-grades rather than trusting the recorded verdict on purpose: the
+    hand-off is stamped with a scan date but the parameters get retuned between
+    scans, and a gate answering with last night's bar would silently ignore a
+    threshold change until the next scan. `output/history/` keeps the original,
+    so nothing archived is rewritten.
     """
-    fund_cfg = cfg.get("fundamentals", {})
-    if quality_enabled(fund_cfg) and _has_fundamentals(row, fund_cfg):
-        failed = quality_failures(row, fund_cfg)
-        return not failed, failed
-    if QUALITY_COL in row:      # fundamentals gone or disabled -- trust the record
-        return bool(row[QUALITY_COL]), list(row.get(QUALITY_MISSING_COL) or [])
-    return None, []
-
-
-def _has_fundamentals(row: dict, fund_cfg: dict) -> bool:
-    """Whether the row still carries the values the rules grade.
-
-    Without this, a row scanned with fundamentals switched off would be
-    re-graded as failing everything (a missing value fails its rule) instead
-    of reporting honestly that quality was never evaluated.
-    """
-    labels = list((fund_cfg.get("fields") or {}).values())
-    labels += list((fund_cfg.get("statements", {}).get("metrics") or {}).values())
-    return any(row.get(label) is not None for label in labels)
+    return quality.verdict_of(row, cfg)
 
 
 def list_candidates(hits: dict, cfg: dict, gate: str | None = None,
@@ -216,7 +195,7 @@ def list_candidates(hits: dict, cfg: dict, gate: str | None = None,
     rows = []
     for screen in hits.get("screens", []):
         for ticker, row in screen.get("hits", {}).items():
-            quality, missing = _row_quality(row, cfg)
+            passed, missing = _row_quality(row, cfg)
             rows.append({
                 "ticker": ticker,
                 "company": row.get(COMPANY_COL),
@@ -224,7 +203,7 @@ def list_candidates(hits: dict, cfg: dict, gate: str | None = None,
                 "config_key": screen.get("config_key"),
                 "setup": row.get("Setup", "full"),
                 "missing": row.get("Missing", ""),
-                "quality": quality,
+                "quality": passed,
                 "quality_missing": missing,
             })
     rows.sort(key=lambda r: (not r["quality"], r["setup"] != "full", r["ticker"]))
@@ -234,121 +213,41 @@ def list_candidates(hits: dict, cfg: dict, gate: str | None = None,
 
 
 # --------------------------------------------------------------------------
-# Deterministic quant score (config-driven anchor)
+# Deterministic quant score (the unified quality engine's scoring half)
 # --------------------------------------------------------------------------
 
-def _is_num(v) -> bool:
-    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+def compute_quant_score(bundle: dict, cfg: dict) -> dict:
+    """The config-driven 0-100 anchor, from a `quality.collect` bundle.
 
+    Thin by design: every metric definition, weight and good/bad anchor now
+    lives in one place (`config.json`'s `quality` section, evaluated by
+    `quality.evaluate`), so the score tier 3 reports and the badge tier 2 stamps
+    are two readings of the same registry rather than two systems that happen
+    to be about the same companies.
 
-def _norm(v: float, good: float, bad: float) -> float:
-    """Linear map to [0,1]: good->1, bad->0 (works either direction via good/bad
-    ordering), clamped."""
-    if good == bad:
-        return 0.5
-    return max(0.0, min(1.0, (v - bad) / (good - bad)))
-
-
-def _avg(xs):
-    xs = [x for x in xs if _is_num(x)]
-    return sum(xs) / len(xs) if xs else None
-
-
-def _revision_net(d):
-    if not isinstance(d, dict):
-        return None
-    up, dn = d.get("upLast30days"), d.get("downLast30days")
-    if not (_is_num(up) and _is_num(dn)) or (up + dn) <= 0:
-        return None
-    return (up - dn) / (up + dn)
-
-
-def _trend_change(d):
-    if not isinstance(d, dict):
-        return None
-    cur, old = d.get("current"), d.get("90daysAgo")
-    if not (_is_num(cur) and _is_num(old)) or old == 0:
-        return None
-    return (cur - old) / abs(old)
-
-
-def _beat_rate(hist):
-    ss = [h.get("surprise_pct") for h in (hist or []) if _is_num(h.get("surprise_pct"))]
-    return sum(1 for s in ss if s > 0) / len(ss) if ss else None
-
-
-def _buy_ratio(recs):
-    if not recs:
-        return None
-    r = recs[0]
-    tot = sum((r.get(k) or 0) for k in ("strongBuy", "buy", "hold", "sell", "strongSell"))
-    return ((r.get("strongBuy") or 0) + (r.get("buy") or 0)) / tot if tot else None
-
-
-def _extract_metrics(yahoo: dict) -> dict:
-    """Flatten collect_yahoo output to the scalar metrics the config scores."""
-    val = yahoo.get("valuation") or {}
-    ana = yahoo.get("analyst") or {}
-    est = yahoo.get("estimates") or {}
-    earn = yahoo.get("earnings") or {}
-    q = yahoo.get("quality") or {}
-    own = yahoo.get("ownership") or {}
-    growth = est.get("growth") or {}
-    targets = ana.get("targets") or {}
-
-    def g(period, key):  # a growth stockTrend as a percent
-        cell = growth.get(period) or {}
-        v = cell.get(key)
-        return v * 100 if _is_num(v) else None
-
-    hist = earn.get("surprise_history") or []
+    The output keys are unchanged -- `score`, `dimensions`, `metrics` -- because
+    they are written into `<T>_<date>_facts.json` and tier 4 explodes them into
+    the `quant_*` / `qm_*` ledger columns.
+    """
+    values = quality.resolve(bundle, cfg)
+    result = quality.evaluate(values, cfg)
     return {
-        "pe_percentile_2y": val.get("pe_percentile_2y"),
-        "analyst_upside_pct": targets.get("upside_pct"),
-        "growth_this_year_pct": g("0y", "stockTrend"),
-        "growth_next_year_pct": g("+1y", "stockTrend"),
-        "eps_revision_net": _revision_net(est.get("eps_revisions", {}).get("0y")),
-        "eps_trend_change": _trend_change(est.get("eps_trend", {}).get("0y")),
-        "earnings_avg_surprise": _avg([h.get("surprise_pct") for h in hist]),
-        "earnings_beat_rate": _beat_rate(hist),
-        "return_on_assets": q.get("returnOnAssets_pct"),
-        "gross_margin": q.get("grossMargins_pct"),
-        "net_debt_to_ebitda": q.get("netDebtToEbitda"),
-        "buyback_2y": own.get("shares_change_2y_pct"),
-        "analyst_buy_ratio": _buy_ratio(ana.get("recommendations")),
-    }
-
-
-def compute_quant_score(yahoo: dict, cfg: dict) -> dict:
-    """Config-driven 0-100 anchor. Each dimension = mean of its available
-    metrics' normalized scores (missing metric skipped; a dimension with no
-    data -> neutral 0.5, so banks aren't unfairly zeroed)."""
-    syn = cfg["research"]["synthesis"]
-    m = _extract_metrics(yahoo)
-    dims, total = {}, 0.0
-    for dim, dcfg in syn["dimensions"].items():
-        parts = [_norm(m[name], b["good"], b["bad"])
-                 for name, b in dcfg["metrics"].items() if _is_num(m.get(name))]
-        ds = sum(parts) / len(parts) if parts else 0.5
-        dims[dim] = {"score": round(ds, 3), "weight": dcfg["weight"],
-                     "metrics_used": len(parts), "metrics_total": len(dcfg["metrics"])}
-        total += dcfg["weight"] * ds
-    # weighted mean -> robust to weights that don't sum to exactly 1.0
-    wsum = sum(d["weight"] for d in syn["dimensions"].values()) or 1.0
-    return {
-        "score": round(100 * total / wsum, 1),
-        "dimensions": dims,
-        "metrics": {k: (round(float(v), 3) if _is_num(v) else None) for k, v in m.items()},
+        "score": result.score,
+        "dimensions": result.groups,
+        "metrics": {k: (round(float(v), 3)
+                        if isinstance(v, (int, float)) and not isinstance(v, bool)
+                        else v)
+                    for k, v in ((key, quality.scalar(raw))
+                                 for key, raw in result.values.items())},
+        "quality_pass": result.passed,
+        "quality_missing": result.failed,
     }
 
 
 def tier_for(conviction: float, cfg: dict) -> str:
-    """Map a 0-100 conviction to a tier label via config bands."""
-    tiers = sorted(cfg["research"]["synthesis"]["tiers"], key=lambda t: -t["min"])
-    for t in tiers:
-        if conviction >= t["min"]:
-            return t["label"]
-    return tiers[-1]["label"]
+    """Map a 0-100 conviction to a tier label via the configured bands."""
+    return quality.tier_for(conviction, cfg)
+
 
 
 # --------------------------------------------------------------------------
@@ -419,7 +318,8 @@ def _facts(ticker: str, scan_date: str, yahoo: dict, quant: dict,
     targets = (yahoo.get("analyst") or {}).get("targets") or {}
     earnings = yahoo.get("earnings") or {}
     profile = yahoo.get("profile") or {}
-    quality, quality_missing = _quality_now(trigger, cfg)
+    passed, quality_missing = _quality_now(trigger, cfg)
+    score = quant.get("score")
     return {
         "ticker": ticker,
         "scan_date": scan_date,
@@ -431,12 +331,18 @@ def _facts(ticker: str, scan_date: str, yahoo: dict, quant: dict,
         "pe_percentile_2y": valuation.get("pe_percentile_2y"),
         "next_earnings_date": earnings.get("next_date"),
         "days_to_earnings": earnings.get("days_to_next"),
-        "quant_score": quant.get("score"),
+        "quant_score": score,
         "quant_dimensions": quant.get("dimensions"),
         "quant_metrics": quant.get("metrics"),
+        # The verdict as the deterministic pipeline sets it, before any
+        # narrative pass: conviction *is* the score until something bounded and
+        # justified moves it. Recorded here so a night the narrative pass never
+        # runs still has a tier and a conviction for tier 4 to grade.
+        "tier": tier_for(score, cfg) if score is not None else None,
+        "conviction": score,
         "screen": (trigger or {}).get("screen"),
         "setup": (trigger or {}).get("kind"),
-        "quality": quality,
+        "quality": passed,
         "quality_missing": quality_missing,
         "chart": str(chart) if chart else None,
         "source": source,
@@ -449,53 +355,56 @@ def _quality_now(trigger: dict | None, cfg: dict) -> tuple[bool | None, list]:
     return _row_quality(row, cfg) if row else (None, [])
 
 
-def assemble_context(ticker: str, cfg: dict | None = None) -> dict:
-    """Everything deterministic the deep-dive skill needs for one ticker:
-    the scan trigger, Yahoo Tier-A data, the quant-score anchor, the SEC
-    10-Q/10-K filings, and the rendered financial-trend chart + facts file.
-    IBKR Tier-B + live web research are added by Claude in-session.
+def resolve_trigger(ticker: str, cfg: dict) -> tuple:
+    """Find this ticker's trigger, scanning it on demand when the scan missed it.
 
-    The chart and the facts file are written **here**, before this function
-    returns, precisely so the model never generates either. Tier 3 is
-    skill-driven, and without that the chart would be improvised and the
-    figures retyped.
-
-    A ticker the nightly scan never surfaced gets tiers 1 and 2 run for it now
-    (`run_scanners.scan_ticker`) rather than arriving with an empty trigger and
-    a quality verdict of "not evaluated" -- which is what an ad-hoc deep dive
-    used to look like.
+    Returns `(trigger, scan_date, source, on_demand_payload)`. A ticker the
+    nightly scan never surfaced gets tiers 1 and 2 run for it now rather than
+    arriving with an empty trigger and a quality verdict of "not evaluated" --
+    which is what an ad-hoc deep dive used to look like.
     """
-    cfg = cfg or load_config()
-    fin_cfg = cfg.get("research", {}).get("financials", {})
-    t0 = time.perf_counter()
-    log_step("CONTEXT", "start", f"{ticker}  run={run_id()}", cfg=cfg)
-
     hits = load_hits(cfg)
     scan_date = hits.get("scan_date") or date.today().isoformat()
     trigger = find_ticker(hits, ticker, cfg)   # re-graded, so it agrees with _facts
-
-    source, on_demand = SOURCE_SIGNAL, None
-    if trigger is None:
-        log_step("HANDOFF", "miss", f"{ticker} not in latest_hits.json", cfg=cfg)
-        source = SOURCE_ON_DEMAND
-        with step("SCAN", cfg=cfg) as s:
-            on_demand = run_scanners.scan_ticker(ticker, cfg)
-            # The on-demand scan dates itself off its own price data, so the
-            # report and its record carry the day actually analysed, not the
-            # last nightly.
-            scan_date = on_demand["scan_date"]
-            trigger = find_ticker(on_demand, ticker, cfg)
-            s.detail = (f"on-demand {scan_date}  "
-                        f"{_trigger_summary(trigger, on_demand)}")
-    else:
+    if trigger is not None:
         log_step("HANDOFF", "hit", f"{ticker} {scan_date}  "
                  f"{_trigger_summary(trigger, hits)}", cfg=cfg)
+        return trigger, scan_date, SOURCE_SIGNAL, None
 
-    yahoo = collect_yahoo(ticker,
-                          years=fin_cfg.get("years", 4),
-                          quarters=fin_cfg.get("quarters", 4))
-    quant = compute_quant_score(yahoo, cfg)
-    log_step("QUANT", "ok", f"score {quant.get('score')}", cfg=cfg)
+    log_step("HANDOFF", "miss", f"{ticker} not in latest_hits.json", cfg=cfg)
+    with step("SCAN", cfg=cfg) as s:
+        on_demand = run_scanners.scan_ticker(ticker, cfg)
+        # The on-demand scan dates itself off its own price data, so the report
+        # and its record carry the day actually analysed, not the last nightly.
+        scan_date = on_demand["scan_date"]
+        trigger = find_ticker(on_demand, ticker, cfg)
+        s.detail = f"on-demand {scan_date}  {_trigger_summary(trigger, on_demand)}"
+    return trigger, scan_date, SOURCE_ON_DEMAND, on_demand
+
+
+def deterministic_verdict(ticker: str, cfg: dict, trigger: dict | None,
+                          scan_date: str, source: str = SOURCE_SIGNAL,
+                          close=None) -> dict:
+    """Everything tier 3 can decide **without a model**, for one ticker.
+
+    Collects the `deep` half of the quality registry, scores it, renders the
+    financial-trend chart and writes `<T>_<date>_facts.json` -- and sets the
+    verdict from the score alone: `conviction = score`, `tier = tier_for(score)`.
+
+    This is the whole point of the deterministic pipeline. The verdict exists
+    the moment the scan finishes, so it can go out in the same Discord message
+    as the signal that produced it and be recorded whether or not a narrative
+    pass ever runs. A later narrative pass may *revise* the conviction within
+    the bounded adjustment; it no longer originates it.
+
+    The chart and the facts file are written here, before this returns, so a
+    model that reads the bundle later can never generate either.
+    """
+    fin_cfg = cfg.get("research", {}).get("financials", {})
+    bundle = quality.collect(ticker, cfg, quality.STAGE_DEEP, close=close)
+    yahoo = bundle.get("_yahoo") or {}
+    quant = compute_quant_score(bundle, cfg)
+    log_step("QUANT", "ok", f"{ticker} score {quant.get('score')}", cfg=cfg)
 
     chart = None
     try:
@@ -512,23 +421,121 @@ def assemble_context(ticker: str, cfg: dict | None = None) -> dict:
     facts_path.write_text(json.dumps(facts, indent=2, ensure_ascii=False),
                           encoding="utf-8")
     log_step("FACTS", "ok", f"{facts_path.name}  source={source}", cfg=cfg)
+    log_step("VERDICT", "ok",
+             f"{ticker} {facts.get('tier')} {facts.get('conviction')}/100 "
+             f"(deterministic)", cfg=cfg)
 
-    if on_demand is not None:
-        record_on_demand(on_demand, ticker, cfg)
-
-    filings = sec.fetch_filing_sections(ticker, cfg)
-    bundle = {
+    return {
         "ticker": ticker,
         "scan_date": scan_date,
         "source": source,
         "trigger": trigger,
         "yahoo": yahoo,
         "quant": quant,
-        "filings": filings,
+        "tier": facts.get("tier"),
+        "conviction": facts.get("conviction"),
+        "narrative_adj": 0,
+        "facts": facts,
+        "facts_path": str(facts_path),
         "financials_chart": str(chart) if chart else None,
         "financials_table_md": financials_table_md(yahoo.get("financials") or {}),
-        "facts_path": str(facts_path),
     }
+
+
+def deterministic_thesis(facts: dict) -> str:
+    """One sentence describing where the score came from, built in Python.
+
+    Same rule as tier 4's `conclusion` column and tier 3's financials chart: a
+    sentence a model wrote is a sentence you cannot check. This one is a
+    rendering of the group breakdown -- strongest and weakest, plus how much of
+    the registry actually had data -- so it says only what the numbers say.
+    """
+    dims = facts.get("quant_dimensions") or {}
+    scored = {k: v for k, v in dims.items()
+              if isinstance(v, dict) and v.get("metrics_used")}
+    if not scored:
+        return ("No parameter in the quality registry returned a value for this "
+                "ticker, so the score is not meaningful.")
+
+    ranked = sorted(scored.items(), key=lambda kv: -kv[1]["score"])
+    best, worst = ranked[0], ranked[-1]
+    used = sum(v["metrics_used"] for v in scored.values())
+    total = sum(v["metrics_total"] for v in dims.values() if isinstance(v, dict))
+
+    def phrase(item):
+        return f"{item[0].replace('_', ' ')} {item[1]['score']:.2f}"
+
+    sentence = (f"Scores {facts.get('quant_score')}/100 on {used} of {total} "
+                f"parameters: strongest {phrase(best)}")
+    if len(ranked) > 1:
+        sentence += f", weakest {phrase(worst)}"
+    sentence += "."
+
+    failed = facts.get("quality_missing") or []
+    if facts.get("quality") is False and failed:
+        shown = ", ".join(failed[:4]) + ("..." if len(failed) > 4 else "")
+        sentence += f" Fails the quality screen on {shown}."
+    elif facts.get("quality") is True:
+        sentence += " Passes every enabled quality gate."
+    return sentence
+
+
+def verdicts_for(tickers: list[str], cfg: dict, close=None) -> list[dict]:
+    """Deterministic verdicts for a list of tickers, recorded as they are made.
+
+    Each entry is the same `{ticker, scan_date, tier, conviction, narrative_adj,
+    thesis}` shape `post_summary` and `record_verdicts` already consume, so a
+    later narrative pass revising one of them writes through exactly the same
+    path. One ticker failing is logged and skipped -- an alert missing a card is
+    better than an alert that never went out.
+    """
+    out = []
+    for ticker in tickers:
+        try:
+            trigger, scan_date, source, _ = resolve_trigger(ticker, cfg)
+            verdict = deterministic_verdict(ticker, cfg, trigger, scan_date, source)
+        except Exception as exc:  # noqa: BLE001 - one bad ticker must not kill the alert
+            log_step("VERDICT", "failed", f"{ticker}: "
+                     f"{type(exc).__name__}: {exc}", cfg=cfg)
+            continue
+        out.append({
+            "ticker": ticker,
+            "scan_date": verdict["scan_date"],
+            "tier": verdict["tier"],
+            "conviction": verdict["conviction"],
+            "narrative_adj": 0,
+            "thesis": deterministic_thesis(verdict["facts"]),
+        })
+    if out:
+        record_verdicts(out, cfg)
+    return out
+
+
+def assemble_context(ticker: str, cfg: dict | None = None) -> dict:
+    """The deterministic bundle the deep-dive skill reasons over.
+
+    `deterministic_verdict` plus the SEC filings -- i.e. the same numbers the
+    nightly alert already posted, with the filing text a narrative pass needs.
+    Keeping the two separate is what lets the nightly run produce a verdict
+    without paying for EDGAR, and lets the skill get the filings without
+    recomputing the verdict.
+
+    IBKR's qualitative graph and live web research are still added by Claude
+    in-session; everything mechanical is already on disk when this returns.
+    """
+    cfg = cfg or load_config()
+    t0 = time.perf_counter()
+    log_step("CONTEXT", "start", f"{ticker}  run={run_id()}", cfg=cfg)
+
+    trigger, scan_date, source, on_demand = resolve_trigger(ticker, cfg)
+    verdict = deterministic_verdict(ticker, cfg, trigger, scan_date, source)
+
+    if on_demand is not None:
+        record_on_demand(on_demand, ticker, cfg)
+
+    filings = sec.fetch_filing_sections(ticker, cfg)
+    bundle = {**verdict, "filings": filings}
+    bundle.pop("facts", None)          # it is on disk; the path is in the bundle
     log_step("CONTEXT", "ok", f"{ticker} bundle ready"
              + ("" if filings else "  (no SEC filings)"),
              ms=(time.perf_counter() - t0) * 1000, cfg=cfg)
@@ -566,7 +573,6 @@ def write_report(ticker: str, scan_date: str, markdown: str, cfg: dict) -> Path:
 # Deliver: verdicts to Discord (reuse the existing webhook path)
 # --------------------------------------------------------------------------
 
-DISCLAIMER = "_Research analysis, not investment advice._"
 
 
 def _num_or_na(value, fmt="{:.1f}") -> str:
@@ -592,10 +598,7 @@ def load_facts(ticker: str, scan_date: str, cfg: dict) -> dict:
 
 
 def _tier_color(tier: str, cfg: dict) -> int:
-    for band in cfg.get("research", {}).get("synthesis", {}).get("tiers", []):
-        if band.get("label") == tier and band.get("color"):
-            return int(str(band["color"]), 16)
-    return VERDICT_COLOR
+    return quality.tier_color(tier, cfg, VERDICT_COLOR)
 
 
 def _verdict_fields(f: dict, v: dict) -> list[dict]:
@@ -1165,19 +1168,38 @@ AUTO_PROMPT = """/deep-dive {tickers}
 Unattended nightly run for the {scan_date} scan -- nobody is watching, so do not
 ask questions; follow the skill's "Unattended (nightly) mode" section.
 Gate: {gate} ({n} of {total} of tonight's signals).
+
+The deterministic verdict is already computed, recorded and posted: each ticker
+has a tier and a conviction equal to its quant score, written to
+output/history/ and included in tonight's scan alert. Your job is the narrative
+half -- moat, growth runway, earnings/management, catalysts and risks -- and a
+bounded `narrative_adj` that *revises* that conviction. Do not treat a ticker as
+ungraded, and do not re-derive the score.
 Post the combined Discord summary at the end with send={send}.
 """
+
+
+def narrative_cfg(cfg: dict) -> dict:
+    """Settings for the optional LLM pass.
+
+    Separate from `research.auto` (which now governs the *deterministic* verdict
+    run inside the nightly scan) so the two can be switched independently: the
+    common case is wanting a graded verdict every night and a written report
+    only sometimes.
+    """
+    research = cfg.get("research", {})
+    return research.get("narrative") or {}
 
 
 def auto_prompt(cfg: dict) -> str | None:
     """The prompt for the nightly headless deep-dive, or None if it should not run.
 
     Returning None (rather than an empty prompt) is what lets `run_deepdive.bat`
-    stay free of config logic: no candidates or `auto.enabled: false` simply
-    exits non-zero and the batch skips the Claude invocation entirely.
+    stay free of config logic: no candidates, or the narrative pass switched
+    off, simply exits non-zero and the batch skips the Claude invocation.
     """
     auto_cfg = cfg.get("research", {}).get("auto", {})
-    if not auto_cfg.get("enabled", False):
+    if not narrative_cfg(cfg).get("enabled", False):
         return None
     hits = load_hits(cfg)
     if not hits:
@@ -1201,8 +1223,9 @@ def auto_prompt(cfg: dict) -> str | None:
 
 USAGE = """usage:
   python research_report.py candidates [--all] [--json]   who to deep-dive tonight
-  python research_report.py auto-prompt                   the nightly prompt (exit 1 if none)
-  python research_report.py auto-model                    the model the nightly run should use
+  python research_report.py verdicts [TICKER ...]         deterministic verdicts, recorded now
+  python research_report.py auto-prompt                   the narrative prompt (exit 1 if none)
+  python research_report.py auto-model                    the model the narrative pass should use
   python research_report.py scan TICKER [TICKER ...]      on-demand tiers 1 + 2 for a ticker
   python research_report.py post-verdicts F.json [--send] deliver the batch's verdict cards
   python research_report.py context TICKER [TICKER ...]   the data bundle for one ticker
@@ -1242,15 +1265,13 @@ def _print_scan(payload: dict, ticker: str, cfg: dict) -> None:
     if trigger is None:
         print("  tier 2  no row produced")
         return
-    fund_cfg = cfg["fundamentals"]
-    for field in fundamentals_fields(trigger["row"], fund_cfg):
+    for field in quality.embed_fields(trigger["row"], cfg):
         print(f"          {field['name']}: {field['value']}")
-    quality, failed = trigger["quality"], trigger["quality_missing"]
-    if quality is None:
+    passed, failed = trigger["quality"], trigger["quality_missing"]
+    if passed is None:
         print("  tier 2  not evaluated (quality layer off)")
-    elif quality:
-        badge = fund_cfg.get("quality", {}).get("badge", "")
-        print(f"  tier 2  PASS {badge}".rstrip())
+    elif passed:
+        print(f"  tier 2  PASS {quality.badge(cfg)}".rstrip())
     else:
         print(f"  tier 2  fails: {', '.join(failed)}")
 
@@ -1275,6 +1296,27 @@ def main() -> int:
         _print_candidates(rows, total - len(rows), effective)
         return 0
 
+    if args[0] == "verdicts":
+        # The deterministic verdict on demand: the same call the nightly scan
+        # makes, for named tickers or for tonight's gated candidates. Records
+        # to output/history/ and prints; posting is the scan's job.
+        cfg = load_config()
+        tickers = [a.upper() for a in args[1:] if not a.startswith("--")]
+        if not tickers:
+            auto = cfg.get("research", {}).get("auto", {})
+            tickers = list(dict.fromkeys(
+                c["ticker"] for c in list_candidates(
+                    load_hits(cfg), cfg, limit=auto.get("max_reports"))))
+        if not tickers:
+            print("no candidate passed the gate -- nothing to grade")
+            return 1
+        with stdout_to_stderr():
+            rows = verdicts_for(tickers, cfg)
+        for row in rows:
+            print(f"{row['ticker']:6} {row['tier']:7} {row['conviction']}/100  "
+                  f"{row['thesis']}")
+        return 0 if rows else 1
+
     if args[0] == "auto-prompt":
         prompt = auto_prompt(load_config())
         if prompt is None:
@@ -1286,8 +1328,7 @@ def main() -> int:
     # `for /f` mangles a quoted interpreter path inside backticks, so the model
     # is handed over through a file instead.
     if args[0] == "auto-model":
-        auto_cfg = load_config().get("research", {}).get("auto", {})
-        print(auto_cfg.get("model", "opus"))
+        print(narrative_cfg(load_config()).get("model", "opus"))
         return 0
 
     # Everything the .bat needs to start a run, on one line for `for /f` to

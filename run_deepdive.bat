@@ -1,13 +1,20 @@
 @echo off
-rem Tier 3 -- the unattended deep-dive, run after the nightly scan (and usable
-rem standalone). The synthesis is a skill-driven reasoning procedure, not a
-rem Python function, so this invokes Claude Code headlessly over the candidates
-rem the scan just handed off.
+rem Tier 3's NARRATIVE half -- the unattended written deep-dive, run after the
+rem nightly scan (and usable standalone). The synthesis is a skill-driven
+rem reasoning procedure, not a Python function, so this invokes Claude Code
+rem headlessly over the candidates the scan just handed off.
 rem
-rem All the policy lives in config.json (research.auto): whether to run at all,
-rem the tier-2 gate, how many reports, whether to post to Discord. auto-prompt
-rem exits non-zero when there is nothing to do, which is what keeps this file
-rem free of any decision-making of its own.
+rem This is OPTIONAL. The verdict itself -- tier and conviction -- is
+rem deterministic, was computed inside run_scanners.py, is already recorded in
+rem output/history/ and already went out in tonight's alert. What this adds is
+rem the report and a bounded revision of that conviction. If it never runs,
+rem nothing downstream is missing.
+rem
+rem All the policy lives in config.json: research.narrative.enabled gates this
+rem pass, research.auto.{gate,max_reports} pick the candidates, and
+rem research.auto.discord_send authorizes the post. auto-prompt exits non-zero
+rem when there is nothing to do, which is what keeps this file free of any
+rem decision-making of its own.
 cd /d "C:\Users\Lenovo\CC\stock_analyzer"
 rem cmd expands the >> redirect before Python runs, so the output directory has
 rem to exist first -- output_dir() would create it too late.
@@ -82,9 +89,11 @@ echo ==== Deep-dive finished %date% %time% (exit %errorlevel%) ==== >> output\de
 rem Merge the model's steps into the run log, write the END line, record the run.
 "C:\Users\Lenovo\AppData\Local\Microsoft\WindowsApps\python.exe" research_report.py log-session %STOCK_ANALYZER_RUN_ID% %SESSION_ID% --mode nightly >> output\deepdive_log.txt 2>&1
 
-rem Tier 4 again, now that post-verdicts has written tonight's tier and
+rem Tier 4 again, now that the narrative pass has revised tonight's tier and
 rem conviction. `mark` re-syncs the ledger before pricing it, so this is what
-rem gets tonight's verdict onto tonight's position instead of tomorrow's -- and
-rem the verdict is exactly the attribute the attribution analysis exists to
-rem grade. Exits 0 on failure, like the copy in run_scanner.bat.
+rem gets the revision onto tonight's position instead of tomorrow's -- and the
+rem verdict is exactly the attribute the attribution analysis exists to grade.
+rem The DETERMINISTIC verdict is already on the position (run_scanners.py marked
+rem the book before it posted), so this run only carries a narrative_adj across.
+rem Exits 0 on failure, by design.
 "C:\Users\Lenovo\AppData\Local\Microsoft\WindowsApps\python.exe" -m portfolio_sim mark >> output\deepdive_log.txt 2>&1

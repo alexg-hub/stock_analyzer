@@ -31,23 +31,22 @@ from types import SimpleNamespace
 import pandas as pd
 
 import breakout_scanner
+import quality
 import sma_pullback
 import sma_reclaim
 from scanner_common import (
+    DISCLAIMER,
     QUALITY_COL,
     ScanResult,
-    annotate_quality,
     archive_scan,
     build_embeds,
     build_hits_payload,
     download_price_data,
     enable_utf8_output,
-    fetch_fundamentals,
     get_sp500_tickers,
     load_config,
     log_step,
     output_dir,
-    quality_enabled,
     run_id,
     send_discord_alert,
     write_latest_hits,
@@ -129,26 +128,25 @@ def scan_ticker(ticker: str, cfg: dict) -> dict:
                     ScanResult(title=NO_SIGNAL_TITLE, hits=row))]
 
     # -- tier 2, the same two steps and the same single grading call as main() --
-    fund_cfg = cfg["fundamentals"]
-    if fund_cfg["enabled"]:
-        fundamentals = fetch_fundamentals([ticker], fund_cfg)
+    fundamentals = quality.fetch_fast([ticker], cfg)
+    if not fundamentals.empty:
         for _, result in results:
             result.hits = result.hits.join(fundamentals)
     for _, result in results:
-        annotate_quality(result.hits, fund_cfg)
-    log_quality(results, fund_cfg, cfg)
+        quality.annotate(result.hits, cfg)
+    log_quality(results, cfg)
 
     return build_hits_payload(scan_date, results)
 
 
-def log_quality(results: list, fund_cfg: dict, cfg: dict) -> None:
+def log_quality(results: list, cfg: dict) -> None:
     """One `QUALITY` line: how many of the tier-1 hits tier 2 passed.
 
     Counted off the recorded `Quality` column rather than re-grading, so the
     log states the same verdict the badge and the hand-off carry -- the whole
     reason grading happens exactly once.
     """
-    if not quality_enabled(fund_cfg):
+    if not quality.is_enabled(cfg):
         log_step("QUALITY", "skip", "quality layer is off -- not evaluated",
                  cfg=cfg)
         return
@@ -160,6 +158,109 @@ def log_quality(results: list, fund_cfg: dict, cfg: dict) -> None:
              + (f" -- {', '.join(t for t, ok in graded.items() if ok)}"
                 if passed else ""),
              cfg=cfg)
+
+
+def run_ledger(cfg: dict) -> tuple[list, list]:
+    """Tier 4 in-process: open tonight's signals, price the book, scan for exits.
+
+    Returns the exit cards and their charts for the combined alert.
+
+    `open` first and on its own try/except so the signal is recorded even if the
+    download in `mark` fails -- the ledger is the thing that cannot be
+    reconstructed later, the prices always can. Every step swallows its own
+    failure for the same reason `portfolio_sim/__main__.py` exits 0 on error: a
+    broken ledger must never take down the alert. This used to be three separate
+    lines in `run_scanner.bat`; it is here now because the exit cards have to
+    exist before the message is built.
+    """
+    if not cfg.get("portfolio", {}).get("enabled", True):
+        log_step("LEDGER", "off", "portfolio.enabled is false", cfg=cfg)
+        return [], []
+
+    from portfolio_sim import exits, ledger, marking
+
+    for name, fn in (("open", ledger.sync), ("mark", marking.mark)):
+        try:
+            fn(cfg)
+        except Exception as exc:  # noqa: BLE001 - bookkeeping must not sink the scan
+            log_step("LEDGER", "failed",
+                     f"{name}: {type(exc).__name__}: {exc}", cfg=cfg)
+
+    try:
+        _, embeds, charts = exits.exit_scan(cfg, send=False, collect=True)
+        return embeds, list(charts)
+    except Exception as exc:  # noqa: BLE001
+        log_step("EXIT", "failed", f"{type(exc).__name__}: {exc}", cfg=cfg)
+        return [], []
+
+
+def carry_verdicts_to_ledger(cfg: dict) -> None:
+    """Re-sync the ledger after the verdicts are recorded.
+
+    Ordering problem this closes: `run_ledger` has to run *before*
+    `run_verdicts` (the exit cards must exist before the message is built, and
+    the exit scan needs filled entry prices), but the verdict is written to
+    `signals.csv` after that -- so without this the tier and conviction would
+    sit on the position only from tomorrow's run. The verdict is exactly the
+    attribute tier 4 exists to grade, and it used to be the trailing `mark` in
+    `run_deepdive.bat` that carried it across; that pass is optional now, so it
+    can no longer be relied on.
+
+    `sync` alone, not `mark`: it copies the source row verbatim (verdict
+    columns included) and needs no network, which the prices already had.
+    """
+    if not cfg.get("portfolio", {}).get("enabled", True):
+        return
+    from portfolio_sim import ledger
+
+    try:
+        ledger.sync(cfg)
+    except Exception as exc:  # noqa: BLE001 - bookkeeping must not sink the alert
+        log_step("LEDGER", "failed",
+                 f"verdict carry: {type(exc).__name__}: {exc}", cfg=cfg)
+
+
+def run_verdicts(payload: dict, cfg: dict) -> tuple[list, list, list]:
+    """Tier 3's deterministic half for tonight's gated candidates.
+
+    The verdict is `conviction = quant score`, so it exists the moment the scan
+    finishes and can travel in the same message as the signal. It is recorded to
+    `output/history/` either way -- the record is the point, the notification is
+    not -- and the cards are withheld when `research.auto.discord_send` is
+    false, which is the same switch that used to gate `post-verdicts --send`.
+
+    A failure here costs the verdict section and nothing else: the signals, the
+    charts and the exits have already been built.
+    """
+    auto = cfg.get("research", {}).get("auto", {})
+    if not auto.get("enabled", True):
+        log_step("VERDICT", "off", "research.auto.enabled is false", cfg=cfg)
+        return [], [], []
+
+    import research_report
+
+    try:
+        candidates = research_report.list_candidates(
+            payload, cfg, limit=auto.get("max_reports"))
+        # One verdict per ticker: a name that fired on two screens is two
+        # candidate rows and one company.
+        tickers = list(dict.fromkeys(c["ticker"] for c in candidates))
+        if not tickers:
+            log_step("VERDICT", "none",
+                     f"no candidate passed the '{auto.get('gate', 'quality_pass')}'"
+                     f" gate", cfg=cfg)
+            return [], [], []
+        verdicts = research_report.verdicts_for(tickers, cfg)
+        if not verdicts or not auto.get("discord_send", False):
+            if verdicts:
+                log_step("VERDICT", "quiet", f"{len(verdicts)} recorded, not "
+                         f"posted (research.auto.discord_send is false)", cfg=cfg)
+            return verdicts, [], []
+        embeds, charts = research_report.build_verdict_embeds(verdicts, cfg)
+        return verdicts, embeds, list(charts)
+    except Exception as exc:  # noqa: BLE001 - the alert goes out regardless
+        log_step("VERDICT", "failed", f"{type(exc).__name__}: {exc}", cfg=cfg)
+        return [], [], []
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -197,23 +298,22 @@ def main(argv: list[str] | None = None) -> int:
             continue
         results.append((module, module.scan(data, strategy)))
 
-    # -- one fundamentals pass for every signalling ticker of every screen --
-    fund_cfg = cfg["fundamentals"]
+    # -- one `fast` quality pass for every signalling ticker of every screen --
     wanted = []
     for _, result in results:
         for ticker in result.hits.index:
             if ticker not in wanted:
                 wanted.append(ticker)
-    if fund_cfg["enabled"] and wanted:
-        fundamentals = fetch_fundamentals(wanted, fund_cfg)
+    fundamentals = quality.fetch_fast(wanted, cfg)
+    if not fundamentals.empty:
         for _, result in results:
             result.hits = result.hits.join(fundamentals)
 
     # -- tier 2: grade the fundamentals once, here. Both the Discord badge and
     #    the hand-off read the recorded verdict, so they cannot disagree --
     for _, result in results:
-        annotate_quality(result.hits, fund_cfg)
-    log_quality(results, fund_cfg, cfg)
+        quality.annotate(result.hits, cfg)
+    log_quality(results, cfg)
 
     for _, result in results:
         if not result.hits.empty:
@@ -230,12 +330,21 @@ def main(argv: list[str] | None = None) -> int:
     payload = write_latest_hits(hits_path, scan_date, results)
     archive_scan(payload, cfg)
 
+    # -- tiers 4 and 3, in this process, before anything is posted. Everything
+    #    from here on is deterministic, so it can all go out together; see
+    #    run_ledger / run_verdicts for why each is individually fail-safe --
+    exit_embeds, exit_charts = run_ledger(cfg)
+    verdicts, verdict_embeds, verdict_charts = run_verdicts(payload, cfg)
+    if verdicts:
+        carry_verdicts_to_ledger(cfg)
+
     all_empty = all(r.hits.empty for _, r in results)
-    if all_empty and not cfg["discord"]["send_message_when_no_breakouts"]:
+    if (all_empty and not exit_embeds
+            and not cfg["discord"]["send_message_when_no_breakouts"]):
         log_step("DISCORD", "skip",
                  "nothing fired and send_message_when_no_breakouts is false",
                  cfg=cfg)
-        log_step("SCAN", "ok", "tiers 1+2 complete, no alert sent",
+        log_step("SCAN", "ok", "complete, no alert sent",
                  ms=(time.perf_counter() - t0) * 1000, cfg=cfg)
         print("Nothing found by any screen and empty alerts are disabled -- done.")
         return 0
@@ -282,12 +391,31 @@ def main(argv: list[str] | None = None) -> int:
         counts += f", {n_partial} partial)" if n_partial else ")"
         summary.append(f"{result.title}: {counts}")
         per_screen = chart_files.get(module.CONFIG_KEY, {})
-        embeds += build_embeds(module, result, fund_cfg, per_screen)
+        embeds += build_embeds(module, result, cfg, per_screen)
         image_paths += per_screen.values()
 
+    # Tiers 3 and 4 join the same message, in reading order: what fired, what
+    # it graded out at, and what to sell. Three separate posts at three
+    # different times was the old shape, and it made the verdict for tonight's
+    # signal arrive detached from the signal.
+    if verdict_embeds:
+        summary.append(f"Verdicts: {len(verdicts)} graded "
+                       + ", ".join(f"{v['ticker']} {v['tier']} "
+                                   f"{v['conviction']}/100" for v in verdicts))
+        embeds += verdict_embeds
+        image_paths += verdict_charts
+    if exit_embeds:
+        plural = "s" if len(exit_embeds) != 1 else ""
+        summary.append(f"**Exits:** {len(exit_embeds)} held position{plural} "
+                       f"broke a double-top neckline.")
+        embeds += exit_embeds
+        image_paths += exit_charts
+    summary.append(DISCLAIMER)
+
     send_discord_alert("\n".join(summary), cfg["discord"], embeds, image_paths)
-    log_step("SCAN", "ok", f"tiers 1+2 complete, {scan_date}, "
-             f"{sum(len(r.hits) for _, r in results)} signal(s)",
+    log_step("SCAN", "ok", f"all tiers complete, {scan_date}, "
+             f"{sum(len(r.hits) for _, r in results)} signal(s), "
+             f"{len(verdicts)} verdict(s), {len(exit_embeds)} exit(s)",
              ms=(time.perf_counter() - t0) * 1000, cfg=cfg)
     return 0
 

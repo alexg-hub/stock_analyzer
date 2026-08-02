@@ -1,0 +1,290 @@
+"""The unified quality engine: the `enabled` flag, the gates, the score.
+
+Fully offline -- every check drives `quality.evaluate` with hand-built values,
+so nothing here touches Yahoo, IBKR or the cached panel.
+
+Every check is an **invariant**, derived from whatever `config.json` currently
+says rather than from written-down thresholds; the registry is retuned
+constantly and a test pinned to today's numbers would be stale by tomorrow.
+What is pinned instead:
+
+  * **`enabled: false` makes a parameter invisible** -- not gated, not scored,
+    absent from `Quality Missing` and from the embed fields, and not counted in
+    any weight. That is the flag's entire contract, and the reason it exists:
+    a company with no dividend has to be able to earn the badge without the
+    rule being deleted and the record of it lost.
+  * **missing is not failing, and neither is not-evaluated.** A missing value
+    fails its gate but is skipped in the score; a group with data but no values
+    is neutral 0.5, not 0 (a bank must not be zeroed by rows Yahoo does not
+    publish for it); the layer switched off writes no columns at all.
+  * gate semantics are strict compares, and `increasing` needs two years
+  * the score renormalizes over what actually participated
+  * a JSON round trip does not change any verdict -- that is what keeps an
+    archived scan readable after the config that produced it has moved on
+  * `validate` catches every way a parameter can look configured and do nothing
+"""
+
+import copy
+import json
+
+from _harness import Checks, config
+
+import quality
+
+c = Checks("quality engine")
+cfg = config()
+
+GATED = {k: s for k, s in quality.parameters(cfg, quality.STAGE_FAST).items()
+         if s.get("gate")}
+SCORED = {k: s for k, s in quality.parameters(cfg).items() if s.get("score")}
+
+
+def passing_value(gate):
+    """A value that satisfies `gate`, derived from the gate's own bounds."""
+    lo, hi = gate.get("min"), gate.get("max")
+    if lo is not None and hi is not None:
+        return (lo + hi) / 2
+    if hi is not None:
+        return hi / 2 if hi > 0 else hi - 1
+    return lo + abs(lo) + 1
+
+
+def healthy(keys=None):
+    """Values passing every gate, as a `{key: value}` for `evaluate`."""
+    out = {}
+    for key, spec in (keys or GATED).items():
+        good = passing_value(spec["gate"])
+        if spec["gate"].get("increasing"):
+            out[key] = [(2024, good * 0.9), (2025, good)]
+        elif spec.get("format", "").endswith("_series"):
+            out[key] = [(2024, good * 0.9), (2025, good)]
+        else:
+            out[key] = good
+    return out
+
+
+# --------------------------------------------------------------------------
+c.section("a healthy company passes every enabled gate")
+
+base = healthy()
+result = quality.evaluate(base, cfg, quality.STAGE_FAST)
+c.ok("the fixture passes", result.passed and not result.failed,
+     f"failed: {result.failed}")
+c.ok("passed is exactly 'nothing failed'",
+     result.passed == (not result.failed))
+c.ok("a score is produced", isinstance(result.score, float),
+     f"{result.score}")
+c.ok("the score is a percentage", 0 <= (result.score or 0) <= 100,
+     f"{result.score}")
+c.ok("evaluate is idempotent",
+     quality.evaluate(base, cfg, quality.STAGE_FAST).as_dict()
+     == result.as_dict())
+
+# --------------------------------------------------------------------------
+c.section("`enabled: false` makes a parameter invisible")
+
+# Pick a gate whose value can be removed to break it -- the user's own example
+# is `dividendYield` on a company that pays no dividend.
+victim = next(iter(GATED))
+broken = {**base, victim: None}
+with_rule = quality.evaluate(broken, cfg, quality.STAGE_FAST)
+c.ok(f"a missing value fails its gate ({victim})",
+     with_rule.passed is False and victim in with_rule.failed,
+     f"{with_rule.failed}")
+
+off = copy.deepcopy(cfg)
+off["quality"]["parameters"][victim]["enabled"] = False
+without = quality.evaluate(broken, off, quality.STAGE_FAST)
+c.ok("switching it off turns the same company into a pass",
+     without.passed is True and not without.failed, f"{without.failed}")
+c.ok("...and drops it from Quality Missing entirely",
+     victim not in without.failed)
+c.ok("...and from the parameter set recorded with the verdict",
+     victim in result.parameters and victim not in without.parameters)
+c.ok("...and from the values the verdict carries",
+     victim in result.values and victim not in without.values)
+
+row = {quality.label_of(k, s): base.get(k)
+       for k, s in quality.parameters(cfg, quality.STAGE_FAST).items()}
+on_labels = {f["name"] for f in quality.embed_fields(row, cfg)}
+off_labels = {f["name"] for f in quality.embed_fields(row, off)}
+victim_label = quality.label_of(victim, cfg["quality"]["parameters"][victim])
+c.ok("...and from the Discord embed fields when it was displayed",
+     (not cfg["quality"]["parameters"][victim].get("display"))
+     or (any(n.startswith(victim_label) for n in on_labels)
+         and not any(n.startswith(victim_label) for n in off_labels)),
+     f"{victim_label}: on={len(on_labels)} off={len(off_labels)} fields")
+
+# Turning every gate off must leave a pass, not an empty-set failure.
+none_on = copy.deepcopy(cfg)
+for spec in none_on["quality"]["parameters"].values():
+    spec["enabled"] = False
+c.ok("with every parameter off, nothing can fail",
+     quality.evaluate({}, none_on, quality.STAGE_FAST).passed is True)
+
+# --------------------------------------------------------------------------
+c.section("the layer switched off is 'not evaluated', not 'failed'")
+
+layer_off = copy.deepcopy(cfg)
+layer_off["quality"]["enabled"] = False
+result_off = quality.evaluate(broken, layer_off, quality.STAGE_FAST)
+c.ok("evaluate reports passed=None", result_off.passed is None)
+c.ok("...with no failures and no score",
+     not result_off.failed and result_off.score is None)
+
+import pandas as pd  # noqa: E402  (only needed for the frame check)
+
+frame = pd.DataFrame([row], index=pd.Index(["AAA"], name="Ticker"))
+annotated = quality.annotate(frame.copy(), layer_off)
+c.ok("annotate writes no columns at all when the layer is off",
+     "Quality" not in annotated.columns
+     and "Quality Missing" not in annotated.columns,
+     "absent columns are what downstream reads as 'not evaluated'")
+c.ok("annotate does write them when the layer is on",
+     {"Quality", "Quality Missing"}
+     <= set(quality.annotate(frame.copy(), cfg).columns))
+c.ok("a row with no values reports 'not evaluated' rather than all-failed",
+     quality.verdict_of({}, cfg) == (None, []))
+c.ok("has_values distinguishes the two",
+     quality.has_values(row, cfg, quality.STAGE_FAST)
+     and not quality.has_values({}, cfg, quality.STAGE_FAST))
+
+# --------------------------------------------------------------------------
+c.section("gate semantics")
+
+for key, spec in list(GATED.items())[:6]:
+    gate = spec["gate"]
+    if gate.get("increasing"):
+        good = passing_value(gate)
+        c.ok(f"{key}: `increasing` fails on a series that falls",
+             key in quality.gate_failures(
+                 {**base, key: [(2024, good), (2025, good * 0.5)]},
+                 cfg, quality.STAGE_FAST))
+        c.ok(f"{key}: `increasing` fails on a single year",
+             key in quality.gate_failures({**base, key: [(2025, good)]},
+                                          cfg, quality.STAGE_FAST))
+    for bound in ("min", "max"):
+        if gate.get(bound) is None:
+            continue
+        c.ok(f"{key}: the {bound} bound itself fails (strict compare)",
+             key in quality.gate_failures({**base, key: gate[bound]},
+                                          cfg, quality.STAGE_FAST))
+
+c.ok("an empty series is a missing value, not a pass",
+     all(k in quality.gate_failures({**base, k: []}, cfg, quality.STAGE_FAST)
+         for k, s in GATED.items() if s.get("format", "").endswith("_series")))
+
+# --------------------------------------------------------------------------
+c.section("scoring: weights renormalize over what participated")
+
+full_values = {**base, **{k: passing_value(s.get("gate") or {"max": 10})
+                          for k, s in SCORED.items() if k not in base}}
+score_all, groups_all = quality.score_of(full_values, cfg)
+c.ok("every scored group appears in the breakdown",
+     set(groups_all) <= set(quality.groups(cfg)),
+     f"{sorted(groups_all)}")
+c.ok("a group reports how much of it had data",
+     all(g["metrics_used"] <= g["metrics_total"] for g in groups_all.values()))
+
+# A group with parameters but no values is neutral, never zero: that is what
+# stops a bank being driven to the bottom by rows Yahoo does not publish.
+blank = {k: None for k in full_values}
+score_blank, groups_blank = quality.score_of(blank, cfg)
+c.ok("a group with no values scores a neutral 0.5, not 0",
+     all(g["score"] == 0.5 for g in groups_blank.values()),
+     f"{ {k: v['score'] for k, v in groups_blank.items()} }")
+c.close("...so an all-missing company sits at 50, not 0", score_blank, 50.0,
+        tol=0.05)
+
+# A group with no participating parameters at this stage is dropped entirely
+# rather than folded in as 0.5 -- at `fast` there is no estimate data to be
+# neutral *about*.
+_, groups_fast = quality.score_of(base, cfg, quality.STAGE_FAST)
+deep_only = {name for name in quality.groups(cfg)
+             if not any(s.get("group") == name and s.get("score")
+                        for s in quality.parameters(cfg, quality.STAGE_FAST).values())}
+c.ok("a group with no parameters at this stage is dropped, not neutralised",
+     not (deep_only & set(groups_fast)),
+     f"deep-only groups: {sorted(deep_only)}")
+
+disabled_group = copy.deepcopy(cfg)
+first_group = next(iter(quality.groups(cfg)))
+disabled_group["quality"]["groups"][first_group]["enabled"] = False
+score_less, groups_less = quality.score_of(full_values, disabled_group)
+c.ok("disabling a group removes it from the breakdown",
+     first_group not in groups_less)
+c.ok("...and the remaining weights still produce a 0-100 score",
+     score_less is None or 0 <= score_less <= 100, f"{score_less}")
+
+# --------------------------------------------------------------------------
+c.section("the verdict survives a JSON round trip")
+
+# `_json_safe` turns the [(year, value)] tuples into nested arrays. Grading has
+# to be unaffected, or every archived scan becomes unreadable the moment the
+# format moves on.
+round_tripped = json.loads(json.dumps(
+    {quality.label_of(k, s): base.get(k)
+     for k, s in quality.parameters(cfg, quality.STAGE_FAST).items()}))
+c.ok("a round-tripped row grades identically",
+     quality.verdict_of(round_tripped, cfg)
+     == (result.passed, result.failed),
+     f"{quality.verdict_of(round_tripped, cfg)} vs "
+     f"{(result.passed, result.failed)}")
+c.ok("a multi-year series still unwraps to its latest year",
+     quality.scalar([[2024, 1.0], [2025, 9.0]]) == 9.0)
+c.ok("zero_is_missing turns Yahoo's bank artifact into a missing value",
+     quality.scalar(0.0, {"zero_is_missing": True}) is None
+     and quality.scalar(0.0, {}) == 0.0)
+c.ok("a bool is never a number", quality.scalar(True) is None)
+
+# --------------------------------------------------------------------------
+c.section("validate catches what fails silently at runtime")
+
+
+def problems(mutate):
+    variant = copy.deepcopy(cfg)
+    mutate(variant)
+    return quality.validate(variant)
+
+
+c.ok("the live config is valid", not quality.validate(cfg),
+     str(quality.validate(cfg)))
+
+
+def _set(path, value):
+    def apply(variant):
+        node = variant
+        parts = path.split(".")
+        for part in parts[:-1]:
+            node = node[part]
+        node[parts[-1]] = value
+    return apply
+
+
+any_key = next(iter(quality.parameters(cfg)))
+c.ok("an unknown source is caught",
+     problems(_set(f"quality.parameters.{any_key}.source", "nope.x")))
+c.ok("a typo'd gate keyword is caught",
+     problems(_set(f"quality.parameters.{any_key}.gate", {"minimum": 1})))
+c.ok("a group that does not exist is caught",
+     problems(_set(f"quality.parameters.{any_key}.group", "invented")))
+c.ok("an unknown stage is caught",
+     problems(_set(f"quality.parameters.{any_key}.stage", "sometimes")))
+c.ok("a score missing an anchor is caught",
+     problems(_set(f"quality.parameters.{any_key}.score", {"good": 1})))
+c.ok("an unknown format is caught",
+     problems(_set(f"quality.parameters.{any_key}.format", "sparkline")))
+c.ok("an enabled group with no weight is caught",
+     problems(_set(f"quality.groups.{first_group}.weight", 0)))
+
+
+def _inert(variant):
+    variant["quality"]["parameters"]["inert"] = {
+        "enabled": True, "label": "Inert", "source": "yahoo_info.x",
+        "group": first_group, "stage": "fast", "format": "number"}
+
+
+c.ok("a parameter with neither a gate nor a score is caught",
+     problems(_inert), "it would be collected and never used")
+
+raise SystemExit(c.finish())

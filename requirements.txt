@@ -4,3 +4,4 @@ requests>=2.31
 lxml>=4.9
 matplotlib>=3.8
 mcp~=1.28
+ib_async>=1.0    # optional: IBKR via TWS/IB Gateway (ibkr.py degrades cleanly when absent)

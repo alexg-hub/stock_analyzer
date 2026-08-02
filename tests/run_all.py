@@ -17,11 +17,14 @@ HERE = Path(__file__).resolve().parent
 # In dependency order: cheapest and most fundamental first, so a broken
 # forward_trades shows up before the tests that build on it.
 TESTS = [
+    ("test_quality.py", "offline -- the quality registry: flags, gates, score"),
+    ("test_ibkr.py", "offline -- IBKR client: no account surface, degrades"),
     ("test_mcp_server.py", "offline -- MCP tool contract, stdout purity, dry-run"),
     ("test_forward_trades.py", "offline -- synthetic panel arithmetic"),
     ("test_research_output.py", "offline -- tier-3 financials, chart, verdict cards"),
     ("test_portfolio_sim.py", "offline -- tier-4 ledger, marking, attribution"),
     ("test_signal_contract.py", "cached panel -- signal tiers, alert, hand-off"),
+    ("test_combined_alert.py", "cached panel -- all four tiers in one message"),
     ("test_backtest_stats.py", "cached panel -- statistics and trade rows"),
 ]
 NETWORK_TESTS = [

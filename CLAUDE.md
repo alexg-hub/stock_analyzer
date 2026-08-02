@@ -10,10 +10,14 @@ profit backtest, a threshold tuner).
 
 1. **Tier 1 — technical.** The S&P 500 screens (breakout, pullback; reclaim
    disabled). Records `Setup` (`full`/`partial`) + `Missing`.
-2. **Tier 2 — quality.** `fundamentals.quality.rules` graded over the tier-1
-   hits only. Records `Quality` (the ⭐ badge) + `Quality Missing`.
-3. **Tier 3 — deep dive.** The `deep-dive` skill over Yahoo + IBKR + SEC + web,
-   producing a graded report per ticker.
+2. **Tier 2 — quality.** The `fast` half of the `quality` registry graded over
+   the tier-1 hits. Records `Quality` (the ⭐ badge) + `Quality Missing`.
+3. **Tier 3 — the graded verdict.** The `deep` half of the same registry,
+   scored 0-100 → a tier and a conviction, plus the financials chart and the
+   `_facts.json` snapshot. **Deterministic and computed inside the nightly
+   scan.** An *optional* narrative pass (the `deep-dive` skill over
+   IBKR + SEC + web) writes the report and may revise the conviction by a
+   bounded `narrative_adj`; it never originates one.
 4. **Tier 4 — the virtual portfolio.** `portfolio_sim/` buys every recorded
    signal at the next open, tracks it, and grades which recorded attribute
    actually predicted the return. Tiers 1–3 decide what looks interesting;
@@ -21,11 +25,20 @@ profit backtest, a threshold tuner).
    owns the repo's **only exit rule** (`exits.py`, the double top) — everything
    else here is entry-side.
 
-Tiers 1+2 are `run_scanners.py`: one combined Discord alert (text + per-signal
-chart images) and the `output/latest_hits.json` hand-off. Tier 3 reads that
-hand-off, both automatically (`run_deepdive.bat`, chained from
-`run_scanner.bat`) and on demand. Tier 4 reads the two history CSVs and runs
-from both `.bat` files.
+**All four tiers run in `run_scanners.py`, in one process, and produce ONE
+Discord message.** The screens, the quality check, the ledger, the exit scan
+and the graded verdict are all deterministic, so they all go out together: what
+fired, what it graded out at, and what to sell. It used to be three posts at
+three different times, which meant the verdict for tonight's signal arrived
+hours after — and detached from — the signal. Each addition is individually
+fail-safe (`run_ledger`, `run_verdicts`): a broken ledger or a failed verdict
+costs its own section of the message and nothing else. The optional narrative
+pass still runs afterwards from `run_deepdive.bat`.
+
+One caveat to state honestly: Discord caps a message at 10 embeds / 10
+attachments / ~6000 embed chars, and `send_discord_alert` batches on exactly
+that. This is one *send*, one header, one contiguous batch — a busy night still
+splits into several HTTP requests.
 
 Validation is `python tests/run_all.py` — plain scripts, no test dependency,
 asserting **invariants** rather than recorded output (config gets retuned
@@ -42,11 +55,15 @@ so runs only with `--network`.
 python tests/run_all.py
 python tests/run_all.py --network      # adds the Yahoo round-trip test
 
-# Full production scan (all screens). WARNING: sends a real Discord message
-# to the user's channel (config.json contains a live webhook URL). Don't run
-# it casually.
+# The whole night: all four tiers, one Discord message. WARNING: sends a real
+# message to the user's channel (config.json contains a live webhook URL).
+# Don't run it casually.
 python run_scanners.py
-python run_scanners.py --no-send   # same scan, cards printed instead of posted
+python run_scanners.py --no-send   # same run, cards printed instead of posted
+
+# The quality registry: what is tunable and what it is set to. Also the MCP
+# `params_list` tool, which is the better surface interactively.
+python migrate_config.py           # prove the unified section == the old two
 
 # Historical validation of the same logic on one ticker (no Discord send);
 # each writes output/backtest_*.csv and output/backtest_*.png
@@ -73,9 +90,15 @@ python tune_screen.py sensitivity reclaim_strategy
 python research_report.py candidates            # --all / --json also available
 python research_report.py auto-prompt
 
+# Tier 3's deterministic verdict on demand -- the same call the nightly scan
+# makes. Records tier + conviction to output/history/ and prints; posting is
+# the scan's job. No arguments = tonight's gated candidates.
+python research_report.py verdicts
+python research_report.py verdicts MSFT JNJ
+
 # On-demand: one named ticker, whether or not it signalled. `scan` is tiers
 # 1+2 (one ticker downloaded, no Discord) and records its own row;
-# run_ondemand.bat adds the tier-3 deep dive and posts the card.
+# run_ondemand.bat adds the narrative deep dive and posts the card.
 python research_report.py scan PGR RL
 run_ondemand.bat PGR
 
@@ -87,9 +110,10 @@ type output\logs\<run_id>.log
 # in the "Deep-dive started" banner in output/deepdive_log.txt).
 python research_report.py log-session <run_id> <session_id>
 
-# Tier 4: the virtual portfolio. `open`, `mark` and `exit-scan` run in the
-# nightly chain; `analyze` is on demand. `exit-scan` is the ONLY subcommand
-# that touches Discord -- the other three never do.
+# Tier 4: the virtual portfolio. `open`, `mark` and `exit-scan` now run INSIDE
+# run_scanners.py (see run_ledger) so the exit cards can join the one nightly
+# message; these are the standalone forms, still useful on demand. `analyze` is
+# on demand only. `exit-scan` is the ONLY subcommand that touches Discord.
 python -m portfolio_sim open        # recorded signals -> positions (no network)
 python -m portfolio_sim mark        # re-sync, fill entries, mark every horizon
 python -m portfolio_sim exit-scan   # double tops on the book -> exits.csv + alert
@@ -176,39 +200,80 @@ real send.
   which loads whenever you work under that directory.
 - **`tune_screen.py` is the threshold tuner** — see the `tune-thresholds`
   skill for how to sweep a screen and read its `protected` column.
-- **Tier 2's verdict is computed exactly once**, by
-  `scanner_common.annotate_quality`, in `run_scanners.main()` right after the
-  fundamentals join and *before* the hand-off is written. `build_embeds` reads
-  the recorded `Quality` column (falling back to `quality_check` only when the
-  column is absent), so the ⭐ badge and `latest_hits.json` cannot disagree.
-  Don't reintroduce a second call site — the bug this fixed was exactly that:
-  the badge was computed inside `build_embeds`, which runs *after*
-  `write_latest_hits`, so the hand-off never carried it and tier 3 was blind to
-  tier 2. **Absent quality columns mean "not evaluated", not "failed"** — the
-  helper is a deliberate no-op when the quality layer is off.
-- **Tier 3's figures and charts are programmatic — a model-made one is a bug.**
-  `assemble_context` renders `output/reports/<TICKER>_<date>_financials.png`
-  (via `charts.plot_financials`) and writes `..._facts.json` *before it
-  returns*, and also hands back `financials_table_md`. The skill embeds the
-  path and pastes the table; it never draws a chart or retypes a figure, and
-  `SKILL.md` says so explicitly. Same reason the Discord card reads its numbers
-  from `_facts.json` rather than from the verdict dict: the model contributes
-  only `tier`/`conviction`/`narrative_adj`/`thesis`. This is load-bearing
-  because tier 3 *is* an LLM — left unconstrained it will happily invent a
-  plot or mistype a percentage.
+- **`quality.py` is the one quality check, for both tiers 2 and 3.** There used
+  to be two systems that shared no keys, no config shape and no code path:
+  `fundamentals.quality.rules` (a pass/fail gate → the ⭐ badge) and
+  `research.synthesis.dimensions` (a weighted 0-100 score → tier 3's anchor).
+  They are one **registry** now, `config.json`'s `quality.parameters`. Each
+  parameter declares where its value comes from (`source`, resolved by prefix:
+  `yahoo_info` / `yahoo_stmt` / `yahoo_deep` / `ibkr`), which weighted `group`
+  it belongs to, when it is affordable to collect (`stage`: `fast` for every
+  tier-1 hit, `deep` for gated candidates only), and optionally a `gate`
+  (`min`/`max`/`increasing`) and/or a `score` (`good`/`bad` anchors). One
+  `quality.evaluate` call yields both verdicts at once. Rules that hold it
+  together:
+  - **`enabled: false` makes a parameter invisible** — not gated, not scored,
+    absent from `Quality Missing` and from the embed fields, and not counted in
+    any weight. That is the flag's whole purpose: a company with no dividend
+    earns the badge by switching `dividendYield` off, without deleting the rule
+    and losing the record that it ever existed. Weights renormalize over what
+    is left, so switching one off never silently reweights the rest.
+  - **Missing ≠ failing ≠ not evaluated.** A missing value *fails its gate*
+    (unverifiable quality does not earn the badge) but is *skipped* in the
+    score. A group with parameters but no values scores a neutral **0.5**, not
+    0 — that is what stops a bank being zeroed by statement rows Yahoo does not
+    publish for it. A group with no parameters *at this stage* is dropped from
+    the weighted mean entirely rather than neutralised. And with the layer off,
+    `annotate` writes no columns at all: **absent columns mean "not evaluated"**.
+  - **Values are keyed by internal key, rows by display label.** The hits frame,
+    `latest_hits.json` and `signals.csv` all store fundamentals under
+    `parameters[*].label`; every gate, score and `Quality Missing` entry uses
+    the key. `quality.row_values` is the one bridge. Renaming a label is safe;
+    renaming a key is not.
+  - **Graded exactly once per scan**, by `quality.annotate` in
+    `run_scanners.main()` right after the join and *before* the hand-off is
+    written. `build_embeds` reads the recorded `Quality` column, so the badge
+    and `latest_hits.json` cannot disagree. Don't reintroduce a second call
+    site — the bug this fixed was the badge being computed inside
+    `build_embeds`, which runs *after* `write_latest_hits`, so the hand-off
+    never carried it and tier 3 was blind to tier 2.
+  - **`quality.validate` runs before any config write** (`config_set` and
+    friends call it). Every case it catches fails *silently* at runtime: an
+    unknown `source` resolves to None for every company, a typo'd gate keyword
+    is never applied, a group with no weight contributes nothing.
+  - `migrate_config.py` proves the translation from the old two sections and
+    can be deleted once `fundamentals` and `research.synthesis.dimensions` come
+    out of `config.json`.
+- **Tier 3's verdict is deterministic; the model only revises it.**
+  `research_report.deterministic_verdict` collects the `deep` stage, scores it,
+  renders `output/reports/<TICKER>_<date>_financials.png` and writes
+  `..._facts.json` — then sets `conviction = score` and
+  `tier = tier_for(score)`. It runs inside the nightly scan, so the verdict
+  exists before anything is posted and is recorded whether or not the narrative
+  pass ever runs. Even the batch **thesis is generated in Python**
+  (`deterministic_thesis`, a rendering of the group breakdown) — same rule as
+  tier 4's `conclusion` column: a sentence a model wrote is a sentence you
+  cannot check. The narrative pass contributes only a bounded `narrative_adj`
+  and prose. This is load-bearing because that pass *is* an LLM — left
+  unconstrained it will happily invent a plot or mistype a percentage, which is
+  why `SKILL.md` forbids both explicitly.
 - **The pretax-margin fallback lives only in `research_collect._financials`.**
   Yahoo publishes no `Operating Income` (nor `Gross Profit`) for banks and
   insurers, so the tier-3 chart falls back to `Pretax Income / Revenue` and
   records `margin_kind` so the panel and table can name the basis. Never port
-  that fallback into `scanner_common._statement_metrics`: its `operating_margin`
-  feeds `fundamentals.quality.rules`, so a fallback there would silently change
-  the ⭐ badge and the tier-3 gate for every financial. A test pins the split.
-- **`research_report.py` is tier 3's deterministic half** (`list_candidates` +
-  the gate, the quant score, the financials chart/table/facts, `report_dir`/
-  `write_report`, the Discord verdict cards); the synthesis itself is the
-  `deep-dive` skill, i.e. Claude reasoning, not a function — which is why the
-  nightly run invokes `claude -p` from `run_deepdive.bat` rather than calling
-  Python. `research_collect.py` (Yahoo)
+  that fallback into `quality._statement_metrics`: its `operating_margin`
+  feeds the `quality` gates, so a fallback there would silently change the ⭐
+  badge and the tier-3 gate for every financial. A test pins the split.
+  (`gross_margin` has the mirror-image problem — Yahoo returns a hard `0.0` for
+  banks rather than omitting it, which is numeric enough to score them at the
+  bottom of a metric that does not apply. `zero_is_missing: true` on that
+  parameter is the fix.)
+- **`research_report.py` is tier 3** (`resolve_trigger`, `deterministic_verdict`,
+  `verdicts_for`, `list_candidates` + the gate, the financials chart/table/facts,
+  `report_dir`/`write_report`, the Discord verdict cards). The optional
+  narrative synthesis is the `deep-dive` skill, i.e. Claude reasoning, not a
+  function — which is why `run_deepdive.bat` invokes `claude -p` rather than
+  calling Python. `research_collect.py` (Yahoo)
   and `sec.py` (EDGAR) are its collectors; `RESEARCH_DATA.md` maps what each
   source can and cannot supply. **The IBKR MCP tools must stay in
   `run_deepdive.bat`'s `--allowedTools`** — under `--permission-mode dontAsk` an
@@ -344,18 +409,27 @@ real send.
     agree cell for cell. `mark` downloads only the held tickers + benchmark
     rather than reading `backtest_universe_cache.pkl`, which is a day stale at
     best and keyed to a fixed universe.
-  - **`mark` re-syncs the ledger first**, which is why it also runs at the end
-    of `run_deepdive.bat`: tier 3 writes its verdict hours after tier 1 wrote
-    the row, and the verdict is exactly the attribute tier 4 exists to grade.
+  - **`mark` re-syncs the ledger first**, and the verdict has to be carried
+    across separately. Ordering inside `main()`: `run_ledger` (open → mark →
+    exit scan) must come **before** `run_verdicts`, because the exit cards have
+    to exist before the message is built and the exit scan needs filled entry
+    prices — but the verdict is written to `signals.csv` after that. So
+    `carry_verdicts_to_ledger` re-syncs once more at the end. Without it the
+    tier and conviction would only reach the position on the *next* night's run,
+    and the verdict is exactly the attribute tier 4 exists to grade. The
+    trailing `mark` in `run_deepdive.bat` used to cover this; that pass is
+    optional now, so it cannot be relied on. A test pins it.
+    `sync` alone, not `mark`: it copies the source row verbatim (verdict columns
+    included) and needs no network.
     Both commands **exit 0 on failure** by design (`--strict` flips it) — a
     broken ledger must never take down the scan or the deep dive.
   - **The row carries the whole source row plus point-in-time derivations.**
     `Quality Missing` is exploded into `qr_<rule>` booleans against the rule set
     **recorded with the position** (`Quality Rules`, frozen at first sight), so
-    retuning `fundamentals.quality.rules` cannot rewrite past findings and a
+    retuning `quality.parameters` cannot rewrite past findings and a
     rule invented later never reads as "passed" on an older signal. Absent
     quality means *no* `qr_*` columns — "not evaluated" is not "failed", same
-    rule as `_row_quality`/`_has_fundamentals`. `mark` adds tier 3's
+    rule as `quality.verdict_of`/`quality.has_values`. `mark` adds tier 3's
     `quant_score`, per-dimension `quant_*` and `qm_*` metrics from
     `<T>_<date>_facts.json`.
   - **`exits.py` is the exit side, and it flags rather than closes.** The
@@ -434,17 +508,43 @@ real send.
     `tests/test_mcp_server.py` pins it; that check is the most important one in
     the file.
   - **Side-effecting tools default to dry-run.** `send: bool = False` on
-    anything that can reach Discord, `confirm: bool = False` on `config_set`.
-    `.claude/settings.json` also omits those four tools so they always prompt —
+    anything that can reach Discord, `confirm: bool = False` on every config
+    writer (`config_set`, `config_edit`, `config_delete`).
+    `.claude/settings.json` also omits those tools so they always prompt —
     but the default is the real guard, because **a permission rule that fails to
     match fails silently**. MCP rules are `mcp__stock_analyzer__<tool>`; a bare
-    tool name matches nothing. `config_set` additionally refuses `discord.*` and
+    tool name matches nothing. The writers additionally refuse `discord.*` and
     `research.auto.discord_send` outright: a tool that could flip the send gate
     would make every other dry-run default decorative.
   There are deliberately **no file-reading tools** — reports, logs, CSVs and
   charts under `output/` are read with `Read`/`Glob`, which do it better. A
   `read_report`/`tail_log`/`backtest_results` reappearing means the surface
   crept; a test asserts they have not.
+- **`mcp_tools/config_tools.py` is how strategy and quality parameters are
+  edited from a session.** `params_list` is the discovery surface — start there
+  rather than reading `config.json`, because it resolves the quality registry
+  including the parameters that are switched **off** (the ones you usually want)
+  and annotates each strategy value with its `tuning.sweeps` grid. Then
+  `config_set` (one value, `create=True` to add one), `config_edit` (a batch,
+  applied atomically under one diff — a `source` updated without its `group`
+  scores nothing, so the unit of validity is the set) or `config_delete`.
+  Four things must not be undone:
+  - **Writes are surgical text edits, and must stay that way.**
+    `json.dumps(cfg)` would expand every hand-maintained inline collection and
+    churn ~200 unrelated lines, burying the change. `_rewrite_one_value` /
+    `_insert_member` / `_delete_member` touch only the bytes they must, and the
+    result is re-parsed and compared against the intended tree before anything
+    is offered.
+  - **`newline=""` on both writes.** Windows text mode translates LF→CRLF, and
+    `config.json` is committed LF — without it every write rewrites all ~300
+    lines and `git diff` shows the whole file. That silently defeated the
+    surgical edit until it was fixed.
+  - **Writable is `*_strategy` by suffix** plus a named list, so a new entry or
+    exit strategy is tunable the day it is added rather than after someone
+    remembers to extend a tuple.
+  - **Validation runs before every write** (`config_tools.validate` =
+    `_download_period_ok` + `quality.validate`). Every case it catches is one
+    that fails silently at runtime.
 - **Every generated file goes to `output/`** via
   `scanner_common.output_dir()` — logs, `latest_hits.json`, the cached price
   panel, all backtest tables/charts, the tier-3 reports (`output/reports/`), the
@@ -509,64 +609,95 @@ real send.
   `partial_mask` is the backtest's touch-but-no-fire control cohort (measured
   at +1.57% vs a +2.10% random-entry baseline — i.e. its filters earn their
   keep).
-- **Fundamentals are two config-driven layers** (`scanner_common.py`):
-  `fields` = snapshot values from Yahoo `info` (`percent_fields` lists keys
-  Yahoo returns as fractions, ×100 before display — but `dividendYield` is
-  already a percentage, keep it OUT of `percent_fields`); `statements` =
-  per-year metrics computed from `Ticker.income_stmt`/`cash_flow`/
-  `balance_sheet` (FCF, OpM, PM per fiscal year; ROE with `info` fallback;
-  ROIC = EBIT×(1−tax rate)/Invested Capital). Multi-year values are stored
-  as `[(fiscal_year, value)]` lists in the joined DataFrame;
-  `fundamentals_fields()` renders them as embed fields. Missing statement
-  rows (banks lack Operating Income; a bank's hugely negative FCF is
-  genuine) render as `n/a` — same tolerance rule as `info` fields.
-  `fetch_fundamentals` also adds a reserved `COMPANY_COL` ("Company")
-  column (`info` longName/shortName) that `build_embeds` puts in each card
-  title as `TICKER (Company Name)`; it is not a config field and never
-  renders as an inline field.
-- **Quality badge = tier 2** (`fundamentals.quality` in config):
-  `quality_failures(row, fund_cfg)` in `scanner_common.py` evaluates `rules` —
-  keyed by the same `info`/metric keys as the display config, each
-  `{min, max, increasing}`; strict compares, latest fiscal year for multi-year
-  metrics, missing value = rule fails (banks can never pass). `annotate_quality`
-  records the result, `build_embeds` prefixes the configured `badge` to any
-  passing signal card's title, every screen automatically — **including
-  `partial` setups** (it grades fundamentals, which are independent of setup
-  completeness; this changed when the tiers merged). The rule set is
-  intentionally strict: **most tickers fail at least one rule**, which is why
-  the tier-3 gate is a soft, configurable one (`research.auto.gate`:
-  `quality_pass` | `all`) — a hard gate would routinely leave tier 3 with
-  nothing. If `candidates` keeps coming back empty, that is the rule set doing
-  its job, and the fix is a config decision (loosen the rules or switch the gate
-  to `all`), not a code change.
+- **Collection is `quality.collect`, and it is the only thing here that touches
+  the network.** `sources_needed` asks the registry which resolvers this stage
+  requires, and only those are fetched:
+  - `yahoo_info` — snapshot values from `yf.Ticker.info`. A parameter with
+    `"percent": true` is a fraction Yahoo returns and gets ×100 — but
+    `dividendYield` is *already* a percentage, so it must NOT carry that flag.
+  - `yahoo_stmt` — per-year metrics from `income_stmt`/`cash_flow`/
+    `balance_sheet` (FCF, OpM, PM per fiscal year; ROE with an `info` fallback;
+    ROIC = EBIT×(1−tax rate)/Invested Capital), stored as `[(fiscal_year,
+    value)]` lists. Missing rows (banks lack Operating Income; a bank's hugely
+    negative FCF is genuine) render as `n/a` — same tolerance rule throughout.
+  - `yahoo_deep` — `research_collect.collect_yahoo` flattened by
+    `quality.deep_metrics`. Every `.get(...) or {}` in there is load-bearing:
+    `_estimates` sets its keys to **None** (not `{}`) when yfinance returns no
+    frame, so a plain `.get("eps_revisions", {})` raises and aborts the whole
+    deep pass for that ticker.
+  - `ibkr` — `ibkr.metrics`, always optional (below).
+
+  `fetch_fast` also adds a reserved `COMPANY_COL` ("Company") column (`info`
+  longName/shortName) that `build_embeds` puts in each card title as
+  `TICKER (Company Name)`; it is not a registry parameter and never renders as
+  an inline field.
+- **The ⭐ badge is the gate half of the registry.** `build_embeds` prefixes the
+  configured `quality.badge` to any passing signal card's title, every screen
+  automatically — **including `partial` setups** (it grades fundamentals, which
+  are independent of setup completeness). The gate set is intentionally strict:
+  **most tickers fail at least one**, which is why the tier-3 gate is a soft,
+  configurable one (`research.auto.gate`: `quality_pass` | `all`) — a hard gate
+  would routinely leave tier 3 with nothing. If `candidates` keeps coming back
+  empty, that is the gates doing their job, and the fix is a config decision
+  (loosen a threshold, or switch a parameter off, or move the gate to `all`),
+  not a code change.
+- **`ibkr.py` is IBKR over the TWS API (`ib_async`), and it is always optional.**
+  Retail IBKR has **no headless API** — OAuth 1.0a is institutional-only — so
+  the socket API needs IB Gateway or TWS logged in on this box. Everything
+  IBKR-sourced therefore has to degrade: `available()` answers False when the
+  gateway is down *or* `ib_async` is not installed, every getter returns `{}`,
+  and the engine reads that as missing values. One `IBKR skip` step line makes a
+  thinner alert visibly thinner. Three more rules:
+  - **No account surface exists.** `reqAccountSummary`, `reqPositions`,
+    `reqPnL` and friends are not implemented — not behind a flag. The user's
+    real book is out of scope (a deep-dive grades the *security*; tier 4 grades
+    the signal against a fixed-notional virtual ledger), and the MCP
+    allow-lists used to enforce that by enumeration. A capability that was
+    never written is stronger than an instruction a model can talk itself past.
+    `FORBIDDEN_CALLS` documents the list and a test asserts none is called.
+  - **It runs on a private event loop in a private thread** (`_run`).
+    `ib_async`'s sync wrappers patch asyncio for re-entry in the *calling*
+    thread; the MCP server runs tool bodies on anyio worker threads while its
+    own loop is live, and a global asyncio patch under that fails once,
+    mysteriously, in production.
+  - **The moat/competitor graph does not come back.** `get_company_connections`
+    / `get_company_themes` were Reflexivity products on the claude.ai MCP
+    connector with no public-API equivalent. They fed only the narrative
+    sections, and the nine IBKR MCP tools stay in both `.bat` allow-lists for
+    exactly that reason.
 - **The tier 1→2→3 hand-off contract** is `output/latest_hits.json`: per screen
   a `config_key`/`title`/`strategy` and a `hits` map of ticker → row, where the
   row is whatever the screen's frame held plus `Setup`/`Missing` (tier 1),
   `Quality`/`Quality Missing` (tier 2), `Company`, and the joined fundamentals
   under their **display labels**. `_json_safe` makes it JSON-native: NaN→`null`,
   numpy scalars→Python, and the `[(year, value)]` series→nested arrays.
-  `quality_failures` still grades a round-tripped row because it looks values up
-  by label and indexes the series positionally — that is what keeps *archived*
-  scans readable after the format moves on. Only **enabled** screens appear: the
+  `quality.verdict_of` still grades a round-tripped row because `row_values`
+  looks values up by label and `scalar` indexes the series positionally — that
+  is what keeps *archived* scans readable after the format moves on. A test
+  pins it. Only **enabled** screens appear: the
   hand-off follows the alert, unlike the backtest and tuner. The same shape is
   produced in memory by `scan_ticker` for on-demand tickers — keep the two
   identical, since that identity is the only reason tier 3 needs no second code
   path.
-- **Tier 3 re-grades tier 2 against the rules in force now** — `_row_quality`
-  recomputes rather than trusting the verdict the scan recorded, and both the
-  gate (`list_candidates`) and the Discord card (`_facts`) go through it, so they
+- **Tier 3 re-grades tier 2 against the parameters in force now** —
+  `quality.verdict_of` (wrapped as `_row_quality`) recomputes rather than
+  trusting the verdict the scan recorded, and both the gate
+  (`list_candidates`) and the Discord card (`_facts`) go through it, so they
   cannot disagree. The reason: `config.json` gets retuned between scans, and a
   gate answering with last night's bar silently ignores the change until the next
   scan — loosening a rule and watching `candidates` still report the old failures
   is genuinely confusing. `output/history/` keeps the original verdict, so nothing
-  historical is rewritten. `_has_fundamentals` guards the case where the row has
-  no values to grade (fundamentals were off that night): without it, re-grading
-  would score every rule as failed rather than reporting "not evaluated".
-- **Everything tunable lives in `config.json`** (per-screen strategy
-  sections, charts, Discord, fundamentals fields) and all user-facing text
-  (alert lines, backtest STEP logs, chart labels) is built from those values
-  at runtime — never hardcode a threshold or a literal like "150d SMA".
-  Adding a metric to alerts is a config-only change.
+  historical is rewritten. `quality.has_values` guards the case where the row has
+  nothing to grade (the layer was off that night): without it, re-grading would
+  score every gate as failed rather than reporting "not evaluated".
+- **Everything tunable lives in `config.json`** (per-screen strategy sections,
+  the `quality` registry, charts, Discord) and all user-facing text (alert
+  lines, backtest STEP logs, chart labels, and now the parameter labels and
+  number formats) is built from those values at runtime — never hardcode a
+  threshold or a literal like "150d SMA". Adding a metric to the alert is a
+  config-only change: a new `quality.parameters` entry with a `label`, a
+  `source`, a `format` and `display: true`. The embed field ordering used to be
+  hardcoded in `fundamentals_fields`; it is the registry's order now.
 
 ## Constraints and gotchas
 

@@ -50,19 +50,25 @@ DISCORD_CHAR_LIMIT = 1900
 DISCORD_MAX_EMBEDS = 10
 DISCORD_EMBED_CHAR_BUDGET = 5500
 
+# The framing line that must appear on every notification and every report:
+# the verdict is an analytical rating, never a buy/sell instruction.
+DISCLAIMER = "_Research analysis, not investment advice._"
+
 # Embed side-bar color for a *partial* setup's card (a full setup gets the
 # screen's own EMBED_COLOR) -- one card type, tier visible at a glance.
 PARTIAL_COLOR = 0x898781
 
-# Reserved column (added by fetch_fundamentals) holding the company name for
-# the embed titles; not a config-driven fundamentals field, so it never
-# renders as an inline field.
+# Reserved column (added by quality.fetch_fast) holding the company name for
+# the embed titles; not a registry parameter, so it never renders as an inline
+# field.
 COMPANY_COL = "Company"
 
-# Reserved columns (added by annotate_quality) holding the tier-2 quality
-# verdict, mirroring the tier-1 Setup/Missing pair: the badge decision and the
-# rules that failed. Like COMPANY_COL these are not config-driven fundamentals
-# fields and never render as inline fields.
+# Reserved columns (added by quality.annotate) holding the tier-2 verdict,
+# mirroring the tier-1 Setup/Missing pair: the badge decision and the parameter
+# keys whose gate failed. Like COMPANY_COL these are not registry parameters
+# and never render as inline fields. They live here rather than in quality.py
+# because ledger.py, marking.py and research_report.py all read them without
+# needing the engine.
 QUALITY_COL = "Quality"
 QUALITY_MISSING_COL = "Quality Missing"
 
@@ -499,8 +505,11 @@ def single_ticker_panel(data: pd.DataFrame, ticker: str) -> pd.DataFrame:
 
 
 # --------------------------------------------------------------------------
-# Fundamentals for the hits
+# Statement access + formatting
 # --------------------------------------------------------------------------
+# The fundamentals themselves -- which values are collected, how they are
+# gated, scored and displayed -- live in `quality.py`. What stays here is the
+# n/a-tolerant plumbing every layer shares.
 
 def stmt_value(df: pd.DataFrame, row_name: str, column) -> float | None:
     """One cell of a financial statement, or None when it isn't there.
@@ -516,128 +525,6 @@ def stmt_value(df: pd.DataFrame, row_name: str, column) -> float | None:
     value = df.loc[row_name, column]
     return float(value) if pd.notna(value) else None
 
-
-def _yearly_series(values: list[tuple[int, float | None]]) -> list[tuple[int, float]]:
-    """Drop missing years; keep (fiscal_year, value) oldest -> newest."""
-    return [(year, value) for year, value in values if value is not None]
-
-
-def _statement_metrics(tk: "yf.Ticker", stmt_cfg: dict, info: dict) -> dict:
-    """Compute the statement-based metrics for one ticker.
-
-    Multi-year metrics (FCF, margins) are stored as [(fiscal_year, value)]
-    lists oldest -> newest; ROE/ROIC as scalar percents. Anything Yahoo
-    doesn't provide for this company simply stays None -> 'n/a'.
-    """
-    years = stmt_cfg.get("years", 2)
-    metrics = stmt_cfg.get("metrics", {})
-
-    def statement(name: str) -> pd.DataFrame:
-        try:
-            df = getattr(tk, name)
-            if isinstance(df, pd.DataFrame) and not df.empty:
-                return df
-        except Exception as exc:  # noqa: BLE001 - missing statements must not kill the alert
-            log_step("YAHOO", "failed", f"{name} for {tk.ticker}: {exc}")
-        return pd.DataFrame()
-
-    income = statement("income_stmt")
-    cashflow = statement("cash_flow")
-    balance = statement("balance_sheet")
-
-    # The `years` most recent annual columns, oldest -> newest.
-    inc_cols = sorted(income.columns)[-years:] if not income.empty else []
-    cf_cols = sorted(cashflow.columns)[-years:] if not cashflow.empty else []
-
-    row = {}
-    if "fcf" in metrics:
-        row[metrics["fcf"]] = _yearly_series(
-            [(c.year, stmt_value(cashflow, "Free Cash Flow", c)) for c in cf_cols]
-        )
-    if "operating_margin" in metrics or "profit_margin" in metrics:
-        def margin(numerator_row):
-            series = []
-            for c in inc_cols:
-                num = stmt_value(income, numerator_row, c)
-                rev = stmt_value(income, "Total Revenue", c)
-                series.append((c.year, 100 * num / rev if num is not None and rev else None))
-            return _yearly_series(series)
-
-        if "operating_margin" in metrics:
-            row[metrics["operating_margin"]] = margin("Operating Income")
-        if "profit_margin" in metrics:
-            row[metrics["profit_margin"]] = margin("Net Income")
-
-    if "roe" in metrics:
-        roe = None
-        for c in reversed(inc_cols):  # latest year with both rows present
-            net = stmt_value(income, "Net Income", c)
-            equity = stmt_value(balance, "Stockholders Equity", c)
-            if net is not None and equity:
-                roe = 100 * net / equity
-                break
-        if roe is None and isinstance(info.get("returnOnEquity"), (int, float)):
-            roe = 100 * info["returnOnEquity"]
-        row[metrics["roe"]] = roe
-
-    if "roic" in metrics:
-        roic = None
-        for c in reversed(inc_cols):
-            ebit = stmt_value(income, "EBIT", c)
-            tax = stmt_value(income, "Tax Provision", c)
-            pretax = stmt_value(income, "Pretax Income", c)
-            invested = stmt_value(balance, "Invested Capital", c)
-            if None in (ebit, tax, pretax) or not invested or pretax <= 0:
-                continue
-            nopat = ebit * (1 - tax / pretax)
-            roic = 100 * nopat / invested
-            break
-        row[metrics["roic"]] = roic
-
-    return row
-
-
-def fetch_fundamentals(tickers: list[str], fund_cfg: dict) -> pd.DataFrame:
-    """Pull the configured fundamentals from Yahoo for each ticker.
-
-    Two layers, both config-driven (`fundamentals` section):
-      * `fields`  -- snapshot values from `info` (fields listed in
-        `percent_fields` come from Yahoo as fractions and are x100;
-        note dividendYield is already a percentage);
-      * `statements` -- per-year metrics computed from the annual income
-        statement / cash flow / balance sheet (FCF, margins, ROE, ROIC).
-
-    Only runs on the (small) list of signalling tickers, so a plain
-    loop is fine here.
-    """
-    fields = fund_cfg["fields"]
-    percent_fields = fund_cfg.get("percent_fields", [])
-    stmt_cfg = fund_cfg.get("statements", {})
-
-    t0 = time.perf_counter()
-    rows, failed = {}, []
-    for ticker in tickers:
-        tk = yf.Ticker(ticker)
-        try:
-            info = tk.info
-        except Exception as exc:  # noqa: BLE001 - a bad ticker must not kill the alert
-            log_step("YAHOO", "failed", f"fundamentals for {ticker}: {exc}")
-            failed.append(ticker)
-            info = {}
-        row = {COMPANY_COL: info.get("longName") or info.get("shortName")}
-        for key, label in fields.items():
-            value = info.get(key)
-            if key in percent_fields and isinstance(value, (int, float)):
-                value *= 100
-            row[label] = value
-        if stmt_cfg.get("enabled"):
-            row.update(_statement_metrics(tk, stmt_cfg, info))
-        rows[ticker] = row
-    log_step("YAHOO", "ok" if not failed else "partial",
-             f"fundamentals for {len(rows) - len(failed)}/{len(tickers)} ticker(s)"
-             + (f" -- missing {', '.join(failed)}" if failed else ""),
-             ms=(time.perf_counter() - t0) * 1000)
-    return pd.DataFrame.from_dict(rows, orient="index").rename_axis("Ticker")
 
 
 def fmt_bytes(n) -> str:
@@ -665,133 +552,9 @@ def fmt_compact(value) -> str:
     return f"{value:,.0f}"
 
 
-def _fmt_pct(value) -> str:
-    return f"{value:.1f}%" if isinstance(value, (int, float)) and pd.notna(value) else "n/a"
 
 
-def _fmt_yearly(series, fmt) -> str:
-    """'18.1B->19.3B' for a [(fiscal_year, value)] list, oldest -> newest."""
-    if not isinstance(series, list) or not series:
-        return "n/a"
-    return "->".join(fmt(value) for _, value in series)
-
-
-def _year_span(series) -> str:
-    """'FY24->FY25' label for a [(fiscal_year, value)] list."""
-    if not isinstance(series, list) or not series:
-        return ""
-    years = [f"FY{year % 100:02d}" for year, _ in series]
-    return f" ({years[0]}->{years[-1]})" if len(years) > 1 else f" ({years[0]})"
-
-
-def fundamentals_fields(row, fund_cfg: dict) -> list[dict]:
-    """The per-ticker fundamentals as Discord embed fields (inline, so the
-    client lays them out as a 3-per-row grid -- the 'table')."""
-    if not fund_cfg.get("enabled"):
-        return []
-
-    def field(name, value):
-        return {"name": name, "value": value, "inline": True}
-
-    fields = [field(label, fmt_value(row.get(label)))
-              for label in fund_cfg["fields"].values()]
-
-    stmt_cfg = fund_cfg.get("statements", {})
-    metrics = stmt_cfg.get("metrics", {})
-    if not stmt_cfg.get("enabled") or not metrics:
-        return fields
-
-    for key in ("roe", "roic"):
-        if key in metrics:
-            fields.append(field(metrics[key], _fmt_pct(row.get(metrics[key]))))
-    for key in ("operating_margin", "profit_margin"):
-        if key in metrics:
-            series = row.get(metrics[key])
-            fields.append(field(metrics[key] + _year_span(series),
-                                _fmt_yearly(series, _fmt_pct)))
-    if "fcf" in metrics:
-        series = row.get(metrics["fcf"])
-        fields.append(field(metrics["fcf"] + _year_span(series),
-                            _fmt_yearly(series, fmt_compact)))
-    return fields
-
-
-def _rule_value(row, key: str, fund_cfg: dict):
-    """Resolve a quality-rule key to the row's value.
-
-    Rule keys are the same keys used elsewhere in the fundamentals config:
-    Yahoo `info` keys for snapshot fields (trailingPE, ...) and metric keys
-    for statement metrics (roe, fcf, ...), so renaming a display label
-    never breaks a rule.
-    """
-    if key in fund_cfg.get("fields", {}):
-        return row.get(fund_cfg["fields"][key])
-    metrics = fund_cfg.get("statements", {}).get("metrics", {})
-    if key in metrics:
-        return row.get(metrics[key])
-    return None
-
-
-def quality_failures(row, fund_cfg: dict) -> list[str]:
-    """Which quality rules (fundamentals.quality.rules) this ticker fails.
-
-    Rule semantics: `min`/`max` are strict compares against the value
-    (latest fiscal year for multi-year metrics); `increasing` requires the
-    latest year above the previous one. A missing value fails its rule --
-    unverifiable quality doesn't earn the badge.
-    """
-    failed = []
-    for key, rule in fund_cfg.get("quality", {}).get("rules", {}).items():
-        value = _rule_value(row, key, fund_cfg)
-        series = value if isinstance(value, list) else None
-        if series is not None:
-            value = series[-1][1] if series else None
-        ok = isinstance(value, (int, float)) and pd.notna(value)
-        if ok and "min" in rule:
-            ok = value > rule["min"]
-        if ok and "max" in rule:
-            ok = value < rule["max"]
-        if ok and rule.get("increasing"):
-            ok = series is not None and len(series) >= 2 and series[-1][1] > series[-2][1]
-        if not ok:
-            failed.append(key)
-    return failed
-
-
-def quality_check(row, fund_cfg: dict) -> bool:
-    """True when the ticker passes every configured quality rule."""
-    if not (fund_cfg.get("enabled") and fund_cfg.get("quality", {}).get("enabled")):
-        return False
-    return not quality_failures(row, fund_cfg)
-
-
-def quality_enabled(fund_cfg: dict) -> bool:
-    """Whether the tier-2 quality layer is switched on at all."""
-    return bool(fund_cfg.get("enabled") and fund_cfg.get("quality", {}).get("enabled"))
-
-
-def annotate_quality(hits: pd.DataFrame, fund_cfg: dict) -> pd.DataFrame:
-    """Record the tier-2 verdict on a hits frame, mirroring Setup/Missing.
-
-    Adds `Quality` (passed every rule?) and `Quality Missing` (the rule keys
-    that failed, `[]` when it passed). Computing it here rather than inside
-    `build_embeds` gives the badge and the research hand-off **one** source of
-    truth -- they used to be a Discord-only decision that the hand-off never
-    saw, so nothing downstream could tell whether a ticker earned the star.
-
-    A no-op when the quality layer is disabled: the columns stay *absent*,
-    which downstream readers must treat as "not evaluated" rather than as a
-    failure. Mutates and returns `hits`.
-    """
-    if hits.empty or not quality_enabled(fund_cfg):
-        return hits
-    failures = [quality_failures(row, fund_cfg) for _, row in hits.iterrows()]
-    hits[QUALITY_COL] = [not f for f in failures]
-    hits[QUALITY_MISSING_COL] = pd.Series(failures, index=hits.index, dtype=object)
-    return hits
-
-
-def build_embeds(module, result: ScanResult, fund_cfg: dict,
+def build_embeds(module, result: ScanResult, cfg: dict,
                  chart_files: dict[str, Path] = {}) -> list[dict]:
     """One embed card per signal, with its chart image bound in.
 
@@ -800,15 +563,23 @@ def build_embeds(module, result: ScanResult, fund_cfg: dict,
     the same card shape but gets the grey `PARTIAL_COLOR` side bar and its
     `Missing` text appended, so one list still shows the tier at a glance.
 
-    The quality badge reads the verdict `annotate_quality` already recorded,
-    falling back to computing it only when the column is absent -- so a card
-    and the hand-off row behind it can never disagree.
+    The quality badge reads the verdict `quality.annotate` already recorded,
+    falling back to re-grading only when the column is absent -- so a card and
+    the hand-off row behind it can never disagree.
+
+    `quality` is imported here rather than at module scope so the dependency
+    stays one-way: `quality.py` needs this module's logging, statement access
+    and formatting, and nothing here needs the registry except this one call.
     """
-    badge = fund_cfg.get("quality", {}).get("badge", "")
+    import quality
+
+    badge = quality.badge(cfg)
 
     def passed(row) -> bool:
         value = row.get(QUALITY_COL)
-        return bool(value) if value is not None else quality_check(row, fund_cfg)
+        if value is not None and not (isinstance(value, float) and pd.isna(value)):
+            return bool(value)
+        return bool(quality.verdict_of(row, cfg)[0])
 
     def label(ticker, row) -> str:
         """`TICKER (Company Name)` when the name is available, else the ticker."""
@@ -835,7 +606,7 @@ def build_embeds(module, result: ScanResult, fund_cfg: dict,
             "title": title,
             "description": description,
             "color": PARTIAL_COLOR if partial else module.EMBED_COLOR,
-            "fields": fundamentals_fields(row, fund_cfg),
+            "fields": quality.embed_fields(row, cfg),
         }
         if ticker in chart_files:
             embed["image"] = {"url": f"attachment://{chart_files[ticker].name}"}

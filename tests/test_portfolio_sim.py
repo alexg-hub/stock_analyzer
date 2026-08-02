@@ -182,7 +182,8 @@ c.ok("...and so does a file that does not exist at all",
 # --------------------------------------------------------------------------
 c.section("open -- the quality rules explode point-in-time")
 
-configured = list(cfg["fundamentals"]["quality"]["rules"])
+configured = [k for k, spec in cfg["quality"]["parameters"].items()
+              if spec.get("enabled", True) and spec.get("gate")]
 failing = book[book["quality_pass"].astype(str) == "False"].iloc[0]
 passing = book[book["quality_pass"].astype(str) == "True"].iloc[0]
 c.ok("a recorded failure reads as failed",
@@ -279,7 +280,9 @@ c.ok("statuses survive the re-sync",
 # The frozen rule set must not follow a config retune: a rule invented after a
 # signal was recorded was never evaluated against it.
 retuned = copy.deepcopy(cfg)
-retuned["fundamentals"]["quality"]["rules"]["invented_later"] = {"min": 1}
+retuned["quality"]["parameters"]["invented_later"] = {
+    "enabled": True, "label": "Invented", "source": "yahoo_info.invented",
+    "group": "financial_quality", "stage": "fast", "gate": {"min": 1}}
 ledger.sync(retuned)
 reloaded = ledger.load_positions(cfg)
 c.ok("a rule added after the fact does not appear on an old position",

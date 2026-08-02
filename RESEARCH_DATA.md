@@ -32,7 +32,29 @@ Collected by `research_collect.collect_yahoo(ticker)` → nested dict. yfinance
 moat/competitor/product/geography graph (→ IBKR). `LTG` 5-yr growth is
 structurally sparse.
 
-## Tier B — IBKR (interactive MCP only — never in the nightly job)
+## Tier B1 — IBKR over the TWS API (`ibkr.py`, usable in the nightly job)
+
+Added 2026-08-01. `ib_async` against IB Gateway/TWS on localhost, wired into the
+`quality` registry as the `ibkr.*` resolver. **Optional by construction** —
+retail IBKR has no headless API (OAuth 1.0a is institutional-only), so the
+gateway has to be logged in on this box; when it is not, every value resolves
+to `n/a` and the run completes normally with one `IBKR skip` line.
+
+| Layer | Call | Status | Notes |
+|---|---|:--:|---|
+| Ratios | `reqFundamentalData(ReportSnapshot)` | ✅ | Refinitiv ratio block, parsed by `parse_ratios`. Mapped: ROE, ROI, revenue/EPS growth, gross/operating/net margin, D/E, P/E, P/B, yield, payout, market cap, TTM revenue/EPS. Unmapped fields come back under their raw Refinitiv name, so a new parameter is config-only. |
+| Statements | `reqFundamentalData(ReportsFinStatements)` | ⚠️ | Available but **not enabled** — Yahoo is already the source of truth for statements and a second one would need reconciling, not merging. |
+| Estimates | `reqFundamentalData(RESC)` | ⚠️ | Same: analyst estimates stay Yahoo's job. |
+| Market stats | `reqMktData` generic ticks 106, 165 | ⚠️ | 52w hi/lo, average volume, historical and **implied** volatility. Subscription-gated per field; an unsubscribed field arrives NaN → `n/a`. |
+| IV **percentile** | — | ❌ | The MCP connector returned one; the TWS API does not. It was a Reflexivity computation, not an IBKR field. Deliberately absent rather than approximated — a percentile needs a stored history. |
+| Moat / competitors / themes | — | ❌ | `get_company_connections`, `get_company_themes`, `search_investment_topics` are Reflexivity products on the claude.ai connector with **no public-API equivalent**. Still MCP-only (Tier B2). |
+| Account context | — | 🚫 | **Not implemented, at all.** See `ibkr.FORBIDDEN_CALLS`; a test asserts none is called. Same rule as below. |
+
+Sentinel to know about: Refinitiv reports "not reported" as **-99999**. Left
+alone it reads as a real, catastrophically bad number in any score that touches
+it; `_number` drops it.
+
+## Tier B2 — IBKR qualitative graph (interactive MCP only — never in the nightly job)
 
 Resolve conid first via `search_contracts` → exact-symbol + US-primary row
 (`country_code=US`, `STK` section). Resolved cleanly: AAPL 265598, MSFT 272093,
@@ -53,10 +75,16 @@ earnings dates/surprise, or a news feed (→ all Yahoo's job).
 
 ## Source-of-truth split (settled)
 
-- Price history / 52-week range → **Yahoo** for the screens (nightly); IBKR snapshot cross-check only.
+- Price history / 52-week range → **Yahoo** for the screens (nightly); IBKR cross-check only.
 - Statements / estimates / earnings / news → **Yahoo only**.
-- Moat / competitors / products / geography / themes/peers → **IBKR only**.
-- Valuation multiples → **Yahoo** (IBKR snapshot doesn't return them).
+- Valuation multiples → **Yahoo** (IBKR's are an independent corroboration, not a replacement).
+- Moat / competitors / products / geography / themes/peers → **IBKR MCP only**, and only in the optional narrative pass.
+- Implied volatility → **IBKR TWS API** (raw); the *percentile* is unavailable from either.
+
+Where a metric exists on both sides, Yahoo stays the source of truth and the
+IBKR parameter is a separate registry entry (`ibkr_return_on_equity`, not a
+second writer of `roe`). Two sources reconciled silently into one number is a
+number nobody can check; two parameters that disagree is information.
 
 ## Verdict
 

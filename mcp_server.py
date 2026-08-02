@@ -88,6 +88,7 @@ def _selftest() -> int:
         ("portfolio_status", portfolio.status_impl),
         ("portfolio_positions", portfolio.positions_impl),
         ("config_get", config_tools.get_impl),
+        ("params_list", config_tools.params_list_impl),
         ("list_jobs", jobs.listing),
     ]
     for name, fn in checks:

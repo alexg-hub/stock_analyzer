@@ -39,6 +39,7 @@ import pandas as pd
 import _harness
 from _harness import Checks, busiest_day, cached_panel_or_skip, screens
 
+import quality
 import research_report
 import run_scanners
 import scanner_common
@@ -51,7 +52,6 @@ from scanner_common import (
     QUALITY_MISSING_COL,
     VERDICT_COL,
     drop_unsettled_bars,
-    quality_check,
     update_csv_rows,
 )
 
@@ -149,8 +149,21 @@ captured = {}
 sandbox = Path(tempfile.mkdtemp(prefix="test_handoff_"))
 handoff = sandbox / "latest_hits.json"
 run_cfg = json.loads(json.dumps(cfg))          # deep copy
-run_cfg["fundamentals"]["enabled"] = False     # no Yahoo round-trips
+run_cfg["quality"]["enabled"] = False          # no Yahoo round-trips
 run_cfg["charts"]["enabled"] = False           # no PNG rendering
+# main() now runs tiers 3 and 4 in-process so they can share one message. Both
+# reach the network and both write outside the hand-off, and neither is what
+# this file tests -- test_portfolio_sim.py owns the ledger and
+# test_combined_alert.py owns the verdict pass.
+# Belt and braces: `enabled: False` is the switch, but the directory is
+# redirected too. Relying on the flag alone is how 114 test positions from
+# the cached panel's busiest days (2023-12-13, 2024-11-06) ended up in the
+# real output/portfolio/positions.csv on 2026-08-01 -- `output_fingerprint()`
+# caught it, but only after the write.
+run_cfg["portfolio"] = {**run_cfg.get("portfolio", {}), "enabled": False,
+                        "dir": str(sandbox / "portfolio")}
+run_cfg["research"].setdefault("auto", {})
+run_cfg["research"]["auto"]["enabled"] = False
 run_cfg["research"]["latest_hits_path"] = str(handoff)
 run_cfg["research"].setdefault("history", {})
 run_cfg["research"]["history"].update(enabled=True, dir=str(sandbox / "history"),
@@ -441,31 +454,38 @@ for module, compute, strategy in screens(cfg):
 #
 # The run above deliberately disables fundamentals to stay off the network,
 # which leaves the whole second half of the hand-off untested -- so this one
-# stubs `fetch_fundamentals` instead of switching it off. That is what puts
+# stubs the collector instead of switching it off. That is what puts
 # `_json_safe` under test on the values that actually exercise it (the
 # [(year, value)] series, a NaN, numpy scalars) and what lets the badge be
 # compared against the recorded verdict.
 #
-# The fixture is derived from `fundamentals.quality.rules` rather than written
-# down: a rule's own min/max produces the value that satisfies it, and the
-# bound *itself* is the value that fails it (the compares are strict). So the
-# fixture keeps working at any thresholds, which is the whole point.
+# The fixture is derived from `quality.parameters` rather than written down: a
+# gate's own min/max produces the value that satisfies it, and the bound
+# *itself* is the value that fails it (the compares are strict). So the fixture
+# keeps working at any thresholds, which is the whole point.
 c.section("tier 2: quality verdict, archive, deep-dive gate")
 
-fund_cfg = cfg["fundamentals"]
-rules = fund_cfg.get("quality", {}).get("rules", {})
+gated = {k: s for k, s in quality.parameters(cfg, quality.STAGE_FAST).items()
+         if s.get("gate")}
+rules = {k: s["gate"] for k, s in gated.items()}
 
 
 def rule_label(key):
-    """The hits-frame column a rule key grades, or None if it names nothing."""
-    if key in fund_cfg.get("fields", {}):
-        return fund_cfg["fields"][key]
-    return fund_cfg.get("statements", {}).get("metrics", {}).get(key)
+    """The hits-frame column a parameter grades, or None if it names nothing."""
+    spec = gated.get(key)
+    return quality.label_of(key, spec) if spec else None
 
 
 unresolvable = [k for k in rules if rule_label(k) is None]
-c.ok("every quality rule names a configured field or metric",
+c.ok("every gated parameter resolves to a hits-frame column",
      not unresolvable, f"unresolvable: {unresolvable}" if unresolvable else "")
+
+# Every gate is expressed in the registry's own vocabulary -- a typo'd keyword
+# is never applied, so the parameter would look configured and gate nothing.
+stray = {f"{k}.{w}" for k, g in rules.items()
+         for w in set(g) - set(quality.GATE_KEYS)}
+c.ok("no gate uses a keyword the engine does not implement",
+     not stray, f"stray: {sorted(stray)}" if stray else "")
 
 resolvable = [k for k in rules if rule_label(k) is not None]
 
@@ -480,7 +500,7 @@ def passing_value(rule):
 
 
 def fundamentals_row(break_key=None, nan_key=None):
-    """A row passing every rule, optionally breaking exactly one of them."""
+    """A row passing every gate, optionally breaking exactly one of them."""
     row = {COMPANY_COL: "Test Corp"}
     for key in resolvable:
         rule, label = rules[key], rule_label(key)
@@ -532,9 +552,12 @@ q_cfg["research"].setdefault("history", {})
 q_cfg["research"]["history"].update(enabled=True, dir=str(hist_dir),
                                     csv="signals.csv")
 q_cfg["research"].setdefault("auto", {})
+q_cfg["research"]["auto"]["enabled"] = False    # see run_cfg above
+q_cfg["portfolio"] = {**q_cfg.get("portfolio", {}), "enabled": False,
+                      "dir": str(hist_dir / "portfolio")}
 
 run_scanners.load_config = lambda: q_cfg
-run_scanners.fetch_fundamentals = stub_fundamentals
+run_scanners.quality.fetch_fast = stub_fundamentals
 
 
 def run_on(day):
@@ -565,7 +588,7 @@ c.ok("Quality is true exactly when nothing failed",
 # JSON* must match the one recorded before serialization. That can only hold
 # if _json_safe preserved the [(year, value)] series and turned NaN into null.
 c.ok("the verdict survives the JSON round trip",
-     all(quality_check(r, fund_cfg) == r[QUALITY_COL] for r in graded))
+     all(quality.verdict_of(r, q_cfg)[0] == r[QUALITY_COL] for r in graded))
 series_rows = [v for r in graded for v in r.values()
                if isinstance(v, list) and v and isinstance(v[0], list)]
 c.ok("multi-year metrics serialize as [[year, value], ...]",
@@ -578,7 +601,7 @@ broken_rows = [r for r in graded if r[QUALITY_MISSING_COL] == [broken_key]]
 c.ok("breaking one rule fails exactly that rule",
      bool(broken_rows), f"{len(broken_rows)} row(s) failing only {broken_key}")
 
-badge = fund_cfg.get("quality", {}).get("badge", "")
+badge = quality.badge(q_cfg)
 badged = {e["title"].split()[1].split("(")[0] for e in q_embeds
           if badge and e["title"].startswith(badge)}
 passing = {t for t, r in q_rows if r[QUALITY_COL]}
@@ -680,9 +703,14 @@ c.ok("a hand-off with no recorded verdict is recomputed, not dropped",
      == [(r["ticker"], r["quality"]) for r in every])
 
 # --------------------------------------------------------------------------
-c.section("the nightly auto-prompt")
+c.section("the optional narrative pass's prompt")
+# `research.auto` governs the *deterministic* verdict run inside the scan;
+# `research.narrative` governs this pass. They are separate switches because the
+# common case is wanting a graded verdict every night and a written report only
+# sometimes -- so auto-prompt must follow the narrative flag, not the auto one.
 q_cfg["research"]["auto"].update(enabled=True, gate="all", max_reports=2,
                                  discord_send=False)
+q_cfg["research"]["narrative"] = {"enabled": True, "model": "opus"}
 research_report.load_config = lambda: q_cfg
 prompt = research_report.auto_prompt(q_cfg)
 c.ok("auto-prompt invokes the skill", bool(prompt) and prompt.startswith("/deep-dive"))
@@ -692,9 +720,19 @@ c.ok("auto-prompt names exactly the capped candidates",
      prompt.splitlines()[0])
 c.ok("auto-prompt passes the configured send authorization",
      "send=false" in prompt)
-q_cfg["research"]["auto"]["enabled"] = False
-c.ok("auto-prompt declines when the nightly run is disabled",
+c.ok("the prompt tells the model the verdict already exists",
+     "already computed" in prompt and "narrative" in prompt,
+     "a pass that re-derives the score would defeat the whole point")
+q_cfg["research"]["narrative"]["enabled"] = False
+c.ok("auto-prompt declines when the narrative pass is switched off",
      research_report.auto_prompt(q_cfg) is None)
+q_cfg["research"]["narrative"]["enabled"] = True
+c.ok("...and the deterministic verdict switch does not gate it",
+     research_report.auto_prompt(
+         {**q_cfg, "research": {**q_cfg["research"],
+                                "auto": {**q_cfg["research"]["auto"],
+                                         "enabled": False}}}) is not None,
+     "the two switches are independent")
 q_cfg["research"]["auto"].update(enabled=True, gate="quality_pass")
 if not passers:
     c.ok("auto-prompt declines when the gate holds everything back",

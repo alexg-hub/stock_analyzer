@@ -10,22 +10,33 @@ screens) and tier 2 (a fast fundamentals-quality check) run nightly in
 `run_scanners.py` and hand off `output/latest_hits.json`; this skill turns a
 signalling ticker into a full investment case.
 
-Each row carries **both tiers' verdicts**:
+**The verdict already exists when you start.** This is the most important thing
+to know about this skill. `run_scanners.py` computes tier 3's quant score
+deterministically inside the nightly scan, sets `conviction = score` and
+`tier = tier_for(score)`, records both to `output/history/`, and posts them in
+the same Discord message as the signal. Your job is the **narrative half** —
+moat, growth runway, earnings/management quality, catalysts and risks — plus a
+bounded `narrative_adj` that *revises* that conviction. You are not grading an
+ungraded ticker, and you must never re-derive the score.
+
+Everything mechanical is in `research_report.py`, `quality.py` and `sec.py`.
+The judgment is yours.
+
+Each row carries **both earlier tiers' verdicts**:
 
 - **Tier 1** — `Setup` is `full` (every condition held) or `partial` (breakout:
   3 of 4; reclaim: 1-2 confirmations failed), with `Missing` naming what failed.
   Treat a partial setup as a weaker technical trigger and say so in the report.
 - **Tier 2** — `Quality` is the ⭐ badge decision and `Quality Missing` lists the
-  `fundamentals.quality.rules` keys that failed. Absent keys mean the scan did
-  not evaluate quality, which is different from failing it. The rule set is
-  deliberately strict, so most S&P 500 names fail at least one.
+  `quality.parameters` keys whose **gate** failed. Absent keys mean the scan did
+  not evaluate quality, which is different from failing it. A parameter with
+  `enabled: false` is not evaluated at all and will never appear. The gate set
+  is deliberately strict, so most S&P 500 names fail at least one.
 
-Neither tier changes the quant score — they are separate, faster screens. They
-change how you *read* the trigger, and both belong in the report.
-
-Synthesis is **your reasoning**, anchored by a deterministic quant score.
-Everything mechanical is in `research_report.py` and `sec.py`; the judgment is
-yours.
+Tier 2's gates and tier 3's score are now two halves of **one** registry
+(`config.json`'s `quality` section) rather than two systems, so a `Quality
+Missing` entry and a low group score are often the same fact seen twice — say
+so when they are, rather than reporting them as independent evidence.
 
 **Framing (non-negotiable):** this is research analysis, **not investment advice**.
 The "verdict" is an analytical rating, never a buy/sell instruction. Put the
@@ -106,14 +117,20 @@ tier 2 said about it. If the gate holds everything back, say so and offer
    **Business** (Item 1) to corroborate the moat; cross-check the **XBRL** figures
    against Yahoo. If a section is `n/a` or stubby, `WebFetch` that filing's `url` for
    the item. Quote sparingly with attribution.
-5. **Grade the qualitative dimensions** (your judgment, not in the quant score):
-   moat width/durability, growth runway, earnings/management quality, catalysts vs
-   risks. Decide a **narrative adjustment** in `[-N, +N]` where
+5. **Grade the qualitative dimensions** (your judgment, and the only thing not
+   already in the quant score): moat width/durability, growth runway,
+   earnings/management quality, catalysts vs risks. Decide a **narrative
+   adjustment** in `[-N, +N]` where
    `N = config research.synthesis.narrative_adj_max`, with a one-line justification
-   for each material ± move.
+   for each material ± move. An adjustment of **0 is a legitimate answer** — the
+   recorded verdict already stands, and moving it needs a reason you can write
+   down.
 6. **Verdict.** `conviction = clamp(round(quant.score + narrative_adj), 0, 100)`;
    `tier = research_report.tier_for(conviction, cfg)` (config bands STRONG/WATCH/PASS).
    You may override the tier **only** with an explicit written justification.
+   Note this *revises* the conviction already recorded and already announced:
+   if you move it, the report should say what the narrative saw that the numbers
+   did not.
 7. **Write the full report** (template below) and archive it: resolve the folder
    with `research_report.report_dir(load_config())` — `output/reports/` — and use
    the **Write tool** to create `<TICKER>_<scan_date>.md` there (Write handles the
@@ -184,12 +201,23 @@ mode:
 - Everything else — the template, the citation rules, the disclaimer — is
   unchanged. An unattended report is not a lesser report.
 
-## The quant dimensions (already scored for you)
+## The quant groups (already scored for you)
 
-valuation · growth · estimate_momentum · earnings_quality · financial_quality ·
-analyst_sentiment — each 0-1, weighted (see `config.research.synthesis`). Read the
-breakdown to see *where* the number comes from, and let your narrative explain or
-challenge it (e.g. a low valuation score = expensive; is the premium justified?).
+The groups are whatever `config.json`'s `quality.groups` currently lists —
+today: valuation · growth · estimate_momentum · earnings_quality ·
+financial_quality · analyst_sentiment · shareholder_returns. Each scores 0-1,
+weighted. Read `quant.dimensions` in the bundle to see *where* the number came
+from, and let your narrative explain or challenge it (a low valuation score
+means expensive — is the premium justified?).
+
+Two things the breakdown tells you that the aggregate does not:
+
+- `metrics_used` vs `metrics_total` — a group scored on one parameter of four
+  is a thin reading, and a report that leans on it should say so.
+- A group at exactly **0.50** with `metrics_used: 0` is *not* a mediocre score;
+  it is the neutral value used when nothing in that group had data. Never
+  narrate it as "average". This is common for banks and insurers, where Yahoo
+  publishes no operating income at all.
 
 ## Narrative rubric (your qualitative judgment → the adjustment)
 

@@ -21,15 +21,26 @@ the market actually did:
 | tier | what it asks | how | output |
 |---|---|---|---|
 | **1 — technical** | Is the chart set up? | `breakout_scanner` / `sma_pullback` / `sma_reclaim`, nightly over all 503 names | `Setup` (`full`/`partial`) + `Missing` |
-| **2 — quality** | Are the fundamentals sound? | `fundamentals.quality.rules` over the tier-1 hits only, one Yahoo pass | `Quality` (the ⭐ badge) + `Quality Missing` |
-| **3 — deep dive** | Is the *business* worth owning? | the `deep-dive` skill: Claude over Yahoo + IBKR + SEC filings + live web | a graded report + a tier/conviction verdict |
+| **2 — quality** | Are the fundamentals sound? | the `fast` half of the `quality` registry over the tier-1 hits only, one Yahoo pass | `Quality` (the ⭐ badge) + `Quality Missing` |
+| **3 — verdict** | How does the *business* grade out? | the `deep` half of the same registry, weighted to 0-100 → a tier and a conviction. Deterministic, inside the nightly scan. An **optional** narrative pass (the `deep-dive` skill over IBKR + SEC + live web) writes the report and may revise the conviction | a tier/conviction verdict + `_facts.json` + the financials chart |
 | **4 — portfolio** | Was any of it *right*? | `portfolio_sim`: buy every recorded signal at the next open, grade every recorded attribute against the realized return, and watch the book for a double-top exit | `output/portfolio/positions.csv` + `findings.csv` + `exits.csv` |
 
-Tiers 1 and 2 run together in `run_scanners.py` and hand off
-`output/latest_hits.json`. Tier 3 reads that file — automatically each night
-(`run_deepdive.bat`) and on demand — and is the only tier that costs real time
-per name, which is why the first two exist. Tier 4 reads the history CSVs the
-first three wrote. See
+**All four tiers run in `run_scanners.py`, in one process, and produce ONE
+Discord message** — what fired, what it graded out at, and what to sell. They
+used to be three posts at three different times, which meant the verdict for
+tonight's signal arrived hours after, and detached from, the signal. Each
+addition is individually fail-safe: a broken ledger or a failed verdict costs
+its own section of the message and nothing else.
+
+Tier 3 is still the only tier that costs real time per name, which is why the
+first two exist — the gate (`research.auto.gate` / `max_reports`) caps how many
+names reach it. The optional narrative pass runs afterwards from
+`run_deepdive.bat`.
+
+One honest caveat: Discord caps a message at 10 embeds / 10 attachments /
+~6000 embed chars, and `send_discord_alert` batches on exactly that. This is one
+*send*, one header, one contiguous batch — a busy night still splits into
+several HTTP requests. See
 [Tier 3](#tier-3-deep-dive-research), [Tier 4](#tier-4-the-virtual-portfolio)
 and [Signal history](#signal-history).
 
@@ -51,18 +62,21 @@ Current screens:
 | `breakout_scanner.py` | Breakout screen module (condition math, alert section, hit chart) |
 | `sma_pullback.py` | SMA-pullback screen module (same shape) |
 | `sma_reclaim.py` | SMA-reclaim screen module (same shape) |
-| `scanner_common.py` | Shared infra: config, tickers, downloads, fundamentals, Discord |
+| `scanner_common.py` | Shared infra: config, tickers, downloads, statement access, Discord |
+| `quality.py` | **The one quality check**: the parameter registry, its resolvers, the gates (tier 2's ⭐) and the weighted 0-100 score (tier 3's anchor) |
+| `ibkr.py` | IBKR over the TWS API (`ib_async`) — ratios and market stats, optional, never account data |
+| `migrate_config.py` | One-shot: proves the unified `quality` section reproduces the two it replaced |
 | `charts.py` | Shared chart rendering (palette + per-screen chart builders) |
 | `backtest_breakout.py` / `backtest_pullback.py` / `backtest_reclaim.py` | Single-ticker historical validators |
 | `backtest_universe.py` | Universe-wide profit backtest: every screen × all history, buy the trigger / sell N days later |
 | `tune_screen.py` | Parameter tuning: sweep one screen's thresholds, scored against the baseline **and** against cases that must keep firing |
-| `research_report.py` | Tier 3 toolkit: the deep-dive candidate gate, quant score, report archive, Discord verdicts |
+| `research_report.py` | Tier 3: the candidate gate, the deterministic verdict, report archive, Discord verdict cards |
 | `research_collect.py` | Tier 3 data collection: everything Yahoo has on one ticker (valuation, estimates, analyst, earnings, ownership, news) |
 | `sec.py` | Tier 3 filings: EDGAR 10-Q/10-K MD&A / Risk Factors / Business sections + curated XBRL |
 | `.claude/skills/deep-dive/` | The tier-3 procedure itself — synthesis is Claude's reasoning, not a function |
 | `portfolio_sim/` | Tier 4: the virtual portfolio (`ledger` → `marking` → `analysis`, on `stats`) |
 | `portfolio_sim/exits.py` | Tier 4's exit side: the double-top detector, the sell record, the Discord warning |
-| `run_scanner.bat` / `run_deepdive.bat` | Task Scheduler entry point, and the tier-3 step it chains to |
+| `run_scanner.bat` / `run_deepdive.bat` | Task Scheduler entry point (all four tiers, one message), and the optional narrative pass it chains to |
 | `tests/` | Invariant test suite + `run_all.py` runner (no test dependency; plain scripts) |
 
 Adding a new scanner = new module exposing `CONFIG_KEY`, `scan()`,
@@ -201,59 +215,113 @@ near-miss could never earn it. Now that everything is one list, a **partial
 setup can carry the badge** — it grades fundamentals, which are independent of
 how complete the technical setup is.
 
-## Fundamentals
+## The quality check (`quality.py`)
 
-Every signalling ticker gets a fundamentals field grid on its embed
-card, from two config-driven layers (`fundamentals` in `config.json`):
+There is **one** quality check, and it produces both of tier 2's badge and
+tier 3's score. It used to be two systems that shared no keys, no config shape
+and no code path — `fundamentals.quality.rules` for the badge and
+`research.synthesis.dimensions` for the score — which meant "quality" meant two
+different things depending on which tier you asked.
 
-- **Snapshot fields** from Yahoo `info` (`fields` map): currently P/E, PEG,
-  Total Debt/Equity, latest-quarter YoY revenue growth, dividend yield,
-  payout ratio.
-- **Statement metrics** computed from the last `statements.years` annual
-  reports (income statement / cash flow / balance sheet):
-  - FCF per year (cash-flow "Free Cash Flow")
-  - Operating margin and profit margin per year
-  - ROE = Net Income / Stockholders Equity (falls back to Yahoo's `info`
-    value when statement rows are missing)
-  - ROIC = EBIT × (1 − tax rate) / Invested Capital
+Everything lives in `config.json`'s `quality` section. A **parameter** is one
+measurable thing about a company:
+
+```jsonc
+"trailingPE": {
+    "enabled": true,                  // the master switch -- see below
+    "label": "P/E",                   // the column and embed-field name
+    "source": "yahoo_info.trailingPE",// which resolver supplies the value
+    "group": "valuation",             // which weighted bucket it scores into
+    "stage": "fast",                  // fast = every hit; deep = candidates only
+    "weight": 1.0,                    // its weight *within* its group
+    "display": true, "format": "number",
+    "gate":  {"max": 37},             // pass/fail -> the badge   (optional)
+    "score": {"good": 12, "bad": 45}  // 0-1 anchors -> the score (optional)
+}
+```
+
+### The `enabled` flag
+
+Every parameter has one, and **`enabled: false` makes it invisible** — not
+gated, not scored, absent from `Quality Missing` and from the embed fields, and
+not counted in any weight. That is the whole point: a company that pays no
+dividend can earn the badge by switching `dividendYield` off, without deleting
+the rule and losing the record that it ever existed. Group weights renormalize
+over what is left, so switching one off never silently reweights the rest.
+
+```powershell
+# From a Claude Code session (preview first, nothing is written without confirm)
+params_list("quality")
+config_set("quality.parameters.dividendYield.enabled", false)
+```
+
+### Where values come from
+
+| `source` prefix | what it reads | stage |
+|---|---|---|
+| `yahoo_info` | `yf.Ticker.info` snapshot fields (P/E, PEG, D/E, revenue growth, yield, payout) | fast |
+| `yahoo_stmt` | the last N annual statements: FCF, operating and profit margin per year, ROE (with an `info` fallback), ROIC = EBIT × (1 − tax rate) / Invested Capital | fast |
+| `yahoo_deep` | `research_collect.collect_yahoo`: P/E percentile, analyst upside, forward growth, EPS revisions and trend, earnings surprise history, ROA, gross margin, net debt/EBITDA, buybacks, analyst mix | deep |
+| `ibkr` | `ibkr.py` over the TWS API: Refinitiv ratios and market stats. **Optional** — off by default, and `n/a` whenever IB Gateway is not running | deep |
+
+`stage` is what keeps the nightly run affordable: `fast` parameters need one
+`info` call plus the statements and run for **every** tier-1 hit; `deep` ones
+need ~9 more Yahoo round-trips and run only for the gated candidates.
 
 Metrics Yahoo doesn't provide for a company (banks have no operating income,
-negative-equity companies no D/E, ...) show as `n/a`. A bank's FCF can be a
-large negative number — that is Yahoo's genuine figure (deposit/loan flows
+negative-equity companies no D/E) show as `n/a`. A bank's FCF can be a large
+negative number — that is Yahoo's genuine figure (deposit and loan flows
 dominate bank cash-flow statements), not a bug.
 
-### Quality badge
+### The badge (the gate half)
 
-A hit whose fundamentals pass **every** rule in `fundamentals.quality.rules`
-gets the configured badge (default ⭐) in front of its card title. This is
-computed in the shared embed builder, so it applies to the hits of every
-screen — current and future — automatically.
+A hit whose fundamentals pass **every enabled gate** gets the configured badge
+(default ⭐) in front of its card title, on every screen automatically. Gates
+support:
 
-Rules are keyed by the same keys as the display config (Yahoo `info` keys
-for snapshot fields, metric keys for statement metrics) and support:
+- `min` / `max` — **strict** compare against the value (the latest fiscal year
+  for multi-year metrics like FCF and margins);
+- `increasing: true` — the latest fiscal year must be above the previous one
+  (needs ≥ 2 years of data).
 
-- `min` / `max` — strict compare against the value (the **latest fiscal
-  year** for multi-year metrics like FCF and margins);
-- `increasing: true` — the latest fiscal year must be above the previous
-  one (requires ≥ 2 years of data).
+A **missing value fails its gate** — unverifiable quality doesn't earn the
+badge. The gate set is deliberately strict, and **most S&P 500 names fail at
+least one** — read the current thresholds from `config.json` (or `params_list`)
+rather than from here, and loosen them there if the tier-2 gate is starving
+tier 3.
 
-A missing value fails its rule — unverifiable quality doesn't earn the
-badge (so banks, with no operating income, can never carry it). The rule set is
-deliberately strict, and **most S&P 500 names fail at least one rule** — read the
-current thresholds from `fundamentals.quality.rules` in `config.json` rather than
-from here, and loosen them there if the tier-2 gate is starving tier 3.
-
-The verdict is computed once, by `scanner_common.annotate_quality`, immediately
-after the fundamentals are joined — before the alert is built and before the
-hand-off is written. Both the badge and `latest_hits.json` read that one recorded
-result, so a card and the row behind it can never disagree, and tier 3 can see
-what tier 2 decided:
+The verdict is computed once, by `quality.annotate`, immediately after the
+values are joined — before the alert is built and before the hand-off is
+written. Both the badge and `latest_hits.json` read that one recorded result,
+so a card and the row behind it can never disagree:
 
 | column | meaning |
 |---|---|
-| `Quality` | `true` when every rule passed — the ⭐ badge decision |
-| `Quality Missing` | the rule keys that failed (`[]` when it passed) |
+| `Quality` | `true` when every enabled gate passed — the ⭐ badge decision |
+| `Quality Missing` | the parameter keys whose gate failed (`[]` when it passed) |
 | *(both absent)* | quality was **not evaluated** — different from failing |
+
+### The score (the anchor half)
+
+Parameters carrying a `score` block contribute to a weighted 0-100 number:
+each is normalized to [0,1] against its `good`/`bad` anchors (the *ordering*
+carries the direction, so an inverted metric like `net_debt_to_ebitda`
+`{good: 0, bad: 4}` needs no special case), averaged within its group by
+parameter weight, then across groups by group weight.
+
+Three emptiness rules, all deliberate:
+
+- a **missing value** is skipped in the score (though it still fails its gate);
+- a group with parameters but **no values** scores a neutral **0.5**, not 0 —
+  that is what stops a bank being driven to the bottom by statement rows Yahoo
+  does not publish for it;
+- a group with **no parameters at this stage** is dropped from the weighted mean
+  entirely rather than neutralised — at `fast` there is no estimate data to be
+  neutral *about*.
+
+The score becomes tier 3's conviction directly: `conviction = score`,
+`tier = tier_for(score)` against the `quality.tiers` bands. `migrate_config.py`
+proves the gates and anchors reproduce the two sections they replaced.
 
 ## Usage
 
@@ -296,6 +364,7 @@ do: run something, run it safely, or run it without blocking.
 | `run_nightly_scan` | the full S&P 500 scan **(prompts)** |
 | `deepdive_candidates` | who is worth a deep dive, per the tier-2 gate |
 | `deepdive_context` | the deterministic tier-3 research bundle |
+| `params_list` | **every tunable parameter**, its current value and the path to change it |
 | `deepdive_post_verdicts` | record verdicts, optionally post them **(prompts)** |
 | `deepdive_complete_log` | finish the log of a run that was killed mid-flight |
 | `portfolio_status` / `portfolio_positions` | what is on the virtual book |
@@ -304,7 +373,8 @@ do: run something, run it safely, or run it without blocking.
 | `portfolio_analyze` | which recorded attribute predicted the return |
 | `backtest_universe` / `backtest_ticker` | the profit backtests |
 | `tune_screen` | sweep one screen's thresholds |
-| `config_get` / `config_set` | read config (webhook redacted); edit it **(prompts)** |
+| `config_get` | read config, webhook redacted |
+| `config_set` / `config_edit` / `config_delete` | change one value, a batch, or remove a key **(all prompt)** |
 | `job_status` / `job_result` / `list_jobs` | poll the long runs |
 
 Anything that takes minutes — the nightly scan, the universe backtest, tuning,
@@ -312,15 +382,52 @@ marking, deep-dive context — returns a **`job_id`** immediately rather than
 blocking the session. Poll `job_status(job_id)`; it returns the tail of that
 run's step log, which is the only progress these runs emit.
 
-**Four tools are deliberately left off the allow-list in
+**Six tools are deliberately left off the allow-list in
 `.claude/settings.json`, so they prompt every time:** `run_nightly_scan`,
-`portfolio_exit_scan`, `deepdive_post_verdicts` and `config_set`. The first
-three can post to the live Discord channel and the fourth rewrites `config.json`.
-They also all default to dry-run (`send=False` / `confirm=False`), which is the
-guard that matters — a permission rule that fails to match fails silently, but a
-default cannot. `config_set` refuses `discord.*` and `research.auto.discord_send`
-outright, previews a diff unless `confirm=True`, and backs up to
-`output/config_backups/` before every write.
+`portfolio_exit_scan`, `deepdive_post_verdicts`, and the three config writers
+(`config_set`, `config_edit`, `config_delete`). The first three can post to the
+live Discord channel; the last three rewrite `config.json`. They also all
+default to dry-run (`send=False` / `confirm=False`), which is the guard that
+matters — a permission rule that fails to match fails silently, but a default
+cannot.
+
+#### Editing strategy and quality parameters
+
+`params_list` is the discovery surface — start there rather than reading
+`config.json`, because it resolves the quality registry **including the
+parameters that are switched off** (usually the ones you want) and annotates
+each strategy value with its `tuning.sweeps` grid:
+
+```
+params_list("quality")             # every parameter, group and weight
+params_list("breakout_strategy")   # thresholds + their sweep ranges
+
+config_set("quality.parameters.dividendYield.enabled", false)   # previews
+config_set("quality.parameters.dividendYield.enabled", false, confirm=true)
+
+config_set("quality.parameters.currentRatio", {...}, create=true)  # add one
+config_delete("quality.parameters.currentRatio")                   # remove one
+config_edit([{"path": "...", "value": ...}, ...])                  # a batch
+```
+
+Every writer previews a unified diff, validates, and writes nothing without
+`confirm=true`; each write backs the old file up to `output/config_backups/`
+first. `config_edit` applies its whole batch or none of it — a parameter is
+only coherent as a set, so a `source` updated without its `group` would score
+nothing.
+
+The writers refuse `discord.*` and `research.auto.discord_send` outright (the
+webhook is live, and the latter gates every Discord send), and `data.*` — its
+`download_period` accepts forms the validator cannot check, and a bad one leaves
+every screen unable to fire while reporting zero signals rather than an error.
+
+Validation before each write catches the things that otherwise fail *silently*:
+an unknown `source` (resolves to `None` for every company), a typo'd gate
+keyword (never applied), a group with no weight (contributes nothing), and any
+enabled screen whose lookback no longer fits inside `data.download_period`.
+
+Writes are surgical text edits — only the bytes that must change do, so
+`git diff` shows your change and not a reformatted file.
 
 The three skills (`deep-dive`, `tune-thresholds`, `universe-backtest`) still
 drive the CLI rather than these tools. That is intentional: the unattended
@@ -453,9 +560,12 @@ Plain scripts, no test dependency — each prints `OK`/`FAIL` per check and exit
 
 | file | needs | asserts |
 |---|---|---|
+| `test_quality.py` | nothing | The quality registry: `enabled: false` removes a parameter from the gate, the score, `Quality Missing` **and** the embed fields; missing ≠ failing ≠ not-evaluated; a group with no values is neutral 0.5 and one with no parameters at this stage is dropped; strict gate compares and two-year `increasing`; weights renormalize; a JSON round trip changes no verdict; `validate` catches every silent misconfiguration |
+| `test_ibkr.py` | nothing | No account/position/PnL function exists **or is called**; a missing `ib_async` and a refused connection both degrade to `{}` without raising; the Refinitiv parser maps known fields, keeps unknown ones, and drops the `-99999` sentinel |
+| `test_combined_alert.py` | cached panel | **One** `send_discord_alert` for the whole night, carrying signal + verdict + exit cards with every chart still attached and no orphans; the verdict is recorded whether or not `discord_send` is on; a failing verdict pass or exit scan costs its own section and not the alert; tonight's verdict reaches tonight's position |
 | `test_forward_trades.py` | nothing | Trade arithmetic on a synthetic panel: entry/exit offsets for both conventions and any delay, the excursion window, tail NaNs, `delay=0` identity, input rejection |
 | `test_signal_contract.py` | cached panel | `fires_mask` is `signal` or exactly `signal \| partial`; tiers disjoint; `Setup`/`Missing` agree; one card per signal with the grey bar + **Missing** line on partials; hand-off is a single list; `find_ticker` resolves either tier; an empty day doesn't crash. Then with stubbed fundamentals: the tier-2 verdict survives the JSON round trip, the ⭐ badge is exactly that verdict, the archive accumulates without duplicating a re-run, and the gate ranks/filters candidates |
-| `test_research_output.py` | nothing | Tier-3 output: the margin falls back to pretax exactly when Operating Income is absent and names its basis; an empty trailing period doesn't consume a slot; the chart renders for complete/bank/single-period/all-missing/no-data input without raising; `_statement_metrics` stays untouched by the fallback; verdict cards bind their chart, read figures from the facts file, and fit the embed budget |
+| `test_research_output.py` | nothing | Tier-3 output: the margin falls back to pretax exactly when Operating Income is absent and names its basis; an empty trailing period doesn't consume a slot; the chart renders for complete/bank/single-period/all-missing/no-data input without raising; `quality._statement_metrics` stays untouched by the fallback; verdict cards bind their chart, read figures from the facts file, and fit the embed budget |
 | `test_portfolio_sim.py` | nothing | Tier 4 on a synthetic panel and synthetic history: the entry price is `Open[t+1]` and agrees with `forward_trades` cell for cell; a re-`open` refreshes attributes but never erases a mark or re-freezes the recorded quality rule set; a signal whose entry bar has not traded stays `pending` and is in no statistic; `qr_*` distinguishes failed from not-evaluated; Mann-Whitney/Spearman/BH match hand-computed values; nothing under `min_n` is ever called significant, and every section (including `roadmap`) is present |
 | `test_backtest_stats.py` | cached panel | `cohort_values` == the `collect_trades` path at several (wait, hold) cells; real rows re-derive from the panel at a nonzero delay; the trades CSV reconciles with the summary grid |
 | `test_path_equivalence.py` | **network** | Screening out of the bulk panel gives the same dates as the single-ticker download, plus the documented JNJ/MSFT/META cases |
@@ -471,12 +581,38 @@ Tests **never download** (except the `--network` one) and never send to Discord:
 they read the panel `backtest_universe.py` already cached, and a missing cache is
 a skip with instructions rather than a two-minute surprise.
 
-## Tier 3: deep-dive research
+## Tier 3: the graded verdict
 
-Tiers 1 and 2 are cheap and run over the whole universe. Tier 3 is expensive —
-SEC filings, IBKR's competitive graph, live web research and a written
-investment case per name — so it runs on a handful of tickers, chosen by the
-tier-2 gate.
+Tiers 1 and 2 are cheap and run over the whole universe. Tier 3 costs ~9 extra
+Yahoo round-trips per name, so it runs on a handful of tickers chosen by the
+tier-2 gate (`research.auto.gate`, capped by `max_reports`).
+
+**The verdict is deterministic and computed inside the nightly scan.**
+`deterministic_verdict` collects the `deep` half of the quality registry, scores
+it, renders the financials chart, writes `<TICKER>_<date>_facts.json`, and sets:
+
+```
+conviction = score                 # the weighted 0-100 quality score
+tier       = tier_for(score)       # STRONG / WATCH / PASS, per quality.tiers
+```
+
+It is recorded to `output/history/` and posted in the same Discord message as
+the signal that produced it. Even the one-line thesis on the card is generated
+in Python (`deterministic_thesis`, a rendering of the group breakdown) — same
+rule as tier 4's conclusions: a sentence a model wrote is a sentence you cannot
+check.
+
+**The narrative pass is optional and revises rather than originates.**
+`run_deepdive.bat` runs the `deep-dive` skill afterwards over SEC filings,
+IBKR's competitive graph and live web research; it writes the full report and
+may move the conviction by a bounded `narrative_adj` (±`research.synthesis.
+narrative_adj_max`). Switch it off with `research.narrative.enabled` and nothing
+downstream is missing — the verdict already exists, was already recorded and
+already went out.
+
+Why it was split: the verdict used to arrive hours after the signal, from an
+LLM, and only if that LLM ran to completion. A run killed mid-flight (result
+`3221225786`, usually a PC shutdown) left the night with no verdict at all.
 
 ### The hand-off
 
@@ -516,7 +652,13 @@ common to all. Only **enabled** screens appear — the hand-off follows the aler
 python research_report.py candidates          # the configured gate
 python research_report.py candidates --all    # every tier-1 hit
 python research_report.py candidates --json   # machine-readable
+
+python research_report.py verdicts            # grade tonight's candidates now
+python research_report.py verdicts MSFT JNJ   # ...or these names
 ```
+
+`verdicts` is the same call the nightly scan makes: it records tier and
+conviction to `output/history/` and prints them. Posting is the scan's job.
 
 A ticker you name explicitly needs none of this — `scan` and `/deep-dive` run
 tiers 1 and 2 for it on the spot (see *On-demand* below), so the candidate list
@@ -529,7 +671,7 @@ with a footer saying how many it held back, and it never overrides a ticker you
 name explicitly.
 
 **Quality is re-graded against the rules in force now**, not the verdict the scan
-recorded — so if you loosen `fundamentals.quality.rules`, `candidates` reflects it
+recorded — so if you loosen a gate in `quality.parameters`, `candidates` reflects it
 immediately instead of waiting for the next scan. The dated snapshot in
 `output/history/` keeps the original verdict, so the archive is never rewritten.
 A hand-off predating the verdict is gradeable the same way; one scanned with
@@ -538,14 +680,17 @@ evaluated" rather than failing every rule.
 
 ### Running it
 
-On demand, ask for a deep-dive and the `deep-dive` skill takes over. Nightly, it
+The deterministic verdict needs no invocation — it happens inside the nightly
+scan. What follows is the **optional narrative pass**.
+
+On demand, ask for a deep-dive and the `deep-dive` skill takes over. Nightly it
 is automatic: `run_scanner.bat` chains to `run_deepdive.bat`, which asks
-`research_report.py auto-prompt` what to do (exiting quietly if the gate is empty
-or `research.auto.enabled` is false) and then runs the skill through headless
-Claude Code:
+`research_report.py auto-prompt` what to do (exiting quietly if the gate is
+empty or `research.narrative.enabled` is false) and then runs the skill through
+headless Claude Code:
 
 ```
-claude -p --model <research.auto.model> --permission-mode dontAsk
+claude -p --model <research.narrative.model> --permission-mode dontAsk
         --allowedTools "... mcp__claude_ai_Interactive_Brokers_IBKR__*"
 ```
 
@@ -555,13 +700,15 @@ error to explain it. Don't add `--bare` (forces an API key, dropping the OAuth
 credential the IBKR server is bound to) or `--strict-mcp-config` (ignores
 registered servers).
 
-Each report is written to `output/reports/<TICKER>_<scan_date>.md`, and the
-verdicts go to Discord — pre-authorized unattended by
-`research.auto.discord_send`, and only after you confirm in an interactive
-session.
+Each report is written to `output/reports/<TICKER>_<scan_date>.md`. If the pass
+revises a conviction, that revision is recorded through the same
+`post-verdicts` path the scan used, and `run_deepdive.bat`'s trailing
+`portfolio_sim mark` carries it onto the position.
 
-`research.auto` config: `enabled`, `gate`, `max_reports`, `discord_send`,
-`model`.
+Two independent switches: `research.auto.{enabled, gate, max_reports,
+discord_send}` governs the **deterministic** verdict inside the scan;
+`research.narrative.{enabled, model}` governs this pass. The common case is
+wanting a graded verdict every night and a written report only sometimes.
 
 ### The financial trend chart
 
@@ -820,7 +967,7 @@ plus:
 | `dt_*` | the double-top exit's verdict — see below |
 
 `qr_*` is exploded from the recorded `Quality Missing` list against the rule set
-**frozen with the position**, so retuning `fundamentals.quality.rules` later
+**frozen with the position**, so retuning `quality.parameters` later
 cannot rewrite past findings, and a rule invented after a signal was recorded
 never reads as "passed" on it. A row the scan never graded gets no `qr_*`
 columns at all — *not evaluated* is not *failed*.
@@ -1049,22 +1196,35 @@ small differences as noise.
 | `tuning.protected_cases` | 3 cases | `{screen, ticker, date, note}` setups that must keep firing; every candidate is graded `FULL`/`partial`/`MISSED` against them |
 | `tuning.sweeps.<screen>` | per-screen | Parameter → list of values to try. Add a value here rather than editing the tool |
 | `tuning.grid.<screen>` | 3 names | Which parameters `grid` mode crosses (keep it to 2–3 — it is a full cross product) |
-| `fundamentals.enabled` | `true` | Fetch fundamentals for every signalling ticker |
-| `fundamentals.fields` | 6 fields | Yahoo `info` key → display label; add/remove entries to change what the alert shows |
-| `fundamentals.percent_fields` | `revenueGrowth`, `payoutRatio` | Fields Yahoo returns as fractions, converted to % (note: `dividendYield` is *not* here — Yahoo already returns it as a %) |
-| `fundamentals.statements.enabled` | `true` | Compute per-year metrics from the annual statements |
-| `fundamentals.statements.years` | `2` | How many recent fiscal years to show |
-| `fundamentals.statements.metrics` | 5 metrics | Metric → display label; remove an entry to drop it from the alert |
-| `fundamentals.quality.enabled` | `true` | Evaluate the quality rules and badge passing hits |
-| `fundamentals.quality.badge` | `⭐` | Prefix added to a passing hit's card title |
-| `fundamentals.quality.rules` | 11 rules | Per-metric `min`/`max`/`increasing` thresholds; a hit must pass **all** of them to get the badge |
+| `quality.enabled` | `true` | Run the quality check at all. Off = no badge, no score, and **no columns** — "not evaluated", never "failed" |
+| `quality.badge` | `⭐` | Prefix added to a passing hit's card title |
+| `quality.tiers` | 3 bands | `{label, min, color}` conviction bands (STRONG ≥ 80, WATCH ≥ 45, PASS ≥ 0) |
+| `quality.groups.<name>` | 7 groups | `{enabled, weight}` — the weighted buckets the score is built from. Weights renormalize over the **enabled** ones |
+| `quality.parameters.<key>.enabled` | mostly `true` | **The switch.** `false` = not gated, not scored, not in `Quality Missing`, not displayed, not counted in any weight |
+| `quality.parameters.<key>.label` | e.g. `P/E` | Display label — the DataFrame column, CSV header and embed-field name. Safe to rename; the **key** is not |
+| `quality.parameters.<key>.source` | e.g. `yahoo_info.trailingPE` | `yahoo_info` / `yahoo_stmt` / `yahoo_deep` / `ibkr`, then the field within it |
+| `quality.parameters.<key>.group` | e.g. `valuation` | Which `quality.groups` entry it scores into |
+| `quality.parameters.<key>.stage` | `fast` / `deep` | `fast` = collected for every tier-1 hit; `deep` = only for gated tier-3 candidates |
+| `quality.parameters.<key>.weight` | `1.0` | Its weight **within** its group |
+| `quality.parameters.<key>.gate` | e.g. `{"max": 37}` | `min`/`max` (strict) and `increasing`. Omit for score-only. A missing value **fails** its gate |
+| `quality.parameters.<key>.score` | e.g. `{"good": 12, "bad": 45}` | 0-1 anchors; the ordering carries the direction. Omit for gate-only (e.g. `fcf`, whose scale is company-specific) |
+| `quality.parameters.<key>.display` | `true` on fast | Render it as an inline embed field on the signal card |
+| `quality.parameters.<key>.format` | `number` | `number` / `pct` / `pct_series` / `money_series` |
+| `quality.parameters.<key>.percent` | on 2 | Value arrives as a fraction and is ×100 (note `dividendYield` is *not* one — Yahoo already returns a %) |
+| `quality.parameters.<key>.zero_is_missing` | on `gross_margin` | Treat a hard `0.0` as missing — Yahoo reports it for banks rather than omitting it, and it would otherwise score them at the bottom of a metric that does not apply |
+| `ibkr.enabled` | `false` | Use IBKR over the TWS API. Needs `pip install ib_async` **and** IB Gateway/TWS logged in; everything degrades to `n/a` when it is not |
+| `ibkr.host` / `port` / `client_id` | `127.0.0.1` / `7496` / `17` | Gateway socket. 7496 = TWS live, 7497 = TWS paper, 4001/4002 = IB Gateway |
+| `ibkr.connect_timeout_seconds` / `request_timeout_seconds` | `8` / `20` | How long to wait before giving up and logging `IBKR skip` |
+| `ibkr.market_data` | `true` | Also request the snapshot ticks (52w range, volatility, average volume) alongside the ratios |
+| `ibkr.reports` | `["ReportSnapshot"]` | Which `reqFundamentalData` reports to pull and flatten |
 | `research.latest_hits_path` | `latest_hits.json` | The tiers 1+2 → tier 3 hand-off, resolved inside `output/` |
 | `research.report_subdir` | `reports` | Where deep-dive reports are written, resolved inside `output/` |
-| `research.auto.enabled` | `true` | Run tier 3 automatically after the nightly scan |
-| `research.auto.gate` | `quality_pass` | `quality_pass` (only tier-2 passers) or `all` (every tier-1 hit) |
-| `research.auto.max_reports` | `5` | Cap on nightly deep-dives, taken off the top of the ranking |
-| `research.auto.discord_send` | `true` | Authorizes the unattended run to post its verdict summary live |
-| `research.auto.model` | `opus` | Model the headless nightly run uses |
+| `research.auto.enabled` | `true` | Compute the **deterministic** tier-3 verdict inside the nightly scan |
+| `research.auto.gate` | `all` | `quality_pass` (only tier-2 passers) or `all` (every tier-1 hit) |
+| `research.auto.max_reports` | `3` | Cap on how many names tier 3 grades, taken off the top of the ranking |
+| `research.auto.discord_send` | `true` | Include the verdict cards in the alert. **`false` still records them** — the record is the point, the notification is not. Not writable through the MCP tools |
+| `research.narrative.enabled` | `true` | Also run the **optional** LLM pass (`run_deepdive.bat`) for the written report and a bounded conviction revision. Independent of `research.auto.enabled` |
+| `research.narrative.model` | `opus` | Model that headless pass uses |
 | `research.history.enabled` | `true` | Archive every scan under `output/history/` |
 | `research.history.dir` / `.csv` | `history` / `signals.csv` | Archive location and the signal table's name |
 | `research.history.on_demand_csv` | `on_demand_scans_results.csv` | The on-demand scan table, in the same directory |
@@ -1074,9 +1234,8 @@ small differences as noise.
 | `research.logging.keep_runs` | `200` | Oldest run logs (and their result JSON) pruned beyond this count |
 | `research.financials.years` / `.quarters` | `4` / `4` | Periods on the financial-trend chart and table |
 | `research.financials.chart_dpi` | `120` | Resolution of that chart |
-| `research.synthesis.tiers[].color` | per tier | Hex side-bar colour of the Discord verdict card |
 | `research.sec.*` | — | EDGAR user agent (must carry an email), forms, section size cap, XBRL concepts |
-| `research.synthesis.*` | — | Quant-score dimensions/weights, conviction tier bands, narrative adjustment cap |
+| `research.synthesis.narrative_adj_max` | `15` | How far the optional narrative pass may move the conviction, either way |
 | `portfolio.enabled` | `true` | Run tier 4 at all; `false` makes every subcommand a no-op |
 | `portfolio.dir` | `portfolio` | Ledger + findings directory, resolved inside `output/` |
 | `portfolio.positions_csv` / `.findings_csv` / `.exits_csv` | `positions.csv` / `findings.csv` / `exits.csv` | The three tables, in that directory |
@@ -1105,23 +1264,30 @@ small differences as noise.
 
 The scan runs Mon–Fri at **23:30 Israel time** (~30 min after the 16:00 ET US
 market close) via the task **"SP500 Breakout Scanner"**, which executes
-`run_scanner.bat` and appends all output to `output/scanner_log.txt`. That batch
-file then runs tier 4's `open` + `mark` + `exit-scan`, and chains to
-`run_deepdive.bat` (tier 3 → `output/deepdive_log.txt`, which ends with a second
-tier-4 `mark` so tonight's verdict lands on tonight's position). One task covers
-all four tiers: the scan alert reaches Discord within a couple of minutes, an
-exit warning follows if a held name broke its neckline, the deep-dive verdicts
-follow later, and the ledger is updated at both ends.
+`run_scanner.bat` and appends all output to `output/scanner_log.txt`.
 
-`exit-scan` runs after `mark` because it only looks at positions whose entry
-price has been filled. It needs no separate schedule: detection searches every
-bar since entry, so a night the task did not run is picked up by the next one
-rather than lost.
+`run_scanners.py` now does all four tiers itself — the screens, the quality
+check, the ledger (`open` → `mark` → exit scan) and the graded verdict — and
+issues **one** Discord message carrying all of them. The batch file then chains
+to `run_deepdive.bat` for the optional narrative pass
+(→ `output/deepdive_log.txt`, ending with a tier-4 `mark` so any conviction
+revision lands on tonight's position).
 
-> **`ExecutionTimeLimit` must cover tier 3.** The scan alone finishes in about a
-> minute, but five deep-dives take considerably longer, and Task Scheduler kills
-> the whole chain at the limit. The original task was registered with `PT30M`;
-> raise it before relying on the nightly deep-dive:
+Ordering inside the run, all of it load-bearing: the archive is written before
+the ledger opens positions from it; `exit-scan` comes after `mark` because it
+only looks at positions whose entry price has been filled; and the verdict pass
+comes after the exit scan, so a final `sync` carries the tier and conviction
+onto tonight's positions rather than tomorrow's.
+
+The exit scan needs no separate schedule: detection searches every bar since
+entry, so a night the task did not run is picked up by the next one rather than
+lost.
+
+> **`ExecutionTimeLimit` must cover the whole chain.** The screens alone finish
+> in about a minute, but the verdict pass adds ~9 Yahoo round-trips per
+> candidate and the optional narrative pass takes considerably longer still;
+> Task Scheduler kills the chain at the limit. The original task was registered
+> with `PT30M`; raise it:
 >
 > ```powershell
 > Set-ScheduledTask -TaskName "SP500 Breakout Scanner" -Settings (
@@ -1143,8 +1309,8 @@ Useful commands:
 ```powershell
 Get-ScheduledTaskInfo -TaskName "SP500 Breakout Scanner"   # last/next run + result code
 Start-ScheduledTask   -TaskName "SP500 Breakout Scanner"   # trigger a run right now
-Get-Content output\scanner_log.txt  -Tail 20               # tiers 1+2
-Get-Content output\deepdive_log.txt -Tail 40               # tier 3
+Get-Content output\scanner_log.txt  -Tail 40               # all four tiers
+Get-Content output\deepdive_log.txt -Tail 40               # the narrative pass
 ```
 
 Notes:

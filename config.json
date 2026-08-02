@@ -173,6 +173,213 @@
             }
         }
     },
+    "quality": {
+        "enabled": true,
+        "badge": "⭐",
+        "tiers": [
+            {"label": "STRONG", "min": 80, "color": "2E9C6B"},
+            {"label": "WATCH", "min": 45, "color": "2A78D6"},
+            {"label": "PASS", "min": 0, "color": "898781"}
+        ],
+        "groups": {
+            "valuation": {"enabled": true, "weight": 0.16},
+            "growth": {"enabled": true, "weight": 0.16},
+            "estimate_momentum": {"enabled": true, "weight": 0.13},
+            "earnings_quality": {"enabled": true, "weight": 0.10},
+            "financial_quality": {"enabled": true, "weight": 0.24},
+            "analyst_sentiment": {"enabled": true, "weight": 0.11},
+            "shareholder_returns": {"enabled": true, "weight": 0.10}
+        },
+        "parameters": {
+            "trailingPE": {
+                "enabled": true, "label": "P/E", "source": "yahoo_info.trailingPE",
+                "group": "valuation", "stage": "fast", "weight": 1.0,
+                "display": true, "format": "number",
+                "gate": {"max": 37}, "score": {"good": 12, "bad": 45}
+            },
+            "trailingPegRatio": {
+                "enabled": true, "label": "PEG", "source": "yahoo_info.trailingPegRatio",
+                "group": "valuation", "stage": "fast", "weight": 1.0,
+                "display": true, "format": "number",
+                "gate": {"max": 2.1}, "score": {"good": 0.8, "bad": 3.0}
+            },
+            "debtToEquity": {
+                "enabled": true, "label": "Total Debt/Equity",
+                "source": "yahoo_info.debtToEquity",
+                "group": "financial_quality", "stage": "fast", "weight": 1.0,
+                "display": true, "format": "number",
+                "gate": {"max": 85}, "score": {"good": 20, "bad": 150}
+            },
+            "revenueGrowth": {
+                "enabled": true, "label": "Rev YoY %", "source": "yahoo_info.revenueGrowth",
+                "group": "growth", "stage": "fast", "weight": 1.0,
+                "display": true, "format": "number", "percent": true,
+                "gate": {"min": 10}, "score": {"good": 20, "bad": 0}
+            },
+            "dividendYield": {
+                "enabled": true, "label": "Div Yield %", "source": "yahoo_info.dividendYield",
+                "group": "shareholder_returns", "stage": "fast", "weight": 1.0,
+                "display": true, "format": "number",
+                "gate": {"min": 0}, "score": {"good": 3, "bad": 0}
+            },
+            "payoutRatio": {
+                "enabled": true, "label": "Payout %", "source": "yahoo_info.payoutRatio",
+                "group": "shareholder_returns", "stage": "fast", "weight": 1.0,
+                "display": true, "format": "number", "percent": true,
+                "gate": {"max": 60}, "score": {"good": 30, "bad": 80}
+            },
+            "roe": {
+                "enabled": true, "label": "ROE", "source": "yahoo_stmt.roe",
+                "group": "financial_quality", "stage": "fast", "weight": 1.0,
+                "display": true, "format": "pct",
+                "gate": {"min": 12}, "score": {"good": 25, "bad": 5}
+            },
+            "roic": {
+                "enabled": true, "label": "ROIC", "source": "yahoo_stmt.roic",
+                "group": "financial_quality", "stage": "fast", "weight": 1.0,
+                "display": true, "format": "pct",
+                "gate": {"min": 12}, "score": {"good": 20, "bad": 4}
+            },
+            "operating_margin": {
+                "enabled": true, "label": "OpM", "source": "yahoo_stmt.operating_margin",
+                "group": "financial_quality", "stage": "fast", "weight": 1.0,
+                "display": true, "format": "pct_series",
+                "gate": {"min": 10, "increasing": true}, "score": {"good": 30, "bad": 5}
+            },
+            "profit_margin": {
+                "enabled": true, "label": "PM", "source": "yahoo_stmt.profit_margin",
+                "group": "financial_quality", "stage": "fast", "weight": 1.0,
+                "display": true, "format": "pct_series",
+                "gate": {"min": 10, "increasing": true}, "score": {"good": 20, "bad": 3}
+            },
+            "fcf": {
+                "enabled": true, "label": "FCF", "source": "yahoo_stmt.fcf",
+                "group": "financial_quality", "stage": "fast", "weight": 1.0,
+                "display": true, "format": "money_series",
+                "gate": {"min": 0, "increasing": true}, "score": null
+            },
+            "pe_percentile_2y": {
+                "enabled": true, "label": "P/E pctile 2y",
+                "source": "yahoo_deep.pe_percentile_2y",
+                "group": "valuation", "stage": "deep", "weight": 1.0,
+                "display": false, "format": "number",
+                "gate": null, "score": {"good": 10, "bad": 90}
+            },
+            "analyst_upside_pct": {
+                "enabled": true, "label": "Upside %", "source": "yahoo_deep.analyst_upside_pct",
+                "group": "valuation", "stage": "deep", "weight": 1.0,
+                "display": false, "format": "pct",
+                "gate": null, "score": {"good": 25, "bad": -10}
+            },
+            "growth_this_year_pct": {
+                "enabled": true, "label": "Growth FY0",
+                "source": "yahoo_deep.growth_this_year_pct",
+                "group": "growth", "stage": "deep", "weight": 1.0,
+                "display": false, "format": "pct",
+                "gate": null, "score": {"good": 20, "bad": 0}
+            },
+            "growth_next_year_pct": {
+                "enabled": true, "label": "Growth FY1",
+                "source": "yahoo_deep.growth_next_year_pct",
+                "group": "growth", "stage": "deep", "weight": 1.0,
+                "display": false, "format": "pct",
+                "gate": null, "score": {"good": 15, "bad": 0}
+            },
+            "eps_revision_net": {
+                "enabled": true, "label": "EPS revisions",
+                "source": "yahoo_deep.eps_revision_net",
+                "group": "estimate_momentum", "stage": "deep", "weight": 1.0,
+                "display": false, "format": "number",
+                "gate": null, "score": {"good": 0.6, "bad": -0.4}
+            },
+            "eps_trend_change": {
+                "enabled": true, "label": "EPS trend 90d",
+                "source": "yahoo_deep.eps_trend_change",
+                "group": "estimate_momentum", "stage": "deep", "weight": 1.0,
+                "display": false, "format": "number",
+                "gate": null, "score": {"good": 0.05, "bad": -0.05}
+            },
+            "earnings_avg_surprise": {
+                "enabled": true, "label": "Avg surprise %",
+                "source": "yahoo_deep.earnings_avg_surprise",
+                "group": "earnings_quality", "stage": "deep", "weight": 1.0,
+                "display": false, "format": "pct",
+                "gate": null, "score": {"good": 8, "bad": -2}
+            },
+            "earnings_beat_rate": {
+                "enabled": true, "label": "Beat rate",
+                "source": "yahoo_deep.earnings_beat_rate",
+                "group": "earnings_quality", "stage": "deep", "weight": 1.0,
+                "display": false, "format": "number",
+                "gate": null, "score": {"good": 1.0, "bad": 0.5}
+            },
+            "return_on_assets": {
+                "enabled": true, "label": "ROA", "source": "yahoo_deep.return_on_assets",
+                "group": "financial_quality", "stage": "deep", "weight": 1.0,
+                "display": false, "format": "pct",
+                "gate": null, "score": {"good": 15, "bad": 2}
+            },
+            "gross_margin": {
+                "enabled": true, "label": "Gross margin",
+                "source": "yahoo_deep.gross_margin",
+                "group": "financial_quality", "stage": "deep", "weight": 1.0,
+                "display": false, "format": "pct", "zero_is_missing": true,
+                "gate": null, "score": {"good": 60, "bad": 20}
+            },
+            "net_debt_to_ebitda": {
+                "enabled": true, "label": "Net debt/EBITDA",
+                "source": "yahoo_deep.net_debt_to_ebitda",
+                "group": "financial_quality", "stage": "deep", "weight": 1.0,
+                "display": false, "format": "number",
+                "gate": null, "score": {"good": 0, "bad": 4}
+            },
+            "buyback_2y": {
+                "enabled": true, "label": "Share count 2y %",
+                "source": "yahoo_deep.buyback_2y",
+                "group": "shareholder_returns", "stage": "deep", "weight": 1.0,
+                "display": false, "format": "pct",
+                "gate": null, "score": {"good": -5, "bad": 3}
+            },
+            "analyst_buy_ratio": {
+                "enabled": true, "label": "Analyst buy ratio",
+                "source": "yahoo_deep.analyst_buy_ratio",
+                "group": "analyst_sentiment", "stage": "deep", "weight": 1.0,
+                "display": false, "format": "number",
+                "gate": null, "score": {"good": 0.8, "bad": 0.3}
+            },
+            "ibkr_implied_volatility": {
+                "enabled": false, "label": "IV (IBKR)",
+                "source": "ibkr.implied_volatility",
+                "group": "analyst_sentiment", "stage": "deep", "weight": 1.0,
+                "display": false, "format": "number",
+                "gate": null, "score": {"good": 0.2, "bad": 0.8}
+            },
+            "ibkr_return_on_equity": {
+                "enabled": false, "label": "ROE (IBKR)",
+                "source": "ibkr.return_on_equity",
+                "group": "financial_quality", "stage": "deep", "weight": 1.0,
+                "display": false, "format": "pct",
+                "gate": null, "score": {"good": 25, "bad": 5}
+            },
+            "ibkr_revenue_growth_rate": {
+                "enabled": false, "label": "Rev growth (IBKR)",
+                "source": "ibkr.revenue_growth_rate",
+                "group": "growth", "stage": "deep", "weight": 1.0,
+                "display": false, "format": "pct",
+                "gate": null, "score": {"good": 20, "bad": 0}
+            }
+        }
+    },
+    "ibkr": {
+        "enabled": false,
+        "host": "127.0.0.1",
+        "port": 7496,
+        "client_id": 17,
+        "connect_timeout_seconds": 8,
+        "request_timeout_seconds": 20,
+        "market_data": true,
+        "reports": ["ReportSnapshot"]
+    },
     "research": {
         "latest_hits_path": "latest_hits.json",
         "report_subdir": "reports",
@@ -180,7 +387,10 @@
             "enabled": true,
             "gate": "all",
             "max_reports": 3,
-            "discord_send": true,
+            "discord_send": true
+        },
+        "narrative": {
+            "enabled": true,
             "model": "opus"
         },
         "history": {

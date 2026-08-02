@@ -33,6 +33,7 @@ import charts
 import research_collect
 import research_report
 import run_scanners
+import quality
 import scanner_common
 
 c = Checks("tier-3 output")
@@ -135,16 +136,15 @@ c.ok("no statements at all yields empty lists, not an exception",
 # --------------------------------------------------------------------------
 c.section("tier 2 is untouched by the pretax fallback")
 
-stmt_cfg = {"enabled": True, "years": 4,
-            "metrics": {"operating_margin": "OpM", "profit_margin": "PM",
-                        "fcf": "FCF", "roe": "ROE", "roic": "ROIC"}}
-tier2_bank = scanner_common._statement_metrics(financial_sector(), stmt_cfg, {})
+stmt_keys = {"operating_margin", "profit_margin", "fcf", "roe", "roic"}
+tier2_bank = quality._statement_metrics(financial_sector(), stmt_keys, 4, {})
 c.ok("_statement_metrics still yields no operating margin for a bank",
-     not tier2_bank.get("OpM"),
-     "the quality rules must keep their strict Operating-Income definition")
-tier2_ind = scanner_common._statement_metrics(industrial(), stmt_cfg, {})
+     not tier2_bank.get("operating_margin"),
+     "the quality gates must keep their strict Operating-Income definition")
+tier2_ind = quality._statement_metrics(industrial(), stmt_keys, 4, {})
 c.ok("_statement_metrics still computes it where the row exists",
-     bool(tier2_ind.get("OpM")), f"{tier2_ind.get('OpM')}")
+     bool(tier2_ind.get("operating_margin")),
+     f"{tier2_ind.get('operating_margin')}")
 
 # --------------------------------------------------------------------------
 c.section("the chart renders for every shape of input")
@@ -280,11 +280,25 @@ c.ok("percentiles read as ordinals",
 # `candidates` still report the old failures.
 c.section("tier 2 is re-graded against the rules in force now")
 
-pe_label = cfg["fundamentals"]["fields"]["trailingPE"]
-strict = json.loads(json.dumps(cfg))
-strict["fundamentals"]["quality"]["rules"] = {"trailingPE": {"max": 10}}
-loose = json.loads(json.dumps(cfg))
-loose["fundamentals"]["quality"]["rules"] = {"trailingPE": {"max": 100}}
+pe_label = quality.label_of("trailingPE",
+                            cfg["quality"]["parameters"]["trailingPE"])
+
+
+def only_pe_gate(max_pe: float) -> dict:
+    """A config whose sole gate is trailingPE, so the assertion is unambiguous.
+
+    Built by *disabling* the other parameters rather than deleting them -- that
+    is the switch this whole section exists to exercise, and it also proves a
+    disabled parameter drops out of `Quality Missing`.
+    """
+    variant = json.loads(json.dumps(cfg))
+    for key, spec in variant["quality"]["parameters"].items():
+        spec["enabled"] = key == "trailingPE"
+    variant["quality"]["parameters"]["trailingPE"]["gate"] = {"max": max_pe}
+    return variant
+
+
+strict, loose = only_pe_gate(10), only_pe_gate(100)
 
 # The row carries a *stale* passing verdict recorded under some older bar.
 stale = {"screens": [{"config_key": "s", "title": "S", "strategy": {},
@@ -342,12 +356,14 @@ od_cfg["research"]["history"] = {"enabled": True, "dir": str(history),
                                  "on_demand_csv": "on_demand.csv"}
 od_cfg["research"]["logging"] = {"enabled": True, "dir": str(logs),
                                  "manifest": "runs.csv", "keep_runs": 50}
-# One rule the stub satisfies, so the verdict is deterministic whatever the
-# real rule set has been retuned to since.
-pe_label = od_cfg["fundamentals"]["fields"]["trailingPE"]
-od_cfg["fundamentals"]["enabled"] = True
-od_cfg["fundamentals"]["quality"] = {"enabled": True, "badge": "*",
-                                     "rules": {"trailingPE": {"max": 20}}}
+# One gate the stub satisfies, so the verdict is deterministic whatever the
+# real registry has been retuned to since. Every other parameter is switched
+# off rather than deleted -- the same flag a user flips to stop a rule mattering.
+od_cfg["quality"]["enabled"] = True
+od_cfg["quality"]["badge"] = "*"
+for _key, _spec in od_cfg["quality"]["parameters"].items():
+    _spec["enabled"] = _key == "trailingPE"
+od_cfg["quality"]["parameters"]["trailingPE"]["gate"] = {"max": 20}
 
 # 800 sessions of a gentle, uniformly red decline. No screen can fire on it at
 # any thresholds -- nothing consolidates, no SMA rises, no close crosses up
@@ -364,13 +380,13 @@ falling = pd.DataFrame({("Open", TICK): _close / 0.999,
 falling.columns = pd.MultiIndex.from_tuples(falling.columns)
 
 
-def stub_fundamentals(tickers, _fund_cfg):
+def stub_fundamentals(tickers, _cfg):
     return pd.DataFrame({pe_label: [12.0], scanner_common.COMPANY_COL: ["Alpha Corp"]},
                         index=list(tickers)).rename_axis("Ticker")
 
 
 run_scanners.download_price_data = lambda t, period, interval: falling
-run_scanners.fetch_fundamentals = stub_fundamentals
+run_scanners.quality.fetch_fast = stub_fundamentals
 
 _out = io.StringIO()
 _stdout, sys.stdout = sys.stdout, _out

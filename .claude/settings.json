@@ -15,6 +15,7 @@
       "mcp__stock_analyzer__backtest_ticker",
       "mcp__stock_analyzer__tune_screen",
       "mcp__stock_analyzer__config_get",
+      "mcp__stock_analyzer__params_list",
       "mcp__stock_analyzer__job_status",
       "mcp__stock_analyzer__job_result",
       "mcp__stock_analyzer__list_jobs"

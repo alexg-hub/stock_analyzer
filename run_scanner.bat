@@ -19,23 +19,17 @@ rem 2>&1 matters: the step log writes to stderr, so scanner_log.txt keeps it.
 "C:\Users\Lenovo\AppData\Local\Microsoft\WindowsApps\python.exe" run_scanners.py >> output\scanner_log.txt 2>&1
 echo ==== Scan finished %date% %time% (exit %errorlevel%) ==== >> output\scanner_log.txt
 
-rem Tier 4: ledger tonight's signals as virtual positions straight away, then
-rem price the book. `open` first and on its own line so the signal is recorded
-rem even if the download in `mark` fails -- the ledger is the thing that cannot
-rem be reconstructed later, the prices always can. Both exit 0 on failure by
-rem design (see portfolio_sim/__main__.py): a broken ledger must never take down
-rem the scan or the deep dive. Same 2>&1, same reason -- the step log is stderr.
-"C:\Users\Lenovo\AppData\Local\Microsoft\WindowsApps\python.exe" -m portfolio_sim open >> output\scanner_log.txt 2>&1
-"C:\Users\Lenovo\AppData\Local\Microsoft\WindowsApps\python.exe" -m portfolio_sim mark >> output\scanner_log.txt 2>&1
+rem Tiers 3 and 4 now run INSIDE run_scanners.py, not as separate lines here.
+rem Everything deterministic -- the screens, the quality check, the ledger, the
+rem exit scan and the graded verdict -- happens in that one process so it can go
+rem out in ONE Discord message: the signal, what it graded out at, and what to
+rem sell, together instead of three posts at three different times. Each step is
+rem still individually fail-safe (see run_ledger / run_verdicts): a broken ledger
+rem or a failed verdict costs its own section of the alert and nothing more.
 
-rem The exit side: double tops on the names already held. After `mark`, because
-rem it only looks at positions whose entry price has been filled. This is the
-rem one tier-4 step that posts to Discord -- and it only does so for a position
-rem it has just flagged, so a name that stays under its neckline is announced
-rem once, not every night.
-"C:\Users\Lenovo\AppData\Local\Microsoft\WindowsApps\python.exe" -m portfolio_sim exit-scan >> output\scanner_log.txt 2>&1
-
-rem Tier 3 runs off the hand-off the scan just wrote, so the Discord alert lands
-rem first and the deep-dive verdicts follow a while later. It logs separately and
-rem skips itself when nothing qualifies.
+rem Tier 3's NARRATIVE half is what is left out here, and it is optional: the
+rem verdict is already computed, recorded and posted by the line above. This
+rem adds the written report (moat, news, filings) and may revise the conviction
+rem within its bounded adjustment. It logs separately, skips itself when nothing
+rem qualifies, and is switched off with research.narrative.enabled.
 call "C:\Users\Lenovo\CC\stock_analyzer\run_deepdive.bat"

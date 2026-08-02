@@ -296,29 +296,37 @@ def _embed(row: dict, chart_path) -> dict:
     return embed
 
 
-def exit_scan(cfg: dict, send: bool = True) -> pd.DataFrame:
+def exit_scan(cfg: dict, send: bool = True, collect: bool = False):
     """Detect double tops on the book, flag them, record the sells, alert.
 
     Returns the frame of exits *recorded on this run* (empty when nothing
     fired), not the whole sell table.
+
+    With `collect=True` it returns `(recorded, embeds, charts)` instead and
+    posts nothing regardless of `send`, so the nightly run can fold the exit
+    cards into the single combined alert with the signals that produced them.
+    Standalone (`python -m portfolio_sim exit-scan`) still posts for itself --
+    an exit found on its own is still the one thing tier 4 produces that is
+    actionable the day it happens.
     """
+    empty = (pd.DataFrame(), [], []) if collect else pd.DataFrame()
     with step("EXIT", cfg=cfg) as s:
         strategy = cfg.get("exit_strategy", {})
         if not strategy.get("enabled", True):
             s.status = "off"
             s.detail = "exit_strategy.enabled is false"
-            return pd.DataFrame()
+            return empty
 
         positions = load_positions(cfg)
         if positions.empty:
             s.status = "warn"
             s.detail = "ledger is empty -- run `open` first"
-            return pd.DataFrame()
+            return empty
 
         held = _held(positions)
         if not held.any():
             s.detail = f"no open position to watch ({len(positions)} on the book)"
-            return pd.DataFrame()
+            return empty
 
         tickers = sorted(set(positions.loc[held, "ticker"].astype(str)))
         entry_dates = pd.to_datetime(positions["entry_date"], errors="coerce")
@@ -398,7 +406,7 @@ def exit_scan(cfg: dict, send: bool = True) -> pd.DataFrame:
         if not updates:
             s.detail = (f"{int(held.sum())} position(s) watched, "
                         f"no double top")
-            return pd.DataFrame()
+            return empty
 
         _apply(positions, updates, cfg)
         recorded = pd.DataFrame(sells)
@@ -409,6 +417,12 @@ def exit_scan(cfg: dict, send: bool = True) -> pd.DataFrame:
         s.detail = (f"{int(held.sum())} position(s) watched, {len(updates)} "
                     f"double top(s): {len(sells)} sold, {pending} pending")
 
+        if collect:
+            # The caller owns delivery. `discord_alert` still applies -- it is
+            # the switch for "announce exits at all", not for who posts them.
+            if not strategy.get("discord_alert", True):
+                embeds, charts = [], []
+            return recorded, embeds, charts
         if send and strategy.get("discord_alert", True) and embeds:
             _alert(embeds, charts, cfg)
         return recorded
