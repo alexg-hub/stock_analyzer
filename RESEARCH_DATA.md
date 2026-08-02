@@ -42,13 +42,24 @@ to `n/a` and the run completes normally with one `IBKR skip` line.
 
 | Layer | Call | Status | Notes |
 |---|---|:--:|---|
-| Ratios | `reqFundamentalData(ReportSnapshot)` | ✅ | Refinitiv ratio block, parsed by `parse_ratios`. Mapped: ROE, ROI, revenue/EPS growth, gross/operating/net margin, D/E, P/E, P/B, yield, payout, market cap, TTM revenue/EPS. Unmapped fields come back under their raw Refinitiv name, so a new parameter is config-only. |
-| Statements | `reqFundamentalData(ReportsFinStatements)` | ⚠️ | Available but **not enabled** — Yahoo is already the source of truth for statements and a second one would need reconciling, not merging. |
-| Estimates | `reqFundamentalData(RESC)` | ⚠️ | Same: analyst estimates stay Yahoo's job. |
-| Market stats | `reqMktData` generic ticks 106, 165 | ⚠️ | 52w hi/lo, average volume, historical and **implied** volatility. Subscription-gated per field; an unsubscribed field arrives NaN → `n/a`. |
-| IV **percentile** | — | ❌ | The MCP connector returned one; the TWS API does not. It was a Reflexivity computation, not an IBKR field. Deliberately absent rather than approximated — a percentile needs a stored history. |
-| Moat / competitors / themes | — | ❌ | `get_company_connections`, `get_company_themes`, `search_investment_topics` are Reflexivity products on the claude.ai connector with **no public-API equivalent**. Still MCP-only (Tier B2). |
-| Account context | — | 🚫 | **Not implemented, at all.** See `ibkr.FORBIDDEN_CALLS`; a test asserts none is called. Same rule as below. |
+| Contract resolution | `reqContractDetails` | ✅ | `SMART`/`USD` + `primaryExchange`, exact-symbol match. AAPL→265598, MSFT→272093 — same conids the MCP connector returned |
+| 52/26/13-week range, avg volume | `reqMktData` tick **165** | ✅ | Verified live 2026-08-02 on **delayed** data (`market_data_type: 3`) |
+| Historical volatility | tick **104** | ✅ | annualized |
+| Implied volatility | tick **106** | ✅ | AAPL 0.172 |
+| Refinitiv ratios | `reqFundamentalData(ReportSnapshot)` | ❌ | **Error 10358 "Fundamentals data is not allowed"** — needs the *Reuters Worldwide Fundamentals* market-data add-on, which this account does not hold. `ibkr.reports: []` switches the request off |
+| Refinitiv ratios (market-data route) | tick **258** | ❌ | Same data over the market-data channel, same denial — **and worse**: with 258 in the request the snapshot returns *nothing at all*, losing the range and volume that would otherwise arrive. Excluded by default; `ibkr.fundamental_ticks: true` opts in |
+| Statements / estimates | `ReportsFinStatements`, `RESC` | ❌ | Same subscription gate. Yahoo remains the source of truth for both regardless |
+| IV **percentile** | — | ❌ | The MCP connector returned one; the TWS API does not. It was a Reflexivity computation, not an IBKR field. Deliberately absent rather than approximated — a percentile needs a stored history |
+| Moat / competitors / themes | — | ❌ | `get_company_connections`, `get_company_themes`, `search_investment_topics` are Reflexivity products with **no public-API equivalent**. Still MCP-only (Tier B2) |
+| Account context | — | 🚫 | **Not implemented, at all.** See `ibkr.FORBIDDEN_CALLS`; a test asserts none is called |
+
+**Net position today:** IBKR contributes *market statistics only* — 52-week
+range, average volume, historical and implied volatility. That is one enabled
+parameter (`ibkr_implied_volatility`). The two ratio-based parameters
+(`ibkr_return_on_equity`, `ibkr_revenue_growth_rate`) stay configured but
+**disabled**, documenting what would become available if the fundamentals
+add-on is ever purchased — flip `enabled` and set `ibkr.reports` back to
+`["ReportSnapshot"]`.
 
 Sentinel to know about: Refinitiv reports "not reported" as **-99999**. Left
 alone it reads as a real, catastrophically bad number in any score that touches

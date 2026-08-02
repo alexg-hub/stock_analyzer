@@ -348,7 +348,7 @@
                 "gate": null, "score": {"good": 0.8, "bad": 0.3}
             },
             "ibkr_implied_volatility": {
-                "enabled": false, "label": "IV (IBKR)",
+                "enabled": true, "label": "IV (IBKR)",
                 "source": "ibkr.implied_volatility",
                 "group": "analyst_sentiment", "stage": "deep", "weight": 1.0,
                 "display": false, "format": "number",
@@ -371,14 +371,17 @@
         }
     },
     "ibkr": {
-        "enabled": false,
+        "enabled": true,
         "host": "127.0.0.1",
-        "port": 7496,
+        "port": 4001,
         "client_id": 17,
         "connect_timeout_seconds": 8,
         "request_timeout_seconds": 20,
         "market_data": true,
-        "reports": ["ReportSnapshot"]
+        "reports": [],
+        "market_data_type": 3,
+        "snapshot_wait_seconds": 8,
+        "fundamental_ticks": false
     },
     "research": {
         "latest_hits_path": "latest_hits.json",

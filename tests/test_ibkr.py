@@ -113,6 +113,40 @@ c.ok("every mapped name is reachable from a config source",
      all(isinstance(v, str) and v for v in ibkr.RATIO_FIELDS.values()))
 
 # --------------------------------------------------------------------------
+c.section("subscription realities that cost data when ignored")
+
+# Verified against a live gateway on 2026-08-02: an account without the Reuters
+# Worldwide Fundamentals add-on gets error 10358 for tick 258 and the request
+# then returns NOTHING -- not even the 52-week range and volume that would
+# otherwise have arrived. Including it by default trades every market-data
+# field for one that is denied.
+c.ok("the fundamentals tick is not requested by default",
+     ibkr.FUNDAMENTAL_TICK not in ibkr.GENERIC_TICKS.split(","),
+     f"default ticks: {ibkr.GENERIC_TICKS}")
+c.ok("...but the range/volume/volatility ticks are",
+     {"104", "106", "165"} <= set(ibkr.GENERIC_TICKS.split(",")))
+c.ok("...and it can be opted into for an account that holds the subscription",
+     "fundamental_ticks" in inspect.getsource(ibkr.snapshot))
+
+# `reports: []` is a decision, not an absence. Treating it as unset (the `or`
+# idiom) made a config that had already been told the account cannot serve
+# reports still pay a failed round-trip, and log a 10358, for every ticker.
+disabled_reports = copy.deepcopy(cfg)
+disabled_reports.setdefault("ibkr", {}).update(enabled=True, reports=[])
+ibkr.reset_cache()
+c.ok("an explicitly empty `reports` list asks for nothing",
+     ibkr.fundamentals("AAPL", disabled_reports) == {},
+     "and must not fall back to the default report")
+ibkr.reset_cache()
+
+# Live US equity data needs a subscription this project does not require; the
+# screens run off Yahoo's daily bars, so a 15-minute delay is irrelevant to a
+# 52-week range or an average volume.
+c.ok("market data defaults to delayed rather than live",
+     ibkr.MARKET_DATA_DELAYED == 3
+     and "market_data_type" in inspect.getsource(ibkr.snapshot))
+
+# --------------------------------------------------------------------------
 c.section("NaN handling")
 
 c.ok("an unsubscribed market-data field (NaN) becomes None",

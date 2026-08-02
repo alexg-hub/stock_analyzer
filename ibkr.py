@@ -156,7 +156,7 @@ async def _connected(cfg: dict):
     return ib
 
 
-def _with_session(cfg: dict, body):
+def _with_session(cfg: dict, body, extra_seconds: float = 0.0):
     """Open one connection, run `body(ib)`, always disconnect.
 
     One connection per call rather than a pooled one: the nightly run touches a
@@ -165,7 +165,8 @@ def _with_session(cfg: dict, body):
     """
     sect = _section(cfg)
     timeout = (float(sect.get("connect_timeout_seconds", 8))
-               + float(sect.get("request_timeout_seconds", 20)))
+               + float(sect.get("request_timeout_seconds", 20))
+               + extra_seconds)
 
     async def run():
         ib = await _connected(cfg)
@@ -281,7 +282,15 @@ def fundamentals(ticker: str, cfg: dict) -> dict:
     """
     if not available(cfg):
         return {}
-    reports = _section(cfg).get("reports") or ["ReportSnapshot"]
+    # An explicitly empty list means "do not ask" -- `or` would treat it as
+    # unset and fall back to the default, which is how a config that had
+    # already been told the account cannot serve reports still paid a failed
+    # round-trip (and an error 10358 in the log) for every ticker.
+    reports = _section(cfg).get("reports")
+    if reports is None:
+        reports = ["ReportSnapshot"]
+    if not reports:
+        return {}
 
     async def body(ib):
         contract = await _resolve(ib, ticker)
@@ -308,14 +317,51 @@ def fundamentals(ticker: str, cfg: dict) -> dict:
 # Market data -- the snapshot fields the deep-dive used to read over MCP
 # --------------------------------------------------------------------------
 
-# 106 = option implied volatility, 165 = the 13/26/52-week range and average
-# volume. Both are delayed-or-live depending on the account's subscriptions;
-# an unsubscribed field arrives as NaN, which reads as missing.
-GENERIC_TICKS = "106,165"
+# 104 = historical volatility, 106 = option implied volatility, 165 = the
+# 13/26/52-week range and average volume. An unsubscribed field arrives as NaN,
+# which reads as missing.
+#
+# **258 is deliberately not here.** It carries the Reuters fundamental ratio
+# block over the market-data channel -- the same numbers
+# `reqFundamentalData(ReportSnapshot)` returns -- which would be a way to get
+# ratios without the Reuters Worldwide Fundamentals add-on. It is not: an
+# account without that add-on gets error 10358 for the tick and the request
+# then returns **nothing at all**, including the 52-week range and volume that
+# would otherwise have arrived. Verified 2026-08-02: with 258 the snapshot came
+# back empty, without it every other field populated. Accounts that do hold the
+# subscription can opt in with `ibkr.fundamental_ticks: true`.
+GENERIC_TICKS = "104,106,165"
+FUNDAMENTAL_TICK = "258"
+
+# reqMarketDataType: 1 live, 2 frozen, 3 delayed, 4 delayed-frozen. Delayed is
+# the default because live US equity data needs a subscription this project
+# does not require -- the screens run off Yahoo's daily bars, and a 15-minute
+# delay is irrelevant to a 52-week range or an average volume.
+MARKET_DATA_DELAYED = 3
+
+
+def _ratios_from_tick(data) -> dict:
+    """Flatten a Ticker's `fundamentalRatios` through the same name mapping."""
+    ratios = getattr(data, "fundamentalRatios", None)
+    if ratios is None:
+        return {}
+    raw = dict(getattr(ratios, "__dict__", {}) or {})
+    out = {}
+    for name, value in raw.items():
+        value = _finite(value)
+        if value is None or value <= -99998:
+            continue
+        out[name] = value
+        if name in RATIO_FIELDS:
+            out[RATIO_FIELDS[name]] = value
+    return out
 
 
 def snapshot(tickers: list[str], cfg: dict) -> dict:
     """Per-ticker market statistics: 52-week range, volatility, average volume.
+
+    Also returns whatever ratios arrive on tick 258, so an account without the
+    fundamentals add-on can still populate the `ibkr.*` parameters.
 
     The MCP connector also returned an *IV percentile*, which the TWS API does
     not expose -- that was a Reflexivity computation, not an IBKR field. Raw
@@ -326,28 +372,44 @@ def snapshot(tickers: list[str], cfg: dict) -> dict:
     if not available(cfg) or not tickers:
         return {}
 
+    sect = _section(cfg)
+    wait = float(sect.get("snapshot_wait_seconds", 8))
+    md_type = int(sect.get("market_data_type", MARKET_DATA_DELAYED))
+    ticks = GENERIC_TICKS + (f",{FUNDAMENTAL_TICK}"
+                             if sect.get("fundamental_ticks") else "")
+
     async def body(ib):
+        ib.reqMarketDataType(md_type)
         out = {}
         for ticker in tickers:
             contract = await _resolve(ib, ticker)
             if contract is None:
                 continue
-            data = ib.reqMktData(contract, GENERIC_TICKS, snapshot=False,
+            data = ib.reqMktData(contract, ticks, snapshot=False,
                                  regulatorySnapshot=False)
-            await asyncio.sleep(2)          # let the first tick batch arrive
-            out[ticker] = {
+            await asyncio.sleep(wait)       # let the first tick batch arrive
+            row = {
                 "price": _finite(data.marketPrice()),
-                "high_52w": _finite(data.high52),
-                "low_52w": _finite(data.low52),
+                "close": _finite(data.close),
+                "high_52w": _finite(data.high52week),
+                "low_52w": _finite(data.low52week),
+                "high_26w": _finite(data.high26week),
+                "low_26w": _finite(data.low26week),
+                "high_13w": _finite(data.high13week),
+                "low_13w": _finite(data.low13week),
                 "avg_volume": _finite(data.avVolume),
                 "historical_volatility": _finite(data.histVolatility),
                 "implied_volatility": _finite(data.impliedVolatility),
             }
+            row.update(_ratios_from_tick(data))
+            out[ticker] = {k: v for k, v in row.items() if v is not None}
             ib.cancelMktData(contract)
         return out
 
     try:
-        return _with_session(cfg, body) or {}
+        # Each ticker costs `wait` seconds of tick-gathering on top of the
+        # request budget, so the session timeout has to grow with the list.
+        return _with_session(cfg, body, extra_seconds=wait * len(tickers)) or {}
     except Exception as exc:  # noqa: BLE001
         log_step("IBKR", "warn", f"snapshot: {exc}", cfg=cfg)
         return {}
