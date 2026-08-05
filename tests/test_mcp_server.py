@@ -33,7 +33,8 @@ c.section("import purity")
 # Import *after* the harness, so the step-log redirect is already installed.
 before = sys.stdout
 import mcp_server                                                  # noqa: E402
-from mcp_tools import config_tools, deepdive, jobs, portfolio, signals  # noqa: E402
+from mcp_tools import (backtests, config_tools, deepdive, jobs,  # noqa: E402
+                       portfolio, signals)
 
 c.ok("importing the server writes nothing to stdout", sys.stdout is before)
 c.ok("import does not mutate global streams (no enable_utf8_output at import)",
@@ -281,6 +282,66 @@ c.ok("a log that exists is tailed",
      jobs.status(_probe["job_id"], tail=5)["log_tail"] == ["STEP 3 of 6", "halfway"])
 c.ok("job_status still tolerates a log file that does not exist",
      jobs.status(jobs.reserve("test")["job_id"])["log_tail"] == [])
+
+# A log that exists but cannot be read must not read as "nothing logged yet":
+# that is the same answer a quiet run gives, so the caller backs off and polls
+# a fault forever. A directory stands in for any unreadable path.
+_lines, _err = jobs._tail(str(_JOBDIR), 5)
+c.ok("an unreadable log is reported, not silently empty",
+     _lines == [] and _err.startswith("log unreadable"), _err or "no error given")
+c.ok("a missing log stays silent (missing != unreadable)",
+     jobs._tail(str(_JOBDIR / "absent.log"), 5) == ([], ""))
+
+# --------------------------------------------------------------------------
+c.section("a subprocess job that never starts is killed, not waited out")
+
+# The bug this pins (2026-08-05): an MCP-spawned child blocked during
+# interpreter start-up and wrote nothing, so the log stayed zero bytes and
+# `job_status` reported `running` -- truthfully -- with `timeout=3600` ahead of
+# it. The identical command run by hand finished in 74s. Two runs stalled that
+# way before anyone could tell it was not just slow.
+_silent = backtests.run_script(
+    ["-c", "import time; time.sleep(120)"],
+    log_path=str(_JOBDIR / "silent.log"), timeout=3600, first_output_timeout=2)
+c.ok("a child that writes nothing is killed by the watchdog",
+     _silent.get("stalled") is True and not _silent["ok"])
+c.ok("the reason lands in the log, which is what job_status shows",
+     any("no output" in line for line in _silent["output_tail"]),
+     repr(_silent["output_tail"][-1:]))
+
+# The watchdog must key off *silence*, not elapsed time -- a real scan runs for
+# minutes after its first line.
+_chatty = backtests.run_script(
+    ["-c", "print('STEP 1'); import time; time.sleep(4); print('STEP 2')"],
+    log_path=str(_JOBDIR / "chatty.log"), timeout=3600, first_output_timeout=2)
+c.ok("a child that narrates then works is left alone",
+     _chatty["ok"] and not _chatty.get("stalled")
+     and _chatty["output_tail"][-1:] == ["STEP 2"], f"{_chatty['output_tail']}")
+
+# Unset, stdin is inherited -- under `.mcp.json` that is the server's JSON-RPC
+# pipe, a handle no scanner has any business holding.
+_stdin = backtests.run_script(
+    ["-c", "import sys; print('READ=%r' % sys.stdin.read())"],
+    log_path=str(_JOBDIR / "stdin.log"), timeout=60, first_output_timeout=30)
+c.ok("a child's stdin is closed, so reading it EOFs instead of blocking",
+     _stdin["ok"] and any("READ=''" in line for line in _stdin["output_tail"]),
+     f"{_stdin['output_tail']}")
+
+_stalled_job = jobs.reserve("test")
+jobs.submit(_stalled_job["job_id"], backtests.run_script,
+            ["-c", "import time; time.sleep(120)"],
+            log_path=_stalled_job["log_path"], first_output_timeout=2)
+c.ok("a stalled job reports 'error', not 'done'",
+     _wait(_stalled_job["job_id"], timeout=30) == jobs.ERROR)
+
+# ...but a plain non-zero exit still means the run happened. `auto-prompt`
+# exits 1 to say "nothing to do tonight", and that is not a job failure.
+_rc1 = jobs.reserve("test")
+jobs.submit(_rc1["job_id"], backtests.run_script,
+            ["-c", "print('bye'); raise SystemExit(1)"],
+            log_path=_rc1["log_path"], first_output_timeout=10)
+c.ok("a non-zero exit is still 'done' (exit 1 is meaningful, not a stall)",
+     _wait(_rc1["job_id"], timeout=30) == jobs.DONE)
 
 # --------------------------------------------------------------------------
 c.section("a job outlives the server process")

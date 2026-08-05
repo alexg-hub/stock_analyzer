@@ -516,6 +516,20 @@ real send.
     tool name matches nothing. The writers additionally refuse `discord.*` and
     `research.auto.discord_send` outright: a tool that could flip the send gate
     would make every other dry-run default decorative.
+  - **A subprocess job must prove it started.** `run_script` pins `stdin` to
+    `DEVNULL` and kills any child that writes nothing for
+    `FIRST_OUTPUT_TIMEOUT` (60s). Both halves close the same silent failure: an
+    unset `stdin` hands the child the server's **JSON-RPC pipe**, and a child
+    that blocks during interpreter start-up writes nothing — so the log stays
+    zero bytes and `job_status` reports `running`, truthfully, until
+    `timeout=3600` expires an hour later. That happened twice on 2026-08-05
+    while the identical command run by hand finished in 74s. The watchdog keys
+    off **silence, not elapsed time** (a real scan runs for minutes after its
+    first line), and a stall sets `stalled` so `jobs.submit` records the job as
+    `error` — a plain non-zero exit still reports `done`, because several of
+    these scripts use exit 1 to mean something specific. Relatedly, `jobs._tail`
+    separates a **missing** log from an **unreadable** one: both used to return
+    `[]`, which is the same answer a quiet run gives.
   There are deliberately **no file-reading tools** — reports, logs, CSVs and
   charts under `output/` are read with `Read`/`Glob`, which do it better. A
   `read_report`/`tail_log`/`backtest_results` reappearing means the surface

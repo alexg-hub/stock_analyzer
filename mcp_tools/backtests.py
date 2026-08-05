@@ -11,6 +11,7 @@ None of these touch Discord.
 
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from scanner_common import PROJECT_ROOT, load_config
@@ -27,8 +28,81 @@ SINGLE_BACKTESTS = {
 }
 
 
+# How long a child may go without writing a single byte before it is treated as
+# hung. Every script reachable from here narrates within a second or two of
+# starting -- `run_scanners.py` logs `SCAN start` before it downloads anything
+# and `backtest_universe.py` prints STEP 1 -- so silence this long is not slow
+# work, it is a child that never got going. Generous enough to absorb a cold
+# import of pandas/matplotlib on a busy box.
+FIRST_OUTPUT_TIMEOUT = 60
+
+# How often the wait loop wakes to check on a running child.
+_POLL_S = 1.0
+
+
+def _stop(proc: subprocess.Popen) -> None:
+    """Kill a child that will not be waited on, without ever hanging here."""
+    proc.kill()
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:                            # pragma: no cover
+        pass
+
+
+def _run_to_log(cmd: list[str], log_path: str | Path, env: dict | None,
+                timeout: int, first_output_timeout: int) -> tuple[int, str]:
+    """Run `cmd` into `log_path`, watching that it actually starts working.
+
+    Returns `(exit_code, stall_reason)`; `stall_reason` is "" for a child that
+    ran to completion on its own.
+
+    The watchdog exists because the failure it catches is invisible otherwise: a
+    child that blocks during interpreter start-up writes nothing, so the log
+    stays zero bytes and `job_status` reports `running` -- truthfully -- until
+    `timeout` expires an hour later. Observed twice on 2026-08-05, where the MCP
+    subprocess stalled in module import while the identical command run by hand
+    completed in 74s. Watching the log *size* rather than parsing it keeps this
+    agnostic about what any given script prints.
+    """
+    deadline = time.monotonic() + timeout
+    with open(log_path, "w", encoding="utf-8", errors="replace") as sink:
+        proc = subprocess.Popen(cmd, cwd=str(PROJECT_ROOT), stdout=sink,
+                                stderr=subprocess.STDOUT, env=env,
+                                stdin=subprocess.DEVNULL)
+        started = time.monotonic()
+        while True:
+            try:
+                return proc.wait(timeout=_POLL_S), ""
+            except subprocess.TimeoutExpired:
+                pass
+            now = time.monotonic()
+            silent_for = now - started
+            if (first_output_timeout
+                    and silent_for > first_output_timeout
+                    and _log_size(log_path) == 0):
+                _stop(proc)
+                reason = (f"no output after {int(silent_for)}s -- the child "
+                          f"never reached its first log line and was killed")
+                # Into the log as well: the log file is what `job_status` shows,
+                # and an empty one is exactly the symptom being explained.
+                sink.write(reason + "\n")
+                sink.flush()
+                return proc.returncode, reason
+            if now > deadline:
+                _stop(proc)
+                raise subprocess.TimeoutExpired(cmd, timeout)
+
+
+def _log_size(log_path: str | Path) -> int:
+    try:
+        return Path(log_path).stat().st_size
+    except OSError:
+        return 0
+
+
 def run_script(args: list[str], log_path: str | Path | None = None,
-               run_id: str | None = None, timeout: int = 3600) -> dict:
+               run_id: str | None = None, timeout: int = 3600,
+               first_output_timeout: int = FIRST_OUTPUT_TIMEOUT) -> dict:
     """Run a project script to completion, streaming both streams to `log_path`.
 
     Streamed to a file rather than captured into a pipe because the log *is* the
@@ -40,31 +114,43 @@ def run_script(args: list[str], log_path: str | Path | None = None,
 
     `-u` matters: without it the child buffers its own stdout and the file stays
     empty for minutes even though it is open for writing.
+
+    `stdin` is **always** `DEVNULL`. Left unset the child inherits the server's
+    own stdin, which under `.mcp.json` is the JSON-RPC pipe from Claude Code --
+    a handle no scanner or backtest has any business holding, and one that makes
+    a stalled child indistinguishable from a slow one. None of these scripts
+    read stdin, so closing it can only turn a silent block into a prompt `EOF`.
     """
     env = jobs.child_env(run_id) if run_id else None
     cmd = [sys.executable, "-u", *args]
+    stall = ""
     if log_path is None:
         proc = subprocess.run(cmd, cwd=str(PROJECT_ROOT), capture_output=True,
                               text=True, encoding="utf-8", errors="replace",
-                              timeout=timeout, env=env)
+                              timeout=timeout, env=env,
+                              stdin=subprocess.DEVNULL)
         lines = (proc.stdout or "").splitlines()
         code = proc.returncode
     else:
-        with open(log_path, "w", encoding="utf-8", errors="replace") as sink:
-            proc = subprocess.run(cmd, cwd=str(PROJECT_ROOT), stdout=sink,
-                                  stderr=subprocess.STDOUT, timeout=timeout,
-                                  env=env)
-            code = proc.returncode
+        code, stall = _run_to_log(cmd, log_path, env, timeout,
+                                  first_output_timeout)
         lines = Path(log_path).read_text(
             encoding="utf-8", errors="replace").splitlines()
-    return {
+    out = {
         "command": " ".join(args),
         "exit_code": code,
         "output_tail": lines[-60:],
         "log_path": str(log_path) if log_path else None,
         "run_id": run_id,
-        "ok": code == 0,
+        "ok": code == 0 and not stall,
     }
+    if stall:
+        # `stalled` is the flag `jobs.submit` keys off to record the job as an
+        # error rather than a completed run -- distinct from a plain non-zero
+        # exit, which several of these scripts use to mean something specific.
+        out["stalled"] = True
+        out["error"] = stall
+    return out
 
 
 def _script_job(kind: str, args: list[str]) -> dict:

@@ -170,7 +170,17 @@ def submit(job_id: str, fn, *args, **kwargs) -> dict:
             value = fn(*args, **kwargs)
             with _LOCK:
                 record["result"] = value
-                record["status"] = DONE
+                # A watchdog kill is a failure, not a finished run. Without
+                # this `job_status` answers "done" for a child that never
+                # produced a line, and the caller has to read the result to
+                # find out otherwise. Keyed on `stalled` rather than `ok` so a
+                # plain non-zero exit -- which several of these scripts use to
+                # mean something specific -- still reports as done.
+                if isinstance(value, dict) and value.get("stalled"):
+                    record["status"] = ERROR
+                    record["error"] = value.get("error") or "stalled"
+                else:
+                    record["status"] = DONE
         except BaseException as exc:             # noqa: BLE001 -- a job must never
             with _LOCK:                          # take the server down with it
                 record["error"] = f"{type(exc).__name__}: {exc}"
@@ -214,16 +224,27 @@ def child_env(rid: str) -> dict:
     return env
 
 
-def _tail(path: str | None, lines: int) -> list[str]:
+def _tail(path: str | None, lines: int) -> tuple[list[str], str]:
+    """Last `lines` of the log, and a reason if it could not be read.
+
+    Missing and unreadable are different, and conflating them is what makes a
+    stalled run look like a starting one. A log that does not exist yet is
+    normal -- the run may not have logged its first step -- but a log that
+    exists and *cannot be read* (a sharing violation, a permission error) is a
+    fault, and returning `[]` for it tells the caller the same story as a quiet
+    run: "nothing yet, back off and poll again". Say which it was.
+
+    Still never raises: a status call must survive a broken log.
+    """
     if not path or lines <= 0:
-        return []
+        return [], ""
     try:
         text = Path(path).read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        # A log that does not exist yet is normal: the run may not have logged
-        # its first step. Never let a missing log fail a status call.
-        return []
-    return text.splitlines()[-lines:]
+    except FileNotFoundError:
+        return [], ""
+    except OSError as exc:                                       # noqa: BLE001
+        return [], f"log unreadable: {type(exc).__name__}: {exc}"
+    return text.splitlines()[-lines:], ""
 
 
 def _elapsed(record: dict) -> float:
@@ -245,6 +266,7 @@ def status(job_id: str, tail: int = 40) -> dict:
     if snapshot is None:
         return {"job_id": job_id, "status": "unknown",
                 "error": "no such job -- not in this session and no record on disk"}
+    lines, log_error = _tail(snapshot.get("log_path"), tail)
     out = {
         "job_id": job_id,
         "kind": snapshot["kind"],
@@ -252,8 +274,10 @@ def status(job_id: str, tail: int = 40) -> dict:
         "elapsed_s": _elapsed(snapshot),
         "run_id": snapshot.get("run_id"),
         "log_path": snapshot.get("log_path"),
-        "log_tail": _tail(snapshot.get("log_path"), tail),
+        "log_tail": lines,
     }
+    if log_error:
+        out["log_error"] = log_error
     for key in ("error", "note"):
         if snapshot.get(key):
             out[key] = snapshot[key]
@@ -279,7 +303,7 @@ def result(job_id: str) -> dict:
                 "elapsed_s": _elapsed(snapshot),
                 "log_path": snapshot.get("log_path"),
                 "note": snapshot.get("note"),
-                "log_tail": _tail(snapshot.get("log_path"), 40)}
+                "log_tail": _tail(snapshot.get("log_path"), 40)[0]}
     return {"job_id": job_id, "status": DONE,
             "elapsed_s": _elapsed(snapshot), "result": snapshot.get("result")}
 
