@@ -10,14 +10,20 @@ profit backtest, a threshold tuner).
 
 1. **Tier 1 — technical.** The S&P 500 screens (breakout, pullback; reclaim
    disabled). Records `Setup` (`full`/`partial`) + `Missing`.
-2. **Tier 2 — quality.** The `fast` half of the `quality` registry graded over
-   the tier-1 hits. Records `Quality` (the ⭐ badge) + `Quality Missing`.
+2. **Tier 2 — quality *and* exclusion.** The `fast` half of the `quality`
+   registry graded over the tier-1 hits. Records `Quality` (the ⭐ badge) +
+   `Quality Missing`, and — the "identify the losers" half of the thesis —
+   `Veto` + `Veto Reasons` (the 🚫 badge). The badge asks "is this a good
+   company"; the veto asks the much narrower "is this one visibly falling
+   over", and the two answer a missing value in **opposite** directions.
 3. **Tier 3 — the graded verdict.** The `deep` half of the same registry,
    scored 0-100 → a tier and a conviction, plus the financials chart and the
    `_facts.json` snapshot. **Deterministic and computed inside the nightly
    scan.** An *optional* narrative pass (the `deep-dive` skill over
    IBKR + SEC + web) writes the report and may revise the conviction by a
-   bounded `narrative_adj`; it never originates one.
+   bounded `narrative_adj` — now **clamped in code** (`clamp_narrative_adj`), not
+  merely asked for in `SKILL.md` — and it can neither originate nor clear a
+  veto: `record_verdict` re-forces the veto tier over whatever it reports.
 4. **Tier 4 — the virtual portfolio.** `portfolio_sim/` buys every recorded
    signal at the next open, tracks it, and grades which recorded attribute
    actually predicted the return. Tiers 1–3 decide what looks interesting;
@@ -101,6 +107,12 @@ python research_report.py verdicts MSFT JNJ
 # run_ondemand.bat adds the narrative deep dive and posts the card.
 python research_report.py scan PGR RL
 run_ondemand.bat PGR
+
+# Tier C on demand: every disaster symptom and moat proxy for one ticker, with
+# each value beside the threshold it was compared against, split into
+# tripped / clean / unknown. Collects every stage, so it reaches the SEC filing
+# flags the nightly scan cannot. No Discord. `--json` for the raw bundle.
+python research_report.py risk INTC MSFT
 
 # What a deep-dive did: one line per step, both halves merged. Written live,
 # so a run that died still has everything up to that point.
@@ -206,12 +218,36 @@ real send.
   `research.synthesis.dimensions` (a weighted 0-100 score → tier 3's anchor).
   They are one **registry** now, `config.json`'s `quality.parameters`. Each
   parameter declares where its value comes from (`source`, resolved by prefix:
-  `yahoo_info` / `yahoo_stmt` / `yahoo_deep` / `ibkr`), which weighted `group`
+  `yahoo_info` / `yahoo_stmt` / `yahoo_deep` / `ibkr` / `distress` / `moat` /
+  `sec_flags`), which weighted `group`
   it belongs to, when it is affordable to collect (`stage`: `fast` for every
   tier-1 hit, `deep` for gated candidates only), and optionally a `gate`
-  (`min`/`max`/`increasing`) and/or a `score` (`good`/`bad` anchors). One
-  `quality.evaluate` call yields both verdicts at once. Rules that hold it
-  together:
+  (`min`/`max`/`increasing`), a `score` (`good`/`bad` anchors) and/or
+  `veto: true`. One `quality.evaluate` call yields all three verdicts at once.
+  Rules that hold it together:
+  - **A `veto: true` parameter is an exclusion rule, not a stricter gate**, and
+    it is the whole of tier C ("identify the losers"). It is **skipped by
+    `gate_failures`** — the ⭐ set is already strict enough that most tickers
+    fail one, and letting vetoes in would make the badge mean two things — and
+    it inverts the missing-value rule: **a missing value never vetoes.**
+    Unverifiable quality does not earn the badge, but unverifiable is not
+    *proof of disaster*, and Yahoo leaves holes in nearly every company's
+    statements. The layer therefore **fails open**: an EDGAR outage, a
+    logged-out gateway or a statement Yahoo does not publish can only make it
+    quieter. The sharp edge: `scalar` rejects `bool`, so a flag stored as
+    `True`/`False` reads as *missing* and can never fire — every flag a
+    resolver produces must be an **`int` 0/1**. `validate` cannot catch that
+    (it sees config, not values); `tests/test_quality.py` and
+    `tests/test_derived.py` pin it instead.
+  - **A veto overrides the tier and never the score.** `_facts` forces
+    `quality.veto_tier` ("AVOID"), and `record_verdict` re-forces it over
+    whatever the narrative pass reports — the model may argue a rule is wrong
+    *in the report*, where a human reads it, but cannot relabel the row. The
+    conviction stays on the record so tier 4 can measure what the exclusion
+    cost. Vetoed signals are still alerted (sorted after the clean ones) and
+    still bought by tier 4, flagged — same argument as `exits.py` flagging
+    rather than closing: a ledger that declined to buy what it excluded would
+    answer the thesis by deleting the evidence.
   - **`enabled: false` makes a parameter invisible** — not gated, not scored,
     absent from `Quality Missing` and from the embed fields, and not counted in
     any weight. That is the flag's whole purpose: a company with no dividend
@@ -257,6 +293,51 @@ real send.
   and prose. This is load-bearing because that pass *is* an LLM — left
   unconstrained it will happily invent a plot or mistype a percentage, which is
   why `SKILL.md` forbids both explicitly.
+- **`derived.py` is the `distress` and `moat` resolvers** — Altman Z (the 1968
+  public-manufacturer form), Beneish M, interest coverage, cash runway, the
+  accrual and short-interest reads, and the ten moat-persistence proxies (ROIC
+  years above hurdle, ROIC/margin stability, gross-margin slope, revenue
+  consistency and CAGR, FCF conversion and margin, capex intensity, incremental
+  ROIC). Three rules:
+  - **It does no I/O except `statement_frames`**, which `quality.collect` calls
+    **once** and hands to `_statement_metrics`, `distress_metrics` and
+    `moat_metrics` alike. That sharing is why both new resolvers sit at the
+    `fast` stage and grade **every** tier-1 hit at zero extra network cost —
+    `yahoo_stmt` was already fetching those three statements. Don't let a
+    metric family fetch its own.
+  - **Cross-statement years are intersected, not zipped** (`_aligned`). A ratio
+    that mixes an income row with a balance column a year apart produces a
+    plausible number and no exception at all.
+  - **Row names go through `ROWS`, a candidate list per concept.** Yahoo's
+    statement labels drift by sector and release; the alternative to tolerating
+    that is a veto set that silently stops firing.
+  Two calibration facts worth keeping, both measured rather than assumed:
+  **Beneish flags growth**, not just manipulation (SGI and DSRI both rise with
+  it) — NVDA scores −1.13 against −2.1…−2.6 for MSFT/JNJ/KO/MCD/AVGO, so its
+  veto sits at −0.5 rather than the textbook −1.78 while the *score* still
+  penalises it. And **profit-without-cash must be a trailing consecutive run**
+  (`_trailing_divergence`), not a count over the window: scattered negative-CFO
+  years are structural for banks, and counting occurrences vetoed JPM on a
+  healthy balance sheet. Altman Z and interest coverage remain structurally low
+  for financials and anything with a captive finance arm — that is the formula,
+  not a bug, and the thresholds start loose pending tier-4 measurement.
+- **`sec.flags()` is the `sec_flags` resolver** — going-concern language, 8-K
+  item codes (1.03 bankruptcy, 2.04 acceleration, 3.01 delisting, 3.02
+  unregistered sale, 4.01 auditor change, 4.02 restatement, 5.02 officer
+  departure), `NT 10-K`/`NT 10-Q` late filings and `S-3` shelves. `deep` stage,
+  so EDGAR only runs for gated candidates. The going-concern scan **must keep
+  its negation guard**: the phrase appears in the negative far more often than
+  the positive ("no conditions were identified that raise substantial doubt"),
+  and a naive search flags most of the index. `_recent` and `_document_text`
+  cache per process so `flags` and `fetch_filing_sections` share one fetch.
+- **Tier 3 collects every stage, not just `deep`.** `deterministic_verdict`
+  passes `stage=None` to `quality.collect`, because `compute_quant_score`
+  grades `stage=None`. Collecting only `deep` — which is what it did until
+  2026-08-09 — left all eleven `fast` parameters resolving to None and silently
+  absent from the score: every `_facts.json` written before that date shows
+  `fast 0/11`, with `financial_quality` (the heaviest group at 0.24) running on
+  3 of its 8 metrics. If the two ever diverge again the symptom is the same and
+  just as quiet.
 - **The pretax-margin fallback lives only in `research_collect._financials`.**
   Yahoo publishes no `Operating Income` (nor `Gross Profit`) for banks and
   insurers, so the tier-3 chart falls back to `Pretax Income / Revenue` and
@@ -363,6 +444,11 @@ real send.
   writes `Verdict`/`Conviction` into a row tier 1 created hours earlier, so
   without the carry a same-day re-scan erases the verdict with no error at all.
   A test pins it.
+  This is also why the veto needs **two** column pairs. `Veto`/`Veto Reasons`
+  are written by the scan itself and must stay **out** of `protect=` (the
+  incoming value is the fresh one); `Deep Veto`/`Deep Veto Reasons` are written
+  hours later by tier 3 and are in `VERDICT_COLS` for the same reason the
+  verdict is. Folding them into one pair breaks whichever half you choose.
 - **A verdict is recorded in exactly one of two tables, by provenance.**
   `signals.csv` gets `Verdict`/`Conviction` on the ticker's existing row;
   `on_demand_scans_results.csv` holds one row per `(scan_date, ticker)` you
@@ -432,6 +518,16 @@ real send.
     rule as `quality.verdict_of`/`quality.has_values`. `mark` adds tier 3's
     `quant_score`, per-dimension `quant_*` and `qm_*` metrics from
     `<T>_<date>_facts.json`.
+    The exclusion side mirrors it with `vt_<key>` against a frozen
+    `Veto Rules`, plus a `vetoed` summary — but **the polarity is inverted**:
+    `qr_` is True when the rule *passed*, `vt_` is True when the veto
+    *tripped*. Its reason set is the **union of two columns written at two
+    different times** (`Veto Reasons` from the scan, `Deep Veto Reasons` from
+    tier 3), which is exactly why neither `vt_*` nor `vetoed` may go into
+    `mark_columns()`: `protect=` inherits the recorded value and drops the
+    incoming one, so a protected flag would pin itself to the fast-only answer
+    and could never learn about the deep half. `qr_*` is out for the same
+    reason. A test pins it.
   - **`exits.py` is the exit side, and it flags rather than closes.** The
     double-top rule writes `dt_*` onto the position and leaves `status` and
     every `ret_*d_%` running, so the fixed horizon and the signal exit stay two
@@ -474,6 +570,18 @@ real send.
     yet". Found by the 2026-07-27 nightly shakedown: a fresh install whose
     first night was quiet would have logged a ledger failure every night until
     something finally fired. A test pins it.
+  - **The veto is graded like everything else, which is the point of tracking
+    it.** `analyze` asks three new questions: `vetoed` as a two-group split
+    (reported **inverted**, "clean minus excluded", so a positive effect means
+    the exclusion earned its keep), a `_rule_rows` pass over `vt_*` for which
+    individual veto predicted the worst returns, and the matching `roadmap`
+    entries so all of it is legible before it has data. `vetoed` is in
+    `NOT_PREDICTORS` for the same reason `quality_pass` is: a 0/1 correlation
+    would file the same finding twice and give it two votes in the one FDR
+    family. `quant_moat` and `quant_risk` need no wiring — `QUANT_PREFIX`
+    already earns them the tercile-plus-correlation treatment — but they only
+    appear once a position **fills**, because `mark` skips pending rows before
+    it reaches `_tier3_columns`.
   - **`analyze` never over-claims.** Significance is keyed off a
     Benjamini–Hochberg `q_value` over the whole file, not a raw p — it runs
     dozens of tests on one thin sample, and ranking by p would reliably crown

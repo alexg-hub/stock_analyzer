@@ -37,6 +37,8 @@ import sma_reclaim
 from scanner_common import (
     DISCLAIMER,
     QUALITY_COL,
+    VETO_COL,
+    VETO_REASONS_COL,
     ScanResult,
     archive_scan,
     build_embeds,
@@ -157,6 +159,16 @@ def log_quality(results: list, cfg: dict) -> None:
              f"{passed}/{len(graded)} ticker(s) passed"
              + (f" -- {', '.join(t for t, ok in graded.items() if ok)}"
                 if passed else ""),
+             cfg=cfg)
+
+    # The exclusion half, logged separately because it answers a different
+    # question and is meant to be rare enough that every firing is worth a line.
+    vetoed = {t: list(v or []) for _, result in results
+              for t, v in result.hits.get(VETO_REASONS_COL, {}).items() if v}
+    log_step("VETO", "ok" if vetoed else "none",
+             f"{len(vetoed)}/{len(graded)} ticker(s) excluded"
+             + (" -- " + "; ".join(f"{t}: {quality.veto_text(r, cfg)}"
+                                   for t, r in vetoed.items()) if vetoed else ""),
              cfg=cfg)
 
 
@@ -389,6 +401,9 @@ def main(argv: list[str] | None = None) -> int:
         n_partial = len(result.hits) - n_full
         counts = f"{len(result.hits)} signal(s) ({n_full} full"
         counts += f", {n_partial} partial)" if n_partial else ")"
+        n_vetoed = int(result.hits.get(VETO_COL, pd.Series(dtype=bool)).sum())
+        if n_vetoed:
+            counts += f" -- {n_vetoed} excluded"
         summary.append(f"{result.title}: {counts}")
         per_screen = chart_files.get(module.CONFIG_KEY, {})
         embeds += build_embeds(module, result, cfg, per_screen)

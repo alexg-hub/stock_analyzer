@@ -64,11 +64,17 @@ def old_failures(row, fund_cfg):
 # --------------------------------------------------------------------------
 
 def check_gates(cfg, verbose=False) -> list[str]:
-    """Every old rule -> an enabled gate with the same thresholds."""
+    """Every old rule -> an enabled gate with the same thresholds.
+
+    `veto` parameters are excluded even though they carry a gate: they are an
+    exclusion rule, not a badge gate, and `gate_failures` skips them. Counting
+    them here would report every veto as a new badge gate and drown the one
+    thing this check exists to prove -- that the ⭐ decision is unchanged.
+    """
     problems = []
     old = (cfg.get("fundamentals", {}).get("quality", {}).get("rules") or {})
     new = {k: s for k, s in quality.parameters(cfg, enabled_only=False).items()
-           if s.get("gate")}
+           if s.get("gate") and not s.get("veto")}
 
     for key, rule in old.items():
         spec = new.get(key)

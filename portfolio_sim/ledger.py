@@ -23,9 +23,11 @@ from datetime import datetime, timezone
 import pandas as pd
 
 from scanner_common import (
+    DEEP_VETO_REASONS_COL,
     QUALITY_COL,
     QUALITY_MISSING_COL,
     VERDICT_COL,
+    VETO_REASONS_COL,
     merge_history_csv,
     on_demand_csv_path,
     positions_csv_path,
@@ -54,6 +56,25 @@ STATUS_CLOSED = "closed"     # every horizon has an exit bar
 QUALITY_RULES_COL = "Quality Rules"
 
 QR_PREFIX = "qr_"
+
+# The same freeze for the exclusion rules: which vetoes existed when this
+# signal was recorded. A veto invented later must not read as "clean" on an
+# older position, exactly as a quality rule invented later must not read as
+# "passed".
+VETO_RULES_COL = "Veto Rules"
+
+# Per-veto flags. **The polarity is the opposite of `qr_`**: a `qr_` flag is
+# True when the rule *passed*, a `vt_` flag is True when the veto *tripped*.
+# Both read naturally in their own sentence ("passing this rule was worth
+# ...", "tripping this veto was worth ...") and the analysis labels its groups
+# accordingly, but the two prefixes must never be treated interchangeably.
+#
+# Neither prefix belongs in `mark_columns()`. Both are derived from the source
+# row on every `sync`, so protecting them would pin them to their first value
+# -- and since the `deep` half of the veto set is written to `signals.csv`
+# hours after the position is opened, a protected `vt_` flag could never learn
+# about it.
+VT_PREFIX = "vt_"
 
 
 def horizon_cols(horizon: int) -> dict[str, str]:
@@ -216,6 +237,36 @@ def _quality_rule_flags(row: dict, rules: list[str]) -> dict:
     return {f"{QR_PREFIX}{key}": key not in failed for key in keys}
 
 
+def veto_reasons_of(row: dict) -> list | None:
+    """Every veto this row tripped, both stages merged. None = not evaluated.
+
+    The scan answers the `fast` rules and tier 3 answers the `deep` ones hours
+    later into the same signal row, so the position's real exclusion set is the
+    union of two columns written at two different times. Returns None only when
+    *neither* was ever written -- "the layer did not run" is not "came back
+    clean", the same distinction `_quality_rule_flags` keeps.
+    """
+    parts = [_as_list(row.get(VETO_REASONS_COL)),
+             _as_list(row.get(DEEP_VETO_REASONS_COL))]
+    if all(p is None for p in parts):
+        return None
+    merged = [k for part in parts for k in (part or []) if isinstance(k, str)]
+    return list(dict.fromkeys(merged))
+
+
+def _veto_rule_flags(row: dict, rules: list[str]) -> dict:
+    """Per-veto tripped/clean, exploded from the recorded reason list.
+
+    True = tripped, False = clean, absent = not evaluated. Note the polarity is
+    the inverse of `_quality_rule_flags`; see `VT_PREFIX`.
+    """
+    tripped = veto_reasons_of(row)
+    if tripped is None:
+        return {}
+    keys = list(dict.fromkeys(list(rules) + tripped))
+    return {f"{VT_PREFIX}{key}": key in tripped for key in keys}
+
+
 # --------------------------------------------------------------------------
 # Building position rows
 # --------------------------------------------------------------------------
@@ -230,7 +281,12 @@ def _position_rows(frame: pd.DataFrame, source: str, cfg: dict,
     # never rewrite a past finding.
     configured = [k for k, spec in (cfg.get("quality", {})
                                     .get("parameters") or {}).items()
-                  if spec.get("enabled", True) and spec.get("gate")]
+                  if spec.get("enabled", True) and spec.get("gate")
+                  and not spec.get("veto")]
+    configured_vetoes = [k for k, spec in (cfg.get("quality", {})
+                                           .get("parameters") or {}).items()
+                         if spec.get("enabled", True) and spec.get("gate")
+                         and spec.get("veto")]
     horizons = horizons_of(cfg.get("portfolio", {}))
     opened_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     entry_rule = cfg.get("portfolio", {}).get("entry", "next_open")
@@ -249,6 +305,8 @@ def _position_rows(frame: pd.DataFrame, source: str, cfg: dict,
         # The rule set in force when this signal was graded: whatever was
         # recorded the first time we saw it, else what config says now.
         rules = _as_list(frozen.get(key, {}).get(QUALITY_RULES_COL)) or configured
+        veto_rules = (_as_list(frozen.get(key, {}).get(VETO_RULES_COL))
+                      or configured_vetoes)
 
         was = frozen.get(key, {})
         row = {
@@ -279,6 +337,16 @@ def _position_rows(frame: pd.DataFrame, source: str, cfg: dict,
         row.update(_quality_rule_flags(record, rules))
         row["quality_pass"] = as_bool(record.get(QUALITY_COL))
         row["deep_dived"] = bool(text_of(record.get(VERDICT_COL)))
+
+        # The exclusion side. A vetoed signal is opened and tracked like any
+        # other -- flagged, never skipped. Tier 4 exists to check whether the
+        # exclusion was right, and a ledger that declined to buy the names it
+        # excluded would answer that question by deleting the evidence. Same
+        # argument as `exits.py` flagging rather than closing a position.
+        row[VETO_RULES_COL] = json.dumps(veto_rules)
+        row.update(_veto_rule_flags(record, veto_rules))
+        tripped = veto_reasons_of(record)
+        row["vetoed"] = None if tripped is None else bool(tripped)
         rows.append(row)
     return rows
 
@@ -292,7 +360,7 @@ def _frozen_by_key(positions: pd.DataFrame) -> dict:
     """Values carried from the row already on file, keyed by position."""
     if positions.empty:
         return {}
-    wanted = [c for c in (QUALITY_RULES_COL, "opened_at", "status")
+    wanted = [c for c in (QUALITY_RULES_COL, VETO_RULES_COL, "opened_at", "status")
               if c in positions.columns]
     if not wanted or not set(POSITION_KEYS) <= set(positions.columns):
         return {}

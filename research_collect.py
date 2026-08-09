@@ -310,6 +310,34 @@ def _financials(tk: yf.Ticker, years: int = 4, quarters: int = 4) -> dict:
     }
 
 
+def _split_factor(tk: yf.Ticker, since) -> float:
+    """Cumulative split ratio applied since `since`, or 1.0 when there was none.
+
+    Multiplying an old share count by this restates it onto today's basis, so a
+    2-for-1 stops reading as 100% dilution. Returns 1.0 on any failure -- an
+    unadjusted comparison is the behaviour that already existed, and losing the
+    metric entirely would be worse than losing the adjustment.
+    """
+    try:
+        splits = getattr(tk, "splits", None)
+        if not isinstance(splits, pd.Series) or splits.empty:
+            return 1.0
+        since = pd.Timestamp(since)
+        index = splits.index
+        if getattr(index, "tz", None) is not None:
+            since = since.tz_localize(index.tz) if since.tzinfo is None \
+                else since.tz_convert(index.tz)
+        recent = splits[index > since].dropna()
+        factor = 1.0
+        for ratio in recent:
+            if isinstance(ratio, (int, float)) and ratio > 0:
+                factor *= float(ratio)
+        return factor or 1.0
+    except Exception as exc:  # noqa: BLE001 - a missing split history is not an error
+        log_step("YAHOO", "failed", f"splits: {exc}")
+        return 1.0
+
+
 def _ownership(tk: yf.Ticker, info: dict) -> dict:
     top = None
     ih = _df(getattr(tk, "institutional_holders", None))
@@ -327,13 +355,23 @@ def _ownership(tk: yf.Ticker, info: dict) -> dict:
                 break
 
     # Buyback: net change in share count over the available window.
+    #
+    # `get_shares_full` reports **raw** counts, so a stock split doubles the
+    # series and reads as 100% dilution. Fastenal's 2025 2-for-1 measured
+    # +100.4% against an actual buyback. That corrupts the `buyback_2y` score
+    # for every splitting company -- and splits cluster in exactly the names a
+    # breakout screener surfaces -- so the earlier count is restated onto
+    # today's share basis before the comparison.
     shares_change_pct = None
     try:
-        sf = tk.get_shares_full(start=(pd.Timestamp.now() - pd.Timedelta(days=730)).date().isoformat())
+        start = (pd.Timestamp.now() - pd.Timedelta(days=730)).date().isoformat()
+        sf = tk.get_shares_full(start=start)
         if isinstance(sf, pd.Series) and len(sf.dropna()) >= 2:
             s = sf.dropna()
             first, latest = float(s.iloc[0]), float(s.iloc[-1])
-            if first:
+            factor = _split_factor(tk, s.index[0])
+            if first and factor:
+                first *= factor
                 shares_change_pct = round(100 * (latest - first) / first, 2)
     except Exception as exc:  # noqa: BLE001
         log_step("YAHOO", "failed", f"shares_full: {exc}")

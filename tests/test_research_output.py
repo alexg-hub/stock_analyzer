@@ -30,6 +30,7 @@ import pandas as pd
 from _harness import Checks
 
 import charts
+import derived
 import research_collect
 import research_report
 import run_scanners
@@ -134,14 +135,59 @@ c.ok("no statements at all yields empty lists, not an exception",
      empty == {"annual": [], "quarterly": []})
 
 # --------------------------------------------------------------------------
+c.section("share-count change is restated across stock splits")
+
+# `get_shares_full` reports raw counts, so a 2-for-1 reads as 100% dilution --
+# measured on Fastenal's 2025 split, which vetoed a company that was actually
+# buying stock back. Splits cluster in exactly the names a breakout screener
+# surfaces, so this has to survive.
+SPLIT_DAY = pd.Timestamp("2025-06-01")
+
+
+class SplitTicker:
+    def __init__(self, series, splits):
+        self._series, self.splits = series, splits
+
+    def get_shares_full(self, start=None):
+        return self._series
+
+
+shares = pd.Series([100.0, 100.0, 200.0, 199.0],
+                   index=pd.to_datetime(["2024-06-01", "2025-05-01",
+                                         "2025-06-02", "2026-01-01"]))
+split = pd.Series([2.0], index=pd.to_datetime([SPLIT_DAY]))
+adjusted = research_collect._ownership(SplitTicker(shares, split), {})
+c.close("a 2-for-1 split is divided out, not read as 100% dilution",
+        adjusted["shares_change_2y_pct"], -0.5, tol=1e-6)
+
+no_split = research_collect._ownership(
+    SplitTicker(shares, pd.Series(dtype=float)), {})
+c.close("with no split the raw comparison is unchanged",
+        no_split["shares_change_2y_pct"], 99.0, tol=1e-6)
+
+c.close("the split factor compounds over several splits",
+        research_collect._split_factor(
+            SplitTicker(shares, pd.Series(
+                [2.0, 3.0], index=pd.to_datetime(["2025-06-01", "2025-09-01"]))),
+            pd.Timestamp("2024-01-01")), 6.0, tol=1e-9)
+c.close("splits before the window are ignored",
+        research_collect._split_factor(SplitTicker(shares, split),
+                                       pd.Timestamp("2025-07-01")), 1.0, tol=1e-9)
+c.ok("a ticker with no split history is tolerated",
+     research_collect._split_factor(SplitTicker(shares, None),
+                                    pd.Timestamp("2024-01-01")) == 1.0)
+
+# --------------------------------------------------------------------------
 c.section("tier 2 is untouched by the pretax fallback")
 
 stmt_keys = {"operating_margin", "profit_margin", "fcf", "roe", "roic"}
-tier2_bank = quality._statement_metrics(financial_sector(), stmt_keys, 4, {})
+tier2_bank = quality._statement_metrics(
+    derived.statement_frames(financial_sector()), stmt_keys, 4, {})
 c.ok("_statement_metrics still yields no operating margin for a bank",
      not tier2_bank.get("operating_margin"),
      "the quality gates must keep their strict Operating-Income definition")
-tier2_ind = quality._statement_metrics(industrial(), stmt_keys, 4, {})
+tier2_ind = quality._statement_metrics(
+    derived.statement_frames(industrial()), stmt_keys, 4, {})
 c.ok("_statement_metrics still computes it where the row exists",
      bool(tier2_ind.get("operating_margin")),
      f"{tier2_ind.get('operating_margin')}")
@@ -529,6 +575,53 @@ c.ok("the flagged verdict is still recorded as the model set it",
      .loc[TICK, scanner_common.VERDICT_COL] == "STRONG",
      "a drift warning informs; it never rewrites the judgment")
 
+# --------------------------------------------------------------------------
+# The model contributes exactly one number to tier 3, and until now nothing in
+# Python held it to its documented bound -- `narrative_adj_max` was enforced by
+# the skill file asking nicely. Everything else about the verdict is
+# deterministic precisely so a model cannot originate one.
+limit = od_cfg["research"]["synthesis"]["narrative_adj_max"]
+_facts_file("DDD", research_report.SOURCE_ON_DEMAND)
+runaway = {"ticker": "DDD", "scan_date": scan_date, "tier": "STRONG",
+           "conviction": 99, "narrative_adj": limit + 40, "thesis": "x"}
+buf, _stderr = io.StringIO(), sys.stderr
+sys.stderr = buf
+try:
+    _quiet(research_report.record_verdict, runaway, od_cfg)
+finally:
+    sys.stderr = _stderr
+c.ok("an out-of-range narrative adjustment is clamped, not honoured",
+     runaway["narrative_adj"] == limit, f"-> {runaway['narrative_adj']}")
+c.ok("...the conviction is rebuilt from the recorded quant score",
+     runaway["conviction"] == round(62.0 + limit),
+     f"{runaway['conviction']} vs {round(62.0 + limit)}")
+c.ok("...the tier follows the rebuilt conviction",
+     runaway["tier"] == research_report.tier_for(runaway["conviction"], od_cfg))
+c.ok("...and the clamp is visible, never silent", "WARNING" in buf.getvalue(),
+     buf.getvalue().strip()[:90] or "no warning emitted")
+
+adj_ok = {"ticker": "DDD", "scan_date": scan_date, "tier": "PASS",
+          "conviction": 40, "narrative_adj": limit, "thesis": "x"}
+_quiet(research_report.record_verdict, adj_ok, od_cfg)
+c.ok("an adjustment exactly at the bound is left alone",
+     adj_ok["narrative_adj"] == limit and adj_ok["conviction"] == 40,
+     "the bound is inclusive; clamping it would move a legal verdict")
+
+# A veto is a deterministic rule over collected values. The skill may override
+# a tier "with an explicit written justification", and that latitude must not
+# extend to talking the pipeline out of an exclusion.
+_facts_file("EEE", research_report.SOURCE_ON_DEMAND, veto=True,
+            veto_reasons=["altman_z"], veto_text="Altman Z")
+vetoed = {"ticker": "EEE", "scan_date": scan_date, "tier": "STRONG",
+          "conviction": 88, "narrative_adj": 0, "thesis": "x"}
+_quiet(research_report.record_verdict, vetoed, od_cfg)
+c.ok("a vetoed ticker keeps the veto tier whatever the verdict claimed",
+     vetoed["tier"] == quality.veto_tier(od_cfg),
+     f"reported STRONG -> recorded {vetoed['tier']}")
+c.ok("...but the conviction it scored is left on the record",
+     vetoed["conviction"] == 88,
+     "tier 4 needs the number to measure what the exclusion cost")
+
 off = json.loads(json.dumps(od_cfg))
 off["research"]["history"]["enabled"] = False
 c.ok("history.enabled false disables both tables",
@@ -754,6 +847,23 @@ except UnicodeEncodeError:
 c.ok("the badge is genuinely unencodable in the console codepage",
      not narrow_ok,
      "if this ever passes the guard below has stopped testing anything")
+
+# The veto badge is the same trap on the exclusion side: it reaches stdout
+# through the same cards and the same redirected `.bat` output.
+veto_fields = research_report._verdict_fields(
+    {"quality": True, "quant_score": 50.0, "veto": True,
+     "veto_text": "Altman Z"}, {"ticker": "AAA"})
+veto_rendered = " ".join(f["name"] + f["value"] for f in veto_fields)
+c.ok("an excluded card names the rules it tripped",
+     "Altman Z" in veto_rendered, veto_rendered[:60])
+narrow = io.TextIOWrapper(io.BytesIO(), encoding="cp1255", errors="strict")
+try:
+    narrow.write(veto_rendered)
+    veto_narrow_ok = True
+except UnicodeEncodeError:
+    veto_narrow_ok = False
+c.ok("the veto badge is unencodable in that codepage too", not veto_narrow_ok,
+     "the exclusion side reaches stdout through the same redirected .bat")
 
 safe = io.TextIOWrapper(io.BytesIO(), encoding="cp1255", errors="strict")
 _stdout = sys.stdout

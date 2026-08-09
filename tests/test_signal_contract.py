@@ -465,8 +465,12 @@ for module, compute, strategy in screens(cfg):
 # keeps working at any thresholds, which is the whole point.
 c.section("tier 2: quality verdict, archive, deep-dive gate")
 
+# Badge gates only. A `veto` parameter also carries a gate but is a different
+# rule family: it is skipped by `gate_failures`, never appears in
+# `Quality Missing`, and answers a missing value the opposite way. It gets its
+# own section below.
 gated = {k: s for k, s in quality.parameters(cfg, quality.STAGE_FAST).items()
-         if s.get("gate")}
+         if s.get("gate") and not s.get("veto")}
 rules = {k: s["gate"] for k, s in gated.items()}
 
 
@@ -600,6 +604,41 @@ c.ok("a NaN fundamental becomes null and fails its rule",
 broken_rows = [r for r in graded if r[QUALITY_MISSING_COL] == [broken_key]]
 c.ok("breaking one rule fails exactly that rule",
      bool(broken_rows), f"{len(broken_rows)} row(s) failing only {broken_key}")
+
+# --------------------------------------------------------------------------
+# The exclusion layer. Its one load-bearing asymmetry against the badge gates
+# above: a value we could not collect *fails* a badge gate and *does not* trip
+# a veto. Yahoo leaves holes in nearly every company's statements, so a veto
+# that fired on missing data would exclude most of the universe.
+veto_specs = {k: s for k, s in quality.parameters(cfg, quality.STAGE_FAST).items()
+              if s.get("veto")}
+c.ok("every veto parameter carries a gate to trip",
+     all(s.get("gate") for s in veto_specs.values()),
+     f"{len(veto_specs)} veto rule(s) at the fast stage")
+
+empty_row = {quality.label_of(k, s): None for k, s in veto_specs.items()}
+c.ok("a missing value never vetoes",
+     quality.veto_failures(quality.row_values(empty_row, cfg, quality.STAGE_FAST),
+                           cfg, quality.STAGE_FAST) == [],
+     "unverifiable quality does not earn the badge, but unverifiable is not "
+     "proof of disaster")
+c.ok("...while the same missing value still fails every badge gate",
+     set(quality.gate_failures(quality.row_values(fundamentals_row(), cfg,
+                                                  quality.STAGE_FAST),
+                               cfg, quality.STAGE_FAST)) == set()
+     and set(quality.gate_failures({}, cfg, quality.STAGE_FAST)) == set(rules),
+     "the two rule families answer a missing value in opposite directions")
+c.ok("no veto parameter leaks into the badge's failed list",
+     not (set(veto_specs) & set(quality.gate_failures({}, cfg,
+                                                      quality.STAGE_FAST))),
+     "most tickers already fail a badge gate; vetoes must not make it stricter")
+
+# A bool is not a number to `scalar`, so a flag stored as True/False reads as
+# missing -- and under the rule above, a missing value never vetoes. Any
+# resolver that returns a bool flag would look correct in config and silently
+# never fire.
+c.ok("a bool flag would read as missing, so flags must be ints",
+     quality.scalar(True) is None and quality.scalar(1) == 1.0)
 
 badge = quality.badge(q_cfg)
 badged = {e["title"].split()[1].split("(")[0] for e in q_embeds

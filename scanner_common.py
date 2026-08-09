@@ -58,6 +58,11 @@ DISCLAIMER = "_Research analysis, not investment advice._"
 # screen's own EMBED_COLOR) -- one card type, tier visible at a glance.
 PARTIAL_COLOR = 0x898781
 
+# Side bar for an excluded signal. Deliberately the same red `exits.py` uses:
+# both mean "this is the sell side of the ledger", and one colour for one idea
+# is easier to read at a glance than a new hue per module.
+VETO_COLOR = 0xC0392B
+
 # Reserved column (added by quality.fetch_fast) holding the company name for
 # the embed titles; not a registry parameter, so it never renders as an inline
 # field.
@@ -71,6 +76,25 @@ COMPANY_COL = "Company"
 # needing the engine.
 QUALITY_COL = "Quality"
 QUALITY_MISSING_COL = "Quality Missing"
+
+# The exclusion verdict, written by the same `quality.annotate` pass. Separate
+# from the badge on purpose: the badge asks "is this a good company" and most
+# tickers fail at least one of its gates, whereas a veto asks the much narrower
+# "is this one visibly falling over" and is meant to fire rarely. Folding the
+# two together would make every ordinary name look like a disaster.
+VETO_COL = "Veto"
+VETO_REASONS_COL = "Veto Reasons"
+VETO_COLS = [VETO_COL, VETO_REASONS_COL]
+
+# The `deep`-stage half of the same verdict, written hours later by tier 3 (SEC
+# filing flags, Beneish, the liquidity pair). It needs its own columns rather
+# than extending the pair above precisely *because* of when it is written:
+# `merge_history_csv`'s `protect` inherits the recorded value and drops the
+# incoming one, which is right for a column only tier 3 fills in and wrong for
+# one the scan itself just computed.
+DEEP_VETO_COL = "Deep Veto"
+DEEP_VETO_REASONS_COL = "Deep Veto Reasons"
+DEEP_VETO_COLS = [DEEP_VETO_COL, DEEP_VETO_REASONS_COL]
 
 
 # --------------------------------------------------------------------------
@@ -567,6 +591,13 @@ def build_embeds(module, result: ScanResult, cfg: dict,
     falling back to re-grading only when the column is absent -- so a card and
     the hand-off row behind it can never disagree.
 
+    A **vetoed** signal keeps its card rather than being dropped. Two reasons:
+    the exclusion is the most interesting thing the scan found about that
+    ticker, and tier 4 goes on tracking it, so silently hiding it here would
+    leave the ledger recording positions the alert never mentioned. It gets the
+    veto badge, the muted side bar, and a field naming the rules it tripped --
+    and it sorts **after** the clean signals, so the eye lands on what survived.
+
     `quality` is imported here rather than at module scope so the dependency
     stays one-way: `quality.py` needs this module's logging, statement access
     and formatting, and nothing here needs the registry except this one call.
@@ -574,12 +605,20 @@ def build_embeds(module, result: ScanResult, cfg: dict,
     import quality
 
     badge = quality.badge(cfg)
+    veto_badge_str = quality.veto_badge(cfg)
 
     def passed(row) -> bool:
         value = row.get(QUALITY_COL)
         if value is not None and not (isinstance(value, float) and pd.isna(value)):
             return bool(value)
         return bool(quality.verdict_of(row, cfg)[0])
+
+    def veto_of(row) -> list:
+        """The recorded veto reasons, re-graded only when nothing was recorded."""
+        recorded = row.get(VETO_REASONS_COL)
+        if isinstance(recorded, list):
+            return recorded
+        return quality.veto_of(row, cfg)[1]
 
     def label(ticker, row) -> str:
         """`TICKER (Company Name)` when the name is available, else the ticker."""
@@ -591,9 +630,11 @@ def build_embeds(module, result: ScanResult, cfg: dict,
             return f"{ticker} ({name})"
         return str(ticker)
 
-    embeds = []
+    clean, excluded = [], []
     for ticker, row in result.hits.iterrows():
-        prefix = f"{badge} " if badge and passed(row) else ""
+        vetoes = veto_of(row)
+        prefix = f"{veto_badge_str} " if vetoes and veto_badge_str \
+            else (f"{badge} " if badge and passed(row) else "")
         partial = row.get("Setup") == "partial"
         title = f"{prefix}{label(ticker, row)} -- {result.title}"
         if partial:
@@ -602,16 +643,22 @@ def build_embeds(module, result: ScanResult, cfg: dict,
         missing = row.get("Missing")
         if partial and isinstance(missing, str) and missing:
             description += f"\n**Missing:** {missing}"
+        fields = quality.embed_fields(row, cfg)
+        if vetoes:
+            fields.insert(0, {"name": "Veto",
+                              "value": quality.veto_text(vetoes, cfg),
+                              "inline": False})
         embed = {
             "title": title,
             "description": description,
-            "color": PARTIAL_COLOR if partial else module.EMBED_COLOR,
-            "fields": quality.embed_fields(row, cfg),
+            "color": VETO_COLOR if vetoes
+                     else (PARTIAL_COLOR if partial else module.EMBED_COLOR),
+            "fields": fields,
         }
         if ticker in chart_files:
             embed["image"] = {"url": f"attachment://{chart_files[ticker].name}"}
-        embeds.append(embed)
-    return embeds
+        (excluded if vetoes else clean).append(embed)
+    return clean + excluded
 
 
 def _embed_size(embed: dict) -> int:
@@ -798,7 +845,7 @@ ON_DEMAND_KEYS = ["scan_date", "ticker"]
 # rewrite of a history table has to carry these forward; see merge_history_csv.
 VERDICT_COL = "Verdict"
 CONVICTION_COL = "Conviction"
-VERDICT_COLS = [VERDICT_COL, CONVICTION_COL]
+VERDICT_COLS = [VERDICT_COL, CONVICTION_COL] + DEEP_VETO_COLS
 
 
 def history_dir(cfg: dict, create: bool = True) -> Path:

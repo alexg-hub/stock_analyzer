@@ -35,7 +35,9 @@ c = Checks("quality engine")
 cfg = config()
 
 GATED = {k: s for k, s in quality.parameters(cfg, quality.STAGE_FAST).items()
-         if s.get("gate")}
+         if s.get("gate") and not s.get("veto")}
+VETOES = {k: s for k, s in quality.parameters(cfg, quality.STAGE_FAST).items()
+          if s.get("veto")}
 SCORED = {k: s for k, s in quality.parameters(cfg).items() if s.get("score")}
 
 
@@ -79,6 +81,73 @@ c.ok("the score is a percentage", 0 <= (result.score or 0) <= 100,
 c.ok("evaluate is idempotent",
      quality.evaluate(base, cfg, quality.STAGE_FAST).as_dict()
      == result.as_dict())
+
+# --------------------------------------------------------------------------
+c.section("the veto: an exclusion rule, not a stricter badge")
+
+# The badge and the veto share the gate arithmetic and disagree, deliberately,
+# about what a missing value means. This is the single most load-bearing rule
+# in the exclusion layer: Yahoo leaves holes in nearly every company's
+# statements, so a veto that fired on missing data would exclude most of the
+# universe and be worse than no veto at all.
+nothing = {k: None for k in quality.parameters(cfg, quality.STAGE_FAST)}
+c.ok("a missing value never vetoes",
+     quality.veto_failures(nothing, cfg, quality.STAGE_FAST) == [],
+     f"{len(VETOES)} veto rule(s) at the fast stage, none tripped on no data")
+c.ok("...while the same missing value fails every badge gate",
+     set(quality.gate_failures(nothing, cfg, quality.STAGE_FAST)) == set(GATED),
+     "unverifiable quality does not earn the badge; unverifiable is not "
+     "proof of disaster")
+
+c.ok("a veto parameter never appears in the badge's failed list",
+     not (set(VETOES) & set(quality.gate_failures(nothing, cfg,
+                                                  quality.STAGE_FAST))),
+     "most tickers already fail a badge gate; vetoes must not make it stricter")
+
+if VETOES:
+    # Break exactly one veto, using the rule's own bound (compares are strict,
+    # so the bound itself trips it) -- no magic numbers, any threshold.
+    v_key, v_spec = next(iter(VETOES.items()))
+    v_gate = v_spec["gate"]
+    tripping = v_gate.get("min", v_gate.get("max"))
+    tripped = quality.evaluate({**base, v_key: tripping}, cfg, quality.STAGE_FAST)
+    c.ok("a value on the wrong side of the bound trips its veto",
+         tripped.vetoed and v_key in tripped.veto_reasons,
+         f"{v_key} at its own bound {tripping} -> {tripped.veto_reasons}")
+    c.ok("...and does not change the badge",
+         tripped.passed == quality.evaluate(base, cfg,
+                                            quality.STAGE_FAST).passed)
+    c.ok("a clean fixture is not vetoed",
+         quality.evaluate(base, cfg, quality.STAGE_FAST).vetoed is False)
+
+# Two conjunctions that exist because the single-leg version fired on healthy
+# companies in the 2026-08-09 shakedown. Both are pinned here because the
+# failure mode is silent: the veto looks configured and quietly excludes an
+# entire business model.
+thin = {"currentRatio": 0.54, "quickRatio": 0.48}
+burning = {"annual": [{"fcf": -1e9}]}
+earning = {"annual": [{"fcf": 2.6e9}]}
+c.ok("thin liquidity alone is not distress",
+     quality._liquidity_distress(thin, earning) == 0,
+     "Marriott 0.54/0.48 and HP 0.79/0.44 both generate billions -- a "
+     "negative-working-capital business is financed by its suppliers")
+c.ok("thin liquidity WITH cash burn is",
+     quality._liquidity_distress(thin, burning) == 1)
+c.ok("a bank with neither ratio is not evaluated, not excluded",
+     quality._liquidity_distress({}, burning) is None)
+c.ok("no cash-flow statement means no verdict either",
+     quality._liquidity_distress(thin, {}) is None)
+c.ok("the liquidity flag is an int, never a bool",
+     isinstance(quality._liquidity_distress(thin, burning), int)
+     and not isinstance(quality._liquidity_distress(thin, burning), bool))
+
+# `scalar` rejects bools, so a flag stored as True/False reads as *missing* --
+# and a missing value never vetoes. A resolver returning a bool flag would look
+# entirely correct in config and silently never fire. `derived._flag` returns
+# int for exactly this reason.
+c.ok("a bool reads as missing, so every flag must be an int",
+     quality.scalar(True) is None and quality.scalar(False) is None
+     and quality.scalar(1) == 1.0 and quality.scalar(0) == 0.0)
 
 # --------------------------------------------------------------------------
 c.section("`enabled: false` makes a parameter invisible")
@@ -283,6 +352,14 @@ def _inert(variant):
         "enabled": True, "label": "Inert", "source": "yahoo_info.x",
         "group": first_group, "stage": "fast", "format": "number"}
 
+
+veto_no_gate = copy.deepcopy(cfg)
+veto_no_gate["quality"]["parameters"]["_probe"] = {
+    "enabled": True, "source": "yahoo_info.probe", "group": next(iter(quality.groups(cfg))),
+    "stage": "fast", "veto": True, "score": {"good": 1, "bad": 0}}
+c.ok("a veto with no gate is caught",
+     any("veto" in p for p in quality.validate(veto_no_gate)),
+     "a score can never exclude anything, so the rule would be decorative")
 
 c.ok("a parameter with neither a gate nor a score is caught",
      problems(_inert), "it would be collected and never used")

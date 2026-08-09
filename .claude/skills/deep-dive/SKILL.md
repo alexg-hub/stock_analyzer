@@ -117,21 +117,48 @@ tier 2 said about it. If the gate holds everything back, say so and offer
    **Business** (Item 1) to corroborate the moat; cross-check the **XBRL** figures
    against Yahoo. If a section is `n/a` or stubby, `WebFetch` that filing's `url` for
    the item. Quote sparingly with attribution.
-5. **Grade the qualitative dimensions** (your judgment, and the only thing not
+5. **Disaster symptoms** (`Bash(python research_report.py risk TICKER)`): the
+   deterministic exclusion layer, rule by rule, with each value beside the
+   threshold it was compared against. Read it in three parts:
+   - **`tripped`** — this ticker is excluded. Corroborate each one from the
+     filings and the news, and say in the report whether the rule caught
+     something real or fired on a sector artifact (Altman Z and interest
+     coverage are structurally low for banks, insurers and anything with a
+     captive finance arm; Beneish rises with growth alone).
+   - **`clean`** — passed on the merits.
+   - **`unknown`** — no value was collected, so **the rule did not fire**. A
+     veto never fires on missing data. Treat these as unexamined, not as safe,
+     and if one looks material, go and check the filing yourself.
+
+   **You may not originate a veto and you may not clear one.** The exclusion is
+   a deterministic rule over collected values; `record_verdict` re-forces the
+   veto tier over whatever you report, so arguing with it in the verdict field
+   changes nothing. If you believe a rule is wrong, say so *in the report* —
+   that is what a human reads before retuning the threshold. A symptom you find
+   that no rule covers goes in the bear case as a cited observation, clearly
+   labelled as your judgment rather than a measurement.
+6. **Grade the qualitative dimensions** (your judgment, and the only thing not
    already in the quant score): moat width/durability, growth runway,
-   earnings/management quality, catalysts vs risks. Decide a **narrative
+   earnings/management quality, catalysts vs risks. The `moat` group in the
+   quant breakdown is now a **measured** score — ROIC persistence, margin
+   stability and trend, growth consistency, cash conversion, capital intensity
+   — so your job is to explain *why* those numbers look as they do against the
+   ranked competitors and Item 1, not to restate them. Decide a **narrative
    adjustment** in `[-N, +N]` where
    `N = config research.synthesis.narrative_adj_max`, with a one-line justification
    for each material ± move. An adjustment of **0 is a legitimate answer** — the
    recorded verdict already stands, and moving it needs a reason you can write
    down.
-6. **Verdict.** `conviction = clamp(round(quant.score + narrative_adj), 0, 100)`;
+7. **Verdict.** `conviction = clamp(round(quant.score + narrative_adj), 0, 100)`;
    `tier = research_report.tier_for(conviction, cfg)` (config bands STRONG/WATCH/PASS).
-   You may override the tier **only** with an explicit written justification.
+   You may override the tier **only** with an explicit written justification —
+   and never on a vetoed ticker, whose tier is forced to the veto label.
+   The adjustment bound is now enforced in code (`clamp_narrative_adj`): an
+   out-of-range value is clamped and logged as a `VERDICT warn`, not honoured.
    Note this *revises* the conviction already recorded and already announced:
    if you move it, the report should say what the narrative saw that the numbers
    did not.
-7. **Write the full report** (template below) and archive it: resolve the folder
+8. **Write the full report** (template below) and archive it: resolve the folder
    with `research_report.report_dir(load_config())` — `output/reports/` — and use
    the **Write tool** to create `<TICKER>_<scan_date>.md` there (Write handles the
    multiline markdown cleanly; `write_report` exists too but Write is simpler for
@@ -187,7 +214,7 @@ mode:
   `cmd; echo $?`, `python -c "..."`, a scratch `.py` you wrote, and any
   `PowerShell(...)` will all be **silently refused**, not error. The 2026-07-26
   shakedown lost its verdict post to exactly this. Everything you need is a
-  subcommand: `context`, `post-verdicts`, `candidates`. If you find yourself
+  subcommand: `context`, `risk`, `post-verdicts`, `candidates`. If you find yourself
   wanting a one-liner, you want a subcommand that does not exist yet — say so in
   the report rather than working around the allow-list.
 - **The Discord send is pre-authorized** by `research.auto.discord_send`, which
@@ -286,8 +313,19 @@ Recent items (dated, sourced), each linked to the trigger; rumors labelled.
 ## Positioning & sentiment
 IV percentile, analyst distribution, ownership/insider, account (held? size).
 
+## Disaster symptoms
+The output of `research_report.py risk`, read rather than reprinted. State the
+exclusion verdict first. For each **tripped** rule: the value, the threshold, and
+whether the filings corroborate it or it is a sector artifact of the formula.
+Name the rules that came back **unknown** and say what a missing value means for
+this company — a veto never fires on data we could not collect, so an unknown is
+an unexamined risk, not a clean bill. If nothing tripped, say that plainly and
+in one line.
+
 ## Risks / bear case
-The concrete ways this is wrong.
+The concrete ways this is wrong. Anything here that the deterministic rules do
+**not** cover is your own judgment — label it as such and cite it. You may not
+add to, or argue away, the exclusion verdict above.
 
 ## Verdict rationale
 How quant + narrative produced the conviction/tier; what would change it. If this
@@ -311,6 +349,11 @@ _This is research analysis, not investment advice._
   news URL (with date), or a filing (MD&A / Risk Factors) quote. No unsourced claims.
 - **Rumors**: prefix `RUMOR (unverified)`, give the source + date, never state as
   fact, and weight lightly in the adjustment.
+- **Never originate or clear a veto.** The exclusion layer is deterministic and
+  `record_verdict` re-forces the veto tier over whatever you report. A symptom
+  you find that no rule covers belongs in the bear case, cited and labelled as
+  judgment; a rule you think is wrong belongs in the report as an argument to a
+  human, not in the verdict field.
 - **n/a tolerance**: missing data renders `n/a` — never invent numbers, never hard-fail.
 - **Not advice**: keep the disclaimer in every report and the Discord summary; the
   verdict is an analytical rating, not a recommendation to trade.

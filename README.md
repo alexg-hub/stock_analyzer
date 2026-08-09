@@ -301,6 +301,75 @@ so a card and the row behind it can never disagree:
 | `Quality Missing` | the parameter keys whose gate failed (`[]` when it passed) |
 | *(both absent)* | quality was **not evaluated** — different from failing |
 
+### The veto (the exclusion half)
+
+The thesis behind this half is that **identifying the losers matters at least as
+much as identifying the winners**: you beat the index by owning it minus the
+names that break. A parameter carrying `veto: true` is an exclusion rule rather
+than a quality gate, and the two are kept deliberately apart.
+
+|   | badge gate (⭐) | veto (🚫) |
+|---|---|---|
+| asks | "is this a good company?" | "is this one visibly falling over?" |
+| expected to fire | often — most names fail one | rarely |
+| a **missing value** | **fails** the gate | **never** vetoes |
+| appears in | `Quality Missing` | `Veto Reasons` |
+| effect on the verdict | none directly | forces the tier to `AVOID` |
+
+That middle row is the load-bearing one. Unverifiable quality doesn't earn the
+badge, but unverifiable is not *proof of disaster* — and Yahoo leaves holes in
+nearly every company's statements. The layer therefore **fails open**: an EDGAR
+outage or a statement Yahoo won't publish can only make it quieter, never
+trigger-happy. (One sharp edge: `scalar` rejects `bool`, so a flag stored as
+`True`/`False` reads as *missing* and can never fire. Every flag a resolver
+produces must be an `int` 0/1.)
+
+Currently 17 veto rules across solvency (Altman Z, interest coverage, negative
+equity **with** cash burn), cash burn (FCF-negative years, cash runway),
+accounting (Beneish M, profit-without-cash), dilution, short interest, and the
+SEC filing flags (going concern, restatement, bankruptcy, delisting, late
+filing). Thresholds start at the loose end deliberately — tier 4 grades whether
+each one earned its keep before any of them is tightened.
+
+A vetoed signal is **not hidden**. It keeps its card (with the 🚫 badge, the red
+side bar and a `Veto` field naming the rules), sorted after the clean ones; it
+keeps its numeric conviction; and tier 4 goes on buying and tracking it. A
+ledger that declined to buy what it excluded would answer the thesis by
+deleting the evidence — the same argument that makes `exits.py` flag a position
+rather than close it.
+
+Three of these rules were rewritten during the first live shakedown, because the
+single-leg version fired on healthy companies:
+
+- **thin liquidity is normal** for a negative-working-capital business —
+  Marriott (0.54/0.48) and HP (0.79/0.44) both trip the ratio pair while
+  generating billions in free cash flow — so it only vetoes alongside cash burn;
+- **a stock split is not dilution** — `get_shares_full` reports raw counts, and
+  Fastenal's 2-for-1 measured as +100.4% against an actual buyback, so the
+  earlier count is now restated onto today's share basis;
+- **Beneish flags growth**, not only manipulation, so its veto sits well above
+  the textbook −1.78 while the score still penalises it.
+
+Altman Z and interest coverage remain structurally low for banks, insurers and
+anything with a captive finance arm. That is the formula behaving as designed,
+not a defect — but it is why those thresholds are loose and why
+`enabled: false` per parameter is the intended escape hatch.
+
+### The moat score
+
+`moat` is a weighted group like any other, scored from ten measurable
+persistence proxies rather than prose: years of ROIC above the configured
+hurdle, ROIC and operating-margin stability, gross-margin slope, revenue-growth
+consistency and 5-year CAGR, FCF conversion and margin, capex intensity, and
+incremental ROIC. All ten come from the three annual statements `yahoo_stmt`
+already fetches, so they cost no extra network round trip and grade **every**
+tier-1 hit.
+
+The qualitative side — switching costs, network effects, brand, regulatory
+licence — stays in the deep-dive report's prose and moves only the bounded
+narrative adjustment. Same rule as everywhere else here: a sentence a model
+wrote is a sentence you cannot check.
+
 ### The score (the anchor half)
 
 Parameters carrying a `score` block contribute to a weighted 0-100 number:
@@ -560,7 +629,8 @@ Plain scripts, no test dependency — each prints `OK`/`FAIL` per check and exit
 
 | file | needs | asserts |
 |---|---|---|
-| `test_quality.py` | nothing | The quality registry: `enabled: false` removes a parameter from the gate, the score, `Quality Missing` **and** the embed fields; missing ≠ failing ≠ not-evaluated; a group with no values is neutral 0.5 and one with no parameters at this stage is dropped; strict gate compares and two-year `increasing`; weights renormalize; a JSON round trip changes no verdict; `validate` catches every silent misconfiguration |
+| `test_quality.py` | nothing | The quality registry: `enabled: false` removes a parameter from the gate, the score, `Quality Missing` **and** the embed fields; missing ≠ failing ≠ not-evaluated; a group with no values is neutral 0.5 and one with no parameters at this stage is dropped; strict gate compares and two-year `increasing`; weights renormalize; a JSON round trip changes no verdict; `validate` catches every silent misconfiguration. **The veto layer**: a missing value never vetoes while the same value still fails every badge gate; a veto never enters the badge's failed list; a bool reads as missing so flags must be ints; thin liquidity is only distress alongside cash burn; `validate` refuses a veto with no gate |
+| `test_derived.py` | nothing | Altman Z and Beneish M pinned against hand-computed values; a missing index yields `None` rather than a partial composite; flags are `int` not `bool`; negative equity alone is not distress but negative equity **with** burn is; profit-without-cash counts a trailing consecutive run, not scattered years; the moat proxies (CAGR, FCF margin, capex intensity, incremental ROIC) match their definitions; cross-statement years are intersected, not zipped; a thin filing yields all-`None`, never an exception |
 | `test_ibkr.py` | nothing | No account/position/PnL function exists **or is called**; a missing `ib_async` and a refused connection both degrade to `{}` without raising; the Refinitiv parser maps known fields, keeps unknown ones, and drops the `-99999` sentinel |
 | `test_combined_alert.py` | cached panel | **One** `send_discord_alert` for the whole night, carrying signal + verdict + exit cards with every chart still attached and no orphans; the verdict is recorded whether or not `discord_send` is on; a failing verdict pass or exit scan costs its own section and not the alert; tonight's verdict reaches tonight's position |
 | `test_forward_trades.py` | nothing | Trade arithmetic on a synthetic panel: entry/exit offsets for both conventions and any delay, the excursion window, tail NaNs, `delay=0` identity, input rejection |

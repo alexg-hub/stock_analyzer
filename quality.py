@@ -38,6 +38,27 @@ Two distinctions that look like details and are not:
     (`research_report._has_fundamentals`, `ledger._quality_rule_flags`) already
     depend on that difference.
 
+A parameter may also carry `veto: true`, which makes it an **exclusion rule**
+rather than a quality gate -- the "identify the losers" half of the thesis. A
+veto answers a much narrower question than the badge ("is this company visibly
+falling over?" rather than "is this a good company?") and is meant to fire
+rarely, so it is kept deliberately apart:
+
+  * a veto parameter is **skipped by `gate_failures`** -- the badge is already
+    strict enough that most tickers fail one of its gates, and letting vetoes
+    into it would make the ⭐ mean two different things at once;
+  * **a missing value never vetoes.** This is the exact inverse of the gate
+    rule above, and it is the single most load-bearing line in the layer.
+    Unverifiable quality does not earn the badge, but unverifiable is not
+    *proof of disaster* -- and Yahoo leaves holes in nearly every company's
+    statements. A veto that fired on missing data would exclude most of the
+    universe and be worse than no veto at all.
+
+The second rule has a sharp edge worth stating: `scalar` rejects `bool`, so a
+flag stored as `True`/`False` reads as *missing* and therefore never vetoes.
+Every flag a resolver produces must be an **int 0/1**. `validate` cannot catch
+this (it sees config, not values), so `tests/test_quality.py` pins it instead.
+
 This module does the *math*; `collect` does the I/O and is deliberately the
 only part that touches the network. `charts.py` keeps the same discipline.
 """
@@ -54,6 +75,8 @@ from scanner_common import (
     COMPANY_COL,
     QUALITY_COL,
     QUALITY_MISSING_COL,
+    VETO_COL,
+    VETO_REASONS_COL,
     fmt_compact,
     fmt_value,
     log_step,
@@ -81,11 +104,14 @@ class QualityResult:
     groups: dict = field(default_factory=dict)
     values: dict = field(default_factory=dict)
     parameters: list[str] = field(default_factory=list)   # the enabled keys
+    vetoed: bool | None = None          # None = the layer never ran
+    veto_reasons: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return {"passed": self.passed, "failed": list(self.failed),
                 "score": self.score, "groups": self.groups,
-                "values": self.values, "parameters": list(self.parameters)}
+                "values": self.values, "parameters": list(self.parameters),
+                "vetoed": self.vetoed, "veto_reasons": list(self.veto_reasons)}
 
 
 # --------------------------------------------------------------------------
@@ -104,6 +130,28 @@ def is_enabled(cfg: dict) -> bool:
 
 def badge(cfg: dict) -> str:
     return section(cfg).get("badge", "")
+
+
+def veto_badge(cfg: dict) -> str:
+    return section(cfg).get("veto_badge", "")
+
+
+def veto_tier(cfg: dict) -> str:
+    """The tier label a vetoed candidate is forced to, whatever it scored."""
+    return section(cfg).get("veto_tier", "AVOID")
+
+
+def veto_text(reasons: list, cfg: dict) -> str:
+    """Veto keys rendered as readable labels for a card or a report.
+
+    Uses each parameter's display label, so the alert says "Altman Z, FCF neg
+    yrs" rather than leaking internal keys -- and falls back to the key when a
+    rule has since been renamed or deleted, because an archived row can name a
+    parameter the registry no longer has.
+    """
+    specs = parameters(cfg, None, enabled_only=False)
+    labels_ = [label_of(k, specs.get(k) or {}) for k in (reasons or [])]
+    return ", ".join(labels_) if labels_ else "none"
 
 
 def parameters(cfg: dict, stage: str | None = None,
@@ -235,33 +283,76 @@ def has_values(row, cfg: dict, stage: str | None = None) -> bool:
 # Gates -- the badge
 # --------------------------------------------------------------------------
 
+def _gate_ok(raw, spec: dict, gate: dict) -> bool | None:
+    """Does this value satisfy its gate? `None` when there is no value.
+
+    Split out so the badge and the veto can share one definition of the gate
+    arithmetic while disagreeing -- deliberately -- about what a missing value
+    means. `min`/`max` are **strict** compares; `increasing` needs at least two
+    fiscal years with the latest above the previous.
+    """
+    value = scalar(raw, spec)
+    if value is None:
+        return None
+    ok = True
+    if "min" in gate and gate["min"] is not None:
+        ok = value > gate["min"]
+    if ok and "max" in gate and gate["max"] is not None:
+        ok = value < gate["max"]
+    if ok and gate.get("increasing"):
+        series = _series(raw)
+        ok = (series is not None and len(series) >= 2
+              and _is_num(series[-1][1]) and _is_num(series[-2][1])
+              and series[-1][1] > series[-2][1])
+    return ok
+
+
 def gate_failures(values: dict, cfg: dict, stage: str | None = None) -> list[str]:
     """Which enabled gates this ticker fails, by parameter key.
 
     Semantics are unchanged from the rule engine this replaces: `min`/`max` are
     **strict** compares, `increasing` needs at least two fiscal years with the
-    latest above the previous, and a missing value fails.
+    latest above the previous, and **a missing value fails** -- quality that
+    cannot be verified does not earn the badge.
+
+    `veto` parameters are skipped: they are exclusion rules, not quality gates,
+    and are answered by `veto_failures` under the opposite missing-value rule.
     """
     failed = []
     for key, spec in parameters(cfg, stage).items():
         gate = spec.get("gate")
-        if not gate:
+        if not gate or spec.get("veto"):
             continue
-        raw = values.get(key)
-        value = scalar(raw, spec)
-        ok = value is not None
-        if ok and "min" in gate and gate["min"] is not None:
-            ok = value > gate["min"]
-        if ok and "max" in gate and gate["max"] is not None:
-            ok = value < gate["max"]
-        if ok and gate.get("increasing"):
-            series = _series(raw)
-            ok = (series is not None and len(series) >= 2
-                  and _is_num(series[-1][1]) and _is_num(series[-2][1])
-                  and series[-1][1] > series[-2][1])
-        if not ok:
+        if _gate_ok(values.get(key), spec, gate) is not True:
             failed.append(key)
     return failed
+
+
+# --------------------------------------------------------------------------
+# Vetoes -- the exclusion half
+# --------------------------------------------------------------------------
+
+def veto_parameters(cfg: dict, stage: str | None = None) -> dict:
+    """The enabled `veto: true` parameters that actually carry a gate."""
+    return {k: s for k, s in parameters(cfg, stage).items()
+            if s.get("veto") and s.get("gate")}
+
+
+def veto_failures(values: dict, cfg: dict, stage: str | None = None) -> list[str]:
+    """Which veto rules this ticker trips, by parameter key. Empty = keep it.
+
+    The gate arithmetic is `gate_failures`', but the missing-value rule is
+    **inverted**: a value we could not collect does not veto. Unverifiable
+    quality does not earn the badge; unverifiable is not proof of disaster, and
+    Yahoo leaves holes in nearly every company's statements. A veto that fired
+    on missing data would exclude most of the universe.
+
+    The practical consequence worth remembering: an EDGAR outage, a logged-out
+    gateway or a statement Yahoo does not publish can only ever make this layer
+    *quieter*, never trigger-happy. It fails open, on purpose.
+    """
+    return [key for key, spec in veto_parameters(cfg, stage).items()
+            if _gate_ok(values.get(key), spec, spec["gate"]) is False]
 
 
 # --------------------------------------------------------------------------
@@ -338,6 +429,7 @@ def evaluate(values: dict, cfg: dict, stage: str | None = None) -> QualityResult
         return QualityResult()
     specs = parameters(cfg, stage)
     failed = gate_failures(values, cfg, stage)
+    vetoes = veto_failures(values, cfg, stage)
     score, breakdown = score_of(values, cfg, stage)
     return QualityResult(
         passed=not failed,
@@ -346,6 +438,8 @@ def evaluate(values: dict, cfg: dict, stage: str | None = None) -> QualityResult
         groups=breakdown,
         values={k: values.get(k) for k in specs},
         parameters=list(specs),
+        vetoed=bool(vetoes),
+        veto_reasons=vetoes,
     )
 
 
@@ -374,21 +468,29 @@ def annotate(hits: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     """Record the verdict on a hits frame, mirroring the Setup/Missing pair.
 
     Adds `Quality` (passed every enabled gate?) and `Quality Missing` (the keys
-    that failed, `[]` when it passed). Graded **exactly once per scan**, here,
-    so the Discord badge and the tier-3 hand-off read one recorded answer and
-    cannot disagree -- the bug this arrangement exists to prevent was the badge
-    being computed inside `build_embeds`, which runs *after* the hand-off is
-    written.
+    that failed, `[]` when it passed), plus the exclusion pair `Veto` and
+    `Veto Reasons` over the `fast`-stage veto rules. Graded **exactly once per
+    scan**, here, so the Discord badge and the tier-3 hand-off read one recorded
+    answer and cannot disagree -- the bug this arrangement exists to prevent was
+    the badge being computed inside `build_embeds`, which runs *after* the
+    hand-off is written.
+
+    Only the `fast` half of the veto set is answerable here; the `deep` rules
+    (SEC filing flags, Beneish, the liquidity pair) need collectors that only
+    run for gated candidates, and land later as `Deep Veto`.
 
     A no-op when the layer is off: the columns stay *absent*, which downstream
     readers must treat as "not evaluated". Mutates and returns `hits`.
     """
     if hits.empty or not is_enabled(cfg):
         return hits
-    failures = [gate_failures(row_values(row, cfg, STAGE_FAST), cfg, STAGE_FAST)
-                for _, row in hits.iterrows()]
+    graded = [row_values(row, cfg, STAGE_FAST) for _, row in hits.iterrows()]
+    failures = [gate_failures(v, cfg, STAGE_FAST) for v in graded]
+    vetoes = [veto_failures(v, cfg, STAGE_FAST) for v in graded]
     hits[QUALITY_COL] = [not f for f in failures]
     hits[QUALITY_MISSING_COL] = pd.Series(failures, index=hits.index, dtype=object)
+    hits[VETO_COL] = [bool(v) for v in vetoes]
+    hits[VETO_REASONS_COL] = pd.Series(vetoes, index=hits.index, dtype=object)
     return hits
 
 
@@ -416,6 +518,32 @@ def verdict_of(row, cfg: dict) -> tuple[bool | None, list]:
             except ValueError:
                 missing = []
         return bool(recorded), list(missing or [])
+    return None, []
+
+
+def veto_of(row, cfg: dict, stage: str | None = STAGE_FAST) -> tuple[bool | None, list]:
+    """Re-grade a recorded row's veto against the rules in force **now**.
+
+    The mirror of `verdict_of`, and for the same reason: thresholds are retuned
+    between scans, and a gate answering with last night's bar quietly ignores
+    the change. `output/history/` keeps the original, so nothing archived moves.
+
+    Note the recorded fallback reads `Veto Reasons` as the source of truth and
+    derives the boolean from it, rather than trusting the `Veto` column: a row
+    that round-tripped through CSV carries the reasons as a JSON string and the
+    flag as the text "True"/"False", and the list is the thing tier 4 grades.
+    """
+    if is_enabled(cfg) and has_values(row, cfg, stage):
+        reasons = veto_failures(row_values(row, cfg, stage), cfg, stage)
+        return bool(reasons), reasons
+    recorded = row.get(VETO_REASONS_COL) if hasattr(row, "get") else None
+    if isinstance(recorded, str):
+        try:
+            recorded = json.loads(recorded)
+        except ValueError:
+            recorded = None
+    if isinstance(recorded, list):
+        return bool(recorded), list(recorded)
     return None, []
 
 
@@ -488,7 +616,7 @@ def embed_fields(row, cfg: dict) -> list[dict]:
 # Collection -- the only part that touches the network
 # --------------------------------------------------------------------------
 
-def _statement_metrics(tk, keys: set, years: int, info: dict) -> dict:
+def _statement_metrics(frames: dict, keys: set, years: int, info: dict) -> dict:
     """Statement-derived metrics for one ticker, keyed by parameter key.
 
     Multi-year metrics (FCF, margins) come back as `[(fiscal_year, value)]`
@@ -496,19 +624,14 @@ def _statement_metrics(tk, keys: set, years: int, info: dict) -> dict:
     publish for this company stays None -> 'n/a'. Banks have no Operating
     Income and negative-equity companies no Debt/Equity; both are genuine, not
     errors, so nothing here raises.
-    """
-    def statement(name: str) -> pd.DataFrame:
-        try:
-            df = getattr(tk, name)
-            if isinstance(df, pd.DataFrame) and not df.empty:
-                return df
-        except Exception as exc:  # noqa: BLE001 - a missing statement is data, not a crash
-            log_step("YAHOO", "failed", f"{name} for {tk.ticker}: {exc}")
-        return pd.DataFrame()
 
-    income = statement("income_stmt")
-    cashflow = statement("cash_flow")
-    balance = statement("balance_sheet")
+    Takes the frames rather than the ticker so `collect` can fetch the three
+    statements once and hand the same ones to `derived.distress_metrics` and
+    `derived.moat_metrics`.
+    """
+    income = frames.get("income", pd.DataFrame())
+    cashflow = frames.get("cashflow", pd.DataFrame())
+    balance = frames.get("balance", pd.DataFrame())
 
     # The `years` most recent annual columns, oldest -> newest.
     inc_cols = sorted(income.columns)[-years:] if not income.empty else []
@@ -605,6 +728,32 @@ def _buy_ratio(recs):
     return ((r.get("strongBuy") or 0) + (r.get("buy") or 0)) / total if total else None
 
 
+def _liquidity_distress(q: dict, financials: dict, current_floor: float = 1.0,
+                        quick_floor: float = 0.7) -> int | None:
+    """Both liquidity ratios under water **and** the company burning cash.
+
+    `None` when a ratio is missing -- the whole universe of banks and insurers,
+    for whom neither is defined. A veto that read that as distress would
+    exclude every financial in the index.
+
+    The cash-flow leg is not optional. A current ratio below 1 is the *normal*
+    shape of a negative-working-capital business, where suppliers and customers
+    finance operations: Marriott (0.54/0.48) and HP (0.79/0.44) both trip the
+    ratio pair while generating 2.6bn and 2.8bn of free cash flow a year. Thin
+    liquidity is only distress when the cash is actually going out, which is
+    the same conjunction `negative_equity_burn` makes for the same reason.
+    """
+    current, quick = q.get("currentRatio"), q.get("quickRatio")
+    if not (_is_num(current) and _is_num(quick)):
+        return None
+    annual = (financials or {}).get("annual") or []
+    fcf = next((r.get("fcf") for r in reversed(annual) if _is_num(r.get("fcf"))),
+               None)
+    if fcf is None:
+        return None
+    return int(current < current_floor and quick < quick_floor and fcf < 0)
+
+
 def deep_metrics(yahoo: dict) -> dict:
     """Flatten a `research_collect.collect_yahoo` bundle to scalar metrics.
 
@@ -628,6 +777,20 @@ def deep_metrics(yahoo: dict) -> dict:
         return v * 100 if _is_num(v) else None
 
     hist = earn.get("surprise_history") or []
+
+    # Analyst downgrades in the trailing 90 days. `recent_actions` is already
+    # collected on every deep pass and was previously discarded; a cluster of
+    # downgrades is one of the few genuinely forward-looking distress signals
+    # Yahoo carries.
+    cutoff = (pd.Timestamp.today().normalize() - pd.Timedelta(days=90))
+    downgrades = 0
+    for action in (ana.get("recent_actions") or []):
+        if "down" not in str(action.get("action", "")).lower():
+            continue
+        when = pd.to_datetime(action.get("date"), errors="coerce")
+        if pd.notna(when) and when.tz_localize(None) >= cutoff:
+            downgrades += 1
+
     return {
         "pe_percentile_2y": val.get("pe_percentile_2y"),
         "analyst_upside_pct": targets.get("upside_pct"),
@@ -642,6 +805,19 @@ def deep_metrics(yahoo: dict) -> dict:
         "net_debt_to_ebitda": q.get("netDebtToEbitda"),
         "buyback_2y": own.get("shares_change_2y_pct"),
         "analyst_buy_ratio": _buy_ratio(ana.get("recommendations")),
+        # Collected by `research_collect` on every deep pass and previously
+        # discarded. The two liquidity ratios are the classic distress pair;
+        # insider net selling and the downgrade count are the market's own
+        # read. None of them cost an extra request.
+        "current_ratio": q.get("currentRatio"),
+        "quick_ratio": q.get("quickRatio"),
+        # Both legs together, because a gate compares one number and the
+        # classic liquidity read is a conjunction: a current ratio under 1 is
+        # ordinary for a retailer with fast inventory turns, and only becomes a
+        # distress signal when the quick ratio is under water too.
+        "liquidity_distress": _liquidity_distress(q, yahoo.get("financials")),
+        "insider_net_shares_6m": own.get("insider_net_shares_6m"),
+        "downgrades_90d": float(downgrades) if ana.get("recent_actions") else None,
     }
 
 
@@ -667,9 +843,12 @@ def resolve(bundle: dict, cfg: dict, stage: str | None = None) -> dict:
     return out
 
 
-def collect(ticker: str, cfg: dict, stage: str = STAGE_FAST,
+def collect(ticker: str, cfg: dict, stage: str | None = STAGE_FAST,
             close=None) -> dict:
     """Fetch the source payloads the enabled parameters of `stage` need.
+
+    `stage=None` means every stage, which is what tier 3 passes: it scores the
+    whole registry, so it has to collect the whole registry.
 
     Every source is optional and independently guarded: one that fails logs and
     contributes nothing, which the engine reads as missing values rather than
@@ -679,8 +858,10 @@ def collect(ticker: str, cfg: dict, stage: str = STAGE_FAST,
     wanted = sources_needed(cfg, stage)
     bundle: dict = {}
     tk = yf.Ticker(ticker)
+    statement_users = {"yahoo_stmt", "distress", "moat"}
+    info = {}
 
-    if {"yahoo_info", "yahoo_stmt"} & wanted:
+    if ({"yahoo_info"} | statement_users) & wanted:
         try:
             info = tk.info or {}
         except Exception as exc:  # noqa: BLE001 - a bad ticker must not kill the scan
@@ -688,11 +869,30 @@ def collect(ticker: str, cfg: dict, stage: str = STAGE_FAST,
             info = {}
         bundle["yahoo_info"] = info
         bundle[COMPANY_COL] = info.get("longName") or info.get("shortName")
+
+    if statement_users & wanted:
+        # The three annual statements, fetched **once** and shared. `distress`
+        # and `moat` read the same frames `yahoo_stmt` does, so wiring them in
+        # costs no additional Yahoo round trips -- which is why both can sit at
+        # the `fast` stage and grade every tier-1 hit rather than only the
+        # handful of candidates tier 3 reaches.
+        import derived
+        years = int(section(cfg).get("statement_years", 2))
+        frames = derived.statement_frames(tk)
         if "yahoo_stmt" in wanted:
             keys = {k for k, s in parameters(cfg, stage).items()
                     if (s.get("source") or "").startswith("yahoo_stmt.")}
-            years = int(section(cfg).get("statement_years", 2))
-            bundle["yahoo_stmt"] = _statement_metrics(tk, keys, years, info)
+            bundle["yahoo_stmt"] = _statement_metrics(frames, keys, years, info)
+        if "distress" in wanted:
+            bundle["distress"] = derived.distress_metrics(frames, info, years)
+        if "moat" in wanted:
+            bundle["moat"] = derived.moat_metrics(
+                frames, info, years,
+                float(section(cfg).get("moat_roic_hurdle_pct", 12.0)))
+
+    if "sec_flags" in wanted:
+        import sec
+        bundle["sec_flags"] = sec.flags(ticker, cfg)
 
     if "yahoo_deep" in wanted:
         import research_collect
@@ -746,7 +946,8 @@ def fetch_fast(tickers: list[str], cfg: dict) -> pd.DataFrame:
 # Validation -- used by the MCP config tools before any write
 # --------------------------------------------------------------------------
 
-RESOLVERS = ("yahoo_info", "yahoo_stmt", "yahoo_deep", "ibkr")
+RESOLVERS = ("yahoo_info", "yahoo_stmt", "yahoo_deep", "ibkr",
+             "distress", "moat", "sec_flags")
 
 
 def validate(cfg: dict) -> list[str]:
@@ -805,6 +1006,9 @@ def validate(cfg: dict) -> list[str]:
         if spec.get("enabled", True) and not gate and not anchors:
             problems.append(f"{where}: enabled but has neither a gate nor a "
                             f"score -- it would be collected and never used")
+        if spec.get("veto") and not gate:
+            problems.append(f"{where}.veto: a veto needs a gate to trip -- "
+                            f"a score alone can never exclude anything")
         fmt = spec.get("format", "number")
         if fmt not in _FORMATTERS:
             problems.append(f"{where}.format: {fmt!r} is not one of "

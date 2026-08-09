@@ -46,12 +46,15 @@ import sec
 from scanner_common import (
     COMPANY_COL,
     CONVICTION_COL,
+    DEEP_VETO_COL,
+    DEEP_VETO_REASONS_COL,
     DISCLAIMER,
     ON_DEMAND_KEYS,
     QUALITY_COL,
     QUALITY_MISSING_COL,
     RUN_KEYS,
     VERDICT_COL,
+    VETO_COLOR,
     count_csv_rows,
     enable_utf8_output,
     fmt_bytes,
@@ -241,6 +244,11 @@ def compute_quant_score(bundle: dict, cfg: dict) -> dict:
                                  for key, raw in result.values.items())},
         "quality_pass": result.passed,
         "quality_missing": result.failed,
+        # Graded over every stage, so this is the *whole* veto set -- the
+        # `fast` rules the scan already answered plus the `deep` ones only this
+        # pass can reach.
+        "veto": result.vetoed,
+        "veto_reasons": result.veto_reasons,
     }
 
 
@@ -320,6 +328,17 @@ def _facts(ticker: str, scan_date: str, yahoo: dict, quant: dict,
     profile = yahoo.get("profile") or {}
     passed, quality_missing = _quality_now(trigger, cfg)
     score = quant.get("score")
+
+    # The exclusion verdict over **every** stage, which is why it is computed
+    # here rather than read off the trigger row: the scan could only answer the
+    # `fast` rules, and the SEC filing flags, Beneish and the liquidity pair
+    # arrive with this pass. A veto overrides the tier and leaves the score
+    # alone -- the number stays on the record so tier 4 can ask, later, whether
+    # excluding this name actually cost anything.
+    vetoes = quant.get("veto_reasons") or []
+    tier = tier_for(score, cfg) if score is not None else None
+    if vetoes:
+        tier = quality.veto_tier(cfg)
     return {
         "ticker": ticker,
         "scan_date": scan_date,
@@ -338,12 +357,15 @@ def _facts(ticker: str, scan_date: str, yahoo: dict, quant: dict,
         # narrative pass: conviction *is* the score until something bounded and
         # justified moves it. Recorded here so a night the narrative pass never
         # runs still has a tier and a conviction for tier 4 to grade.
-        "tier": tier_for(score, cfg) if score is not None else None,
+        "tier": tier,
         "conviction": score,
         "screen": (trigger or {}).get("screen"),
         "setup": (trigger or {}).get("kind"),
         "quality": passed,
         "quality_missing": quality_missing,
+        "veto": bool(vetoes),
+        "veto_reasons": vetoes,
+        "veto_text": quality.veto_text(vetoes, cfg) if vetoes else None,
         "chart": str(chart) if chart else None,
         "source": source,
     }
@@ -387,9 +409,16 @@ def deterministic_verdict(ticker: str, cfg: dict, trigger: dict | None,
                           close=None) -> dict:
     """Everything tier 3 can decide **without a model**, for one ticker.
 
-    Collects the `deep` half of the quality registry, scores it, renders the
+    Collects **every** stage of the quality registry, scores it, renders the
     financial-trend chart and writes `<T>_<date>_facts.json` -- and sets the
     verdict from the score alone: `conviction = score`, `tier = tier_for(score)`.
+
+    The collection stage must stay `None` (= all stages). `compute_quant_score`
+    grades every stage, so collecting only `deep` leaves all eleven `fast`
+    parameters -- P/E, PEG, D/E, revenue growth, ROE, ROIC, the margins, FCF --
+    resolving to None and silently absent from the score. That was the state of
+    every `_facts.json` written before 2026-08-09: `financial_quality`, the
+    heaviest group at weight 0.24, ran on 3 of its 8 metrics.
 
     This is the whole point of the deterministic pipeline. The verdict exists
     the moment the scan finishes, so it can go out in the same Discord message
@@ -401,7 +430,7 @@ def deterministic_verdict(ticker: str, cfg: dict, trigger: dict | None,
     model that reads the bundle later can never generate either.
     """
     fin_cfg = cfg.get("research", {}).get("financials", {})
-    bundle = quality.collect(ticker, cfg, quality.STAGE_DEEP, close=close)
+    bundle = quality.collect(ticker, cfg, None, close=close)
     yahoo = bundle.get("_yahoo") or {}
     quant = compute_quant_score(bundle, cfg)
     log_step("QUANT", "ok", f"{ticker} score {quant.get('score')}", cfg=cfg)
@@ -450,12 +479,21 @@ def deterministic_thesis(facts: dict) -> str:
     rendering of the group breakdown -- strongest and weakest, plus how much of
     the registry actually had data -- so it says only what the numbers say.
     """
+    # The exclusion leads, because it is the conclusion: no amount of quality
+    # elsewhere changes what a tripped veto means for whether you buy this.
+    veto_sentence = ""
+    if facts.get("veto"):
+        veto_sentence = (f"EXCLUDED on {facts.get('veto_text')}"
+                         f" -- the score below is recorded for measurement, not"
+                         f" as a recommendation. ")
+
     dims = facts.get("quant_dimensions") or {}
     scored = {k: v for k, v in dims.items()
               if isinstance(v, dict) and v.get("metrics_used")}
     if not scored:
-        return ("No parameter in the quality registry returned a value for this "
-                "ticker, so the score is not meaningful.")
+        return veto_sentence + (
+            "No parameter in the quality registry returned a value for this "
+            "ticker, so the score is not meaningful.")
 
     ranked = sorted(scored.items(), key=lambda kv: -kv[1]["score"])
     best, worst = ranked[0], ranked[-1]
@@ -477,7 +515,7 @@ def deterministic_thesis(facts: dict) -> str:
         sentence += f" Fails the quality screen on {shown}."
     elif facts.get("quality") is True:
         sentence += " Passes every enabled quality gate."
-    return sentence
+    return veto_sentence + sentence
 
 
 def verdicts_for(tickers: list[str], cfg: dict, close=None) -> list[dict]:
@@ -598,6 +636,14 @@ def load_facts(ticker: str, scan_date: str, cfg: dict) -> dict:
 
 
 def _tier_color(tier: str, cfg: dict) -> int:
+    """The band colour, except that an excluded card is always the veto red.
+
+    `veto_tier` is deliberately not a `quality.tiers` band: the bands are score
+    ranges that `tier_for` walks by `min`, and an exclusion is not a score
+    range. So it is coloured here instead of being forced into that list.
+    """
+    if tier and tier == quality.veto_tier(cfg):
+        return VETO_COLOR
     return quality.tier_color(tier, cfg, VERDICT_COLOR)
 
 
@@ -638,9 +684,17 @@ def _verdict_fields(f: dict, v: dict) -> list[dict]:
     if isinstance(days, (int, float)):
         when = f"{when}\nin {int(days)}d"
 
-    return [field("Quant", quant), field("Trigger", trigger),
-            field("Quality screen", quality), field("Price", valuation),
-            field("P/E", pe), field("Next earnings", when)]
+    fields = [field("Quant", quant), field("Trigger", trigger),
+              field("Quality screen", quality), field("Price", valuation),
+              field("P/E", pe), field("Next earnings", when)]
+
+    # The exclusion goes first and full width: it is the one thing on the card
+    # that changes the decision rather than informing it.
+    if f.get("veto"):
+        fields.insert(0, {"name": "🚫 Excluded",
+                          "value": f.get("veto_text") or "veto",
+                          "inline": False})
+    return fields
 
 
 def build_verdict_embeds(verdicts: list[dict], cfg: dict
@@ -726,7 +780,8 @@ def post_verdict(ticker: str, headline: str, short_md: str, cfg: dict,
 # rewrite of the on-demand table has to carry them forward.
 ON_DEMAND_VERDICT_COLS = [VERDICT_COL, CONVICTION_COL, "Narrative Adj",
                           "Quant Score", "Price", "Upside %", "P/E Pctile 2y",
-                          "Report", "Thesis"]
+                          "Report", "Thesis",
+                          DEEP_VETO_COL, DEEP_VETO_REASONS_COL]
 
 
 def on_demand_row(payload: dict, ticker: str) -> dict | None:
@@ -801,7 +856,15 @@ def _verdict_values(verdict: dict, facts: dict, full: bool) -> dict:
     neighbour, so it gets the figures needed to read the verdict a year later.
     """
     values = {VERDICT_COL: verdict.get("tier"),
-              CONVICTION_COL: verdict.get("conviction")}
+              CONVICTION_COL: verdict.get("conviction"),
+              # The whole veto set as of this pass, including the `deep` rules
+              # the scan could not reach. Written under their own column names
+              # rather than the scan's, because `merge_history_csv` inherits a
+              # protected column from the row already on file -- right for a
+              # value only tier 3 produces, and wrong for one the scan itself
+              # just computed.
+              DEEP_VETO_COL: bool(facts.get("veto")),
+              DEEP_VETO_REASONS_COL: json.dumps(facts.get("veto_reasons") or [])}
     if not full:
         return values
     scan_date = verdict.get("scan_date") or ""
@@ -815,6 +878,69 @@ def _verdict_values(verdict: dict, facts: dict, full: bool) -> dict:
         "Thesis": verdict.get("thesis"),
     })
     return values
+
+
+def clamp_narrative_adj(verdict: dict, cfg: dict) -> dict:
+    """Hold the narrative adjustment inside its configured bound, in code.
+
+    `research.synthesis.narrative_adj_max` has always been documented as the
+    limit and was, until now, enforced only by the skill file asking the model
+    to respect it -- i.e. by the model's own compliance. Everything else about
+    tier 3 is deterministic precisely so a model cannot originate a verdict;
+    leaving the one number it *does* contribute unbounded made that guarantee
+    rest on good behaviour.
+
+    Out-of-range values are clamped rather than rejected, and the conviction is
+    recomputed from the recorded quant score so the tier stays consistent with
+    it. Mutates and returns `verdict`.
+    """
+    limit = cfg.get("research", {}).get("synthesis", {}).get("narrative_adj_max")
+    adj = verdict.get("narrative_adj")
+    if not isinstance(limit, (int, float)) or not isinstance(adj, (int, float)) \
+            or isinstance(adj, bool) or abs(adj) <= limit:
+        return verdict
+
+    capped = max(-limit, min(limit, adj))
+    log_step("VERDICT", "warn",
+             f"{verdict.get('ticker')} narrative_adj {adj:+g} exceeds "
+             f"+/-{limit} -- clamped to {capped:+g}", cfg=cfg)
+    print(f"  WARNING: {verdict.get('ticker')} narrative_adj {adj:+g} is "
+          f"outside the configured +/-{limit}; clamped to {capped:+g}.",
+          file=sys.stderr)
+    verdict["narrative_adj"] = capped
+
+    base = load_facts(verdict.get("ticker"), verdict.get("scan_date"),
+                      cfg).get("quant_score")
+    if isinstance(base, (int, float)):
+        conviction = max(0, min(100, round(base + capped)))
+        verdict["conviction"] = conviction
+        verdict["tier"] = tier_for(conviction, cfg)
+    return verdict
+
+
+def enforce_veto(verdict: dict, facts: dict, cfg: dict) -> dict:
+    """A recorded verdict on a vetoed ticker keeps the veto tier, whatever it says.
+
+    The skill may override a tier "with an explicit written justification", and
+    that latitude is deliberate for the score bands. It does **not** extend to
+    the exclusion: a veto is a deterministic rule over collected values, and the
+    one thing a narrative pass must never do is talk the pipeline out of one.
+    It can argue the rule is wrong -- in the report, where a human reads it and
+    can retune the threshold -- but not by relabelling this row.
+
+    The conviction is left exactly as it stands, so the record still says what
+    the company scored and tier 4 can measure what the exclusion cost.
+    """
+    if not facts.get("veto"):
+        return verdict
+    forced = quality.veto_tier(cfg)
+    if verdict.get("tier") != forced:
+        log_step("VERDICT", "warn",
+                 f"{verdict.get('ticker')} reported {verdict.get('tier')} but "
+                 f"is vetoed on {facts.get('veto_text')} -- forcing {forced}",
+                 cfg=cfg)
+        verdict["tier"] = forced
+    return verdict
 
 
 def _warn_tier_drift(verdict: dict, cfg: dict) -> None:
@@ -854,9 +980,11 @@ def record_verdict(verdict: dict, cfg: dict) -> str | None:
         print(f"  cannot record a verdict without ticker and scan_date: "
               f"{verdict.get('ticker') or verdict}", file=sys.stderr)
         return None
+    clamp_narrative_adj(verdict, cfg)
     _warn_tier_drift(verdict, cfg)
 
     facts = load_facts(ticker, scan_date, cfg)
+    enforce_veto(verdict, facts, cfg)
     match = {"scan_date": scan_date, "ticker": ticker}
 
     if facts.get("source") != SOURCE_ON_DEMAND:
@@ -1227,6 +1355,7 @@ USAGE = """usage:
   python research_report.py auto-prompt                   the narrative prompt (exit 1 if none)
   python research_report.py auto-model                    the model the narrative pass should use
   python research_report.py scan TICKER [TICKER ...]      on-demand tiers 1 + 2 for a ticker
+  python research_report.py risk TICKER [TICKER ...]      disaster symptoms + moat, every rule
   python research_report.py post-verdicts F.json [--send] deliver the batch's verdict cards
   python research_report.py context TICKER [TICKER ...]   the data bundle for one ticker
   python research_report.py run-id                        mint "<run_id> <session_uuid>"
@@ -1248,6 +1377,90 @@ def _print_candidates(rows: list[dict], held_back: int, gate: str) -> None:
     if held_back:
         print(f"\n({held_back} more signal(s) held back by gate '{gate}' -- "
               f"rerun with --all to see them.)")
+
+
+def risk_report(ticker: str, cfg: dict) -> dict:
+    """Every disaster symptom and moat proxy for one ticker, rule by rule.
+
+    Collects the whole registry, so it reaches the `deep` rules the nightly
+    scan cannot: the SEC filing flags, Beneish, the liquidity pair. Reports the
+    value *and* the rule beside it, because "Altman Z 1.4" only means something
+    next to the threshold it was compared against -- and because a veto that
+    did not fire for want of data has to be distinguishable from one that
+    passed on the merits.
+    """
+    bundle = quality.collect(ticker, cfg, None)
+    values = quality.resolve(bundle, cfg, None)
+    result = quality.evaluate(values, cfg, None)
+    specs = quality.parameters(cfg, None)
+
+    def entry(key: str) -> dict:
+        spec = specs.get(key) or {}
+        value = quality.scalar(values.get(key), spec)
+        return {
+            "key": key,
+            "label": quality.label_of(key, spec),
+            "group": spec.get("group"),
+            "stage": spec.get("stage", quality.STAGE_FAST),
+            "value": value,
+            "gate": spec.get("gate"),
+            "veto": bool(spec.get("veto")),
+            # Three states, never two: tripped, clean, or unknown for want of a
+            # value. A missing value never vetoes, so conflating it with
+            # "clean" here would misrepresent how much the layer actually saw.
+            "state": ("unknown" if value is None else
+                      ("tripped" if key in result.veto_reasons else "clean")),
+        }
+
+    vetoes = [entry(k) for k in quality.veto_parameters(cfg, None)]
+    moat = {k: quality.scalar(values.get(k), specs[k]) for k in specs
+            if specs[k].get("group") == "moat"}
+    risk = {k: quality.scalar(values.get(k), specs[k]) for k in specs
+            if specs[k].get("group") == "risk" and not specs[k].get("veto")}
+    return {
+        "ticker": ticker,
+        "company": bundle.get(COMPANY_COL),
+        "vetoed": result.vetoed,
+        "veto_reasons": result.veto_reasons,
+        "veto_text": quality.veto_text(result.veto_reasons, cfg),
+        "rules": vetoes,
+        "moat_metrics": moat,
+        "risk_metrics": risk,
+        "moat_score": (result.groups.get("moat") or {}).get("score"),
+        "risk_score": (result.groups.get("risk") or {}).get("score"),
+        "quant_score": result.score,
+    }
+
+
+def _print_risk(report: dict, cfg: dict) -> None:
+    """The risk report as text: the verdict, then every rule and why."""
+    company = f" ({report['company']})" if report.get("company") else ""
+    print(f"\n{report['ticker']}{company}")
+    if report["vetoed"]:
+        print(f"  EXCLUDED -- {report['veto_text']}")
+    else:
+        print("  not excluded")
+    print(f"  moat {_num_or_na(report['moat_score'], '{:.2f}')}   "
+          f"risk {_num_or_na(report['risk_score'], '{:.2f}')}   "
+          f"overall {_num_or_na(report['quant_score'])}/100")
+
+    for state in ("tripped", "clean", "unknown"):
+        rules = [r for r in report["rules"] if r["state"] == state]
+        if not rules:
+            continue
+        print(f"  {state}:")
+        for rule in sorted(rules, key=lambda r: r["label"]):
+            bound = ", ".join(f"{k} {v}" for k, v in (rule["gate"] or {}).items()
+                              if v is not None)
+            print(f"    {rule['label']:<22.22} "
+                  f"{_num_or_na(rule['value']):>10}   ({bound or 'no gate'})")
+
+    for name, metrics in (("moat", report["moat_metrics"]),
+                          ("risk", report["risk_metrics"])):
+        shown = {k: v for k, v in metrics.items() if v is not None}
+        if shown:
+            print(f"  {name}: " + ", ".join(f"{k}={v:.2f}"
+                                            for k, v in sorted(shown.items())))
 
 
 def _print_scan(payload: dict, ticker: str, cfg: dict) -> None:
@@ -1316,6 +1529,25 @@ def main() -> int:
             print(f"{row['ticker']:6} {row['tier']:7} {row['conviction']}/100  "
                   f"{row['thesis']}")
         return 0 if rows else 1
+
+    # A subcommand rather than something the skill could assemble itself: under
+    # `--permission-mode dontAsk` only documented `research_report.py`
+    # subcommands are allowed, and a refused tool is refused *silently*. If the
+    # narrative pass needs to see the veto detail, it has to be reachable here.
+    if args[0] == "risk":
+        cfg = load_config()
+        tickers = [a.upper() for a in args[1:] if not a.startswith("-")]
+        if not tickers:
+            print("usage: risk TICKER [TICKER ...]", file=sys.stderr)
+            return 1
+        with stdout_to_stderr():
+            reports = [risk_report(t, cfg) for t in tickers]
+        if "--json" in args:
+            print(json.dumps(reports, indent=2, ensure_ascii=False))
+            return 0
+        for report in reports:
+            _print_risk(report, cfg)
+        return 0
 
     if args[0] == "auto-prompt":
         prompt = auto_prompt(load_config())

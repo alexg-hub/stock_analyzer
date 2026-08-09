@@ -182,8 +182,12 @@ c.ok("...and so does a file that does not exist at all",
 # --------------------------------------------------------------------------
 c.section("open -- the quality rules explode point-in-time")
 
+# The badge rules only -- `_position_rows` splits the gate-bearing parameters
+# into two families, `qr_` for the quality gates and `vt_` for the vetoes, and
+# a veto is deliberately absent from the quality rule set.
 configured = [k for k, spec in cfg["quality"]["parameters"].items()
-              if spec.get("enabled", True) and spec.get("gate")]
+              if spec.get("enabled", True) and spec.get("gate")
+              and not spec.get("veto")]
 failing = book[book["quality_pass"].astype(str) == "False"].iloc[0]
 passing = book[book["quality_pass"].astype(str) == "True"].iloc[0]
 c.ok("a recorded failure reads as failed",
@@ -204,6 +208,49 @@ ungraded = pd.DataFrame([{**rows[0], "ticker": "CCC", "Quality": "",
 c.ok("an ungraded row gets no per-rule flags at all",
      not any(k.startswith(ledger.QR_PREFIX)
              for k in ledger._position_rows(ungraded, "signal", cfg, {})[0]))
+
+# --------------------------------------------------------------------------
+c.section("open -- the veto explodes the same way, with the opposite polarity")
+
+vetoes = [k for k, spec in cfg["quality"]["parameters"].items()
+          if spec.get("enabled", True) and spec.get("gate") and spec.get("veto")]
+tripped_key = vetoes[0]
+
+# The scan answers the `fast` rules and tier 3 writes the `deep` ones into the
+# same row hours later, so a position's real exclusion set is the union.
+split = pd.DataFrame([{**rows[0], "ticker": "DDD",
+                       "Veto": True, "Veto Reasons": json.dumps([tripped_key]),
+                       "Deep Veto": True,
+                       "Deep Veto Reasons": json.dumps(["going_concern"])}])
+split_row = ledger._position_rows(split, "signal", cfg, {})[0]
+c.ok("both stages' reasons merge into one exclusion set",
+     ledger.as_bool(split_row[f"vt_{tripped_key}"]) is True
+     and ledger.as_bool(split_row["vt_going_concern"]) is True,
+     "the deep half lands hours after the fast half, onto the same row")
+c.ok("a veto flag is True when it TRIPPED, the inverse of qr_",
+     ledger.as_bool(split_row["vetoed"]) is True)
+c.ok("an untripped veto rule reads as clean",
+     all(ledger.as_bool(split_row[f"vt_{k}"]) is False
+         for k in vetoes if k not in (tripped_key, "going_concern")))
+c.ok("the veto rule set in force is recorded with the position",
+     sorted(json.loads(split_row[ledger.VETO_RULES_COL])) == sorted(vetoes),
+     "a veto invented later must not read as clean on an older position")
+
+# Same distinction the quality rules keep: not evaluated is not "came back
+# clean". A night the layer was off must leave no flags at all.
+c.ok("a row with neither veto column gets no vt_ flags and no verdict",
+     not any(k.startswith(ledger.VT_PREFIX)
+             for k in ledger._position_rows(ungraded, "signal", cfg, {})[0])
+     and ledger._position_rows(ungraded, "signal", cfg, {})[0]["vetoed"] is None)
+
+# The veto flags are derived from the source row on every sync, so they must
+# NOT be protected -- a protected vt_ flag would pin itself to the fast-only
+# value and could never learn about the deep half written later.
+mark_cols = set(ledger.mark_columns(ledger.horizons_of(cfg["portfolio"])))
+c.ok("no vt_ column is protected by mark_columns()",
+     not any(k.startswith(ledger.VT_PREFIX) for k in mark_cols)
+     and "vetoed" not in mark_cols,
+     "protecting them would freeze the fast-stage answer forever")
 
 # --------------------------------------------------------------------------
 c.section("mark -- the entry is Open[t+1], and it agrees with forward_trades")

@@ -36,6 +36,8 @@ from .ledger import (
     ON_DEMAND_KEY,
     QR_PREFIX,
     QUALITY_RULES_COL,
+    VETO_RULES_COL,
+    VT_PREFIX,
     as_bool,
     horizon_cols,
     horizons_of,
@@ -71,7 +73,9 @@ NOT_PREDICTORS = {"Close", "SMA", "Range High", "Price", "last_close",
                   # for these and they already get one; correlating a 0/1
                   # against the return would file the same finding twice under
                   # a weaker test and give it two votes in the FDR family.
-                  "Quality", "quality_pass", "deep_dived",
+                  "Quality", "quality_pass", "deep_dived", "vetoed",
+                  "Veto", "Deep Veto", "Veto Reasons", "Deep Veto Reasons",
+                  VETO_RULES_COL,
                   # The on-demand table's own copy of the quant score. The
                   # facts-derived `quant_score` is the same number and exists
                   # for signal rows too, so grading both would enter one score
@@ -342,8 +346,12 @@ def _roadmap_rows(positions: pd.DataFrame, by_ticker: pd.DataFrame,
              "quality_pass")
     question("did a tier-3 deep dive predict returns", by_ticker, "deep_dived")
     question("which tier-3 verdict predicted returns", by_ticker, "Verdict")
+    question("did excluding the vetoed names beat keeping them", by_ticker,
+             "vetoed")
     for column in sorted(c for c in by_ticker.columns if c.startswith(QR_PREFIX)):
         question(f"quality rule {column[len(QR_PREFIX):]}", by_ticker, column)
+    for column in sorted(c for c in by_ticker.columns if c.startswith(VT_PREFIX)):
+        question(f"veto rule {column[len(VT_PREFIX):]}", by_ticker, column)
 
     # The tier-3 dimensions are continuous, so the bar is "how many positions
     # carry a score", not a group split.
@@ -443,12 +451,22 @@ def _split_row(a: pd.DataFrame, b: pd.DataFrame, horizon: int, dimension: str,
 def _binary_split_rows(frame: pd.DataFrame, dimension: str, horizons: list[int],
                        cfg_an: dict, analysis: str = "split",
                        label: str | None = None,
-                       yes: str = "True", no: str = "False") -> list[dict]:
+                       yes: str = "True", no: str = "False",
+                       invert: bool = False) -> list[dict]:
+    """A True/False column as one two-group comparison.
+
+    `invert` swaps which side leads, for a flag whose True means the *bad*
+    outcome. `vetoed` is the case: reporting "clean minus excluded" makes a
+    positive effect mean the exclusion earned its keep, which is the direction
+    the thesis is stated in and the direction a reader will assume.
+    """
     rows = []
     if dimension not in frame.columns:
         return rows
     flags = frame[dimension].map(as_bool)
     a, b = frame[flags.eq(True)], frame[flags.eq(False)]
+    if invert:
+        a, b = b, a
     if a.empty or b.empty:
         return rows
     name = label or dimension
@@ -494,20 +512,29 @@ def _category_split_rows(frame: pd.DataFrame, dimension: str,
     return rows
 
 
-def _rule_rows(frame: pd.DataFrame, horizons: list[int],
-               cfg_an: dict) -> list[dict]:
-    """Per quality rule: were the tickers that passed it worth more?"""
+def _rule_rows(frame: pd.DataFrame, horizons: list[int], cfg_an: dict,
+               prefix: str = QR_PREFIX, a_label: str = "passed",
+               b_label: str = "failed",
+               phrase: str = "passing the {rule} quality rule was worth"
+               ) -> list[dict]:
+    """Per rule: was the group flagged True worth more than the group flagged False?
+
+    Parameterised over the prefix because the ledger carries two families of
+    per-rule flags with **opposite polarity**: `qr_` is True when a quality rule
+    passed, `vt_` is True when a veto tripped. Sharing the split arithmetic but
+    naming the groups separately keeps each conclusion sentence honest.
+    """
     rows = []
-    for column in sorted(c for c in frame.columns if c.startswith(QR_PREFIX)):
-        rule = column[len(QR_PREFIX):]
+    for column in sorted(c for c in frame.columns if c.startswith(prefix)):
+        rule = column[len(prefix):]
         flags = frame[column].map(as_bool)
         a, b = frame[flags.eq(True)], frame[flags.eq(False)]
         if a.empty or b.empty:
             continue
         for horizon in horizons:
             row = _split_row(closed(a, horizon), closed(b, horizon), horizon,
-                             column, "passed", "failed", "rule_impact", cfg_an,
-                             f"passing the {rule} quality rule was worth")
+                             column, a_label, b_label, "rule_impact", cfg_an,
+                             phrase.format(rule=rule))
             if row:
                 rows.append(row)
     return rows
@@ -634,7 +661,8 @@ def _predictor_columns(frame: pd.DataFrame, horizons: list[int]) -> list[str]:
     reserved = set(IDENTITY_COLS) | set(mark_columns(horizons)) | NOT_PREDICTORS
     out = []
     for column in frame.columns:
-        if column in reserved or column.startswith(QR_PREFIX):
+        if column in reserved or column.startswith(QR_PREFIX) \
+                or column.startswith(VT_PREFIX):
             continue
         if column.startswith(QUANT_PREFIX) or column in DIMENSION_COLS:
             continue          # graded as dimension_impact instead
@@ -695,6 +723,17 @@ def analyze(cfg: dict, baseline: bool = True) -> pd.DataFrame:
         rows += _category_split_rows(by_ticker, "Verdict", horizons, cfg_an,
                                      "tier-3 verdict")
         rows += _rule_rows(by_ticker, horizons, cfg_an)
+
+        # -- the exclusion thesis: was excluding the losers worth anything? --
+        # This is the only test in the file that grades the veto layer, and it
+        # is the whole reason vetoed signals are still bought and tracked.
+        rows += _cohort_rows(by_ticker, "vetoed", horizons, "veto")
+        rows += _binary_split_rows(by_ticker, "vetoed", horizons, cfg_an,
+                                   label="veto", yes="clean", no="excluded",
+                                   invert=True)
+        rows += _rule_rows(by_ticker, horizons, cfg_an, prefix=VT_PREFIX,
+                           a_label="tripped", b_label="clean",
+                           phrase="tripping the {rule} veto was worth")
 
         quant_cols = [c for c in by_ticker.columns
                       if c.startswith(QUANT_PREFIX) or c in DIMENSION_COLS]

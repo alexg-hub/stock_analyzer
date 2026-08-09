@@ -16,6 +16,7 @@ above what a few deep-dives need.
 
 import re
 import time
+from datetime import date
 
 import requests
 from lxml import html as lxml_html
@@ -23,6 +24,12 @@ from lxml import html as lxml_html
 from scanner_common import fmt_bytes, load_config, log_step
 
 _TICKER_MAP = None  # {TICKER -> zero-padded CIK}, cached per process
+_SUBMISSIONS = {}   # cik -> the `filings.recent` dict, cached per process
+_DOC_TEXT = {}      # (cik, accession) -> cleaned document text
+
+# One run is one point in time, so a filing fetched for the narrative sections
+# and a filing scanned for distress flags are the same bytes. These caches are
+# what stop `flags()` doubling the EDGAR traffic of every deep-dive.
 
 
 def _headers(cfg: dict) -> dict:
@@ -52,10 +59,30 @@ def ticker_to_cik(ticker: str, cfg: dict) -> str | None:
     return None
 
 
+def _recent(cik: str, cfg: dict) -> dict:
+    """The submissions `filings.recent` arrays for one CIK, cached per process.
+
+    Read by both `_pick_latest` (which filing to parse) and `flags` (which
+    forms and 8-K item codes appeared recently), so it is fetched once.
+    """
+    if cik not in _SUBMISSIONS:
+        _SUBMISSIONS[cik] = (_get(f"https://data.sec.gov/submissions/CIK{cik}.json", cfg)
+                             .json().get("filings", {}).get("recent", {}))
+    return _SUBMISSIONS[cik]
+
+
+def _document_text(cik: str, meta: dict, cfg: dict) -> tuple[str, int]:
+    """The cleaned text of one filing's primary document, cached per process."""
+    key = (cik, meta["accession"])
+    if key not in _DOC_TEXT:
+        resp = _get(_doc_url(cik, meta["accession"], meta["primary_doc"]), cfg)
+        _DOC_TEXT[key] = (_clean_text(resp.content), len(resp.content))
+    return _DOC_TEXT[key]
+
+
 def _pick_latest(cik: str, cfg: dict, forms: list[str]) -> dict:
     """Most recent filing per requested form (recent arrays are newest-first)."""
-    recent = (_get(f"https://data.sec.gov/submissions/CIK{cik}.json", cfg)
-              .json().get("filings", {}).get("recent", {}))
+    recent = _recent(cik, cfg)
     report_dates = recent.get("reportDate", [])
     out = {}
     for i, form in enumerate(recent.get("form", [])):
@@ -146,6 +173,145 @@ def _sections_summary(sections: dict) -> str:
                       for name, text in sections.items())
 
 
+# --------------------------------------------------------------------------
+# Distress flags -- the `sec_flags` resolver of the quality registry
+# --------------------------------------------------------------------------
+
+# "substantial doubt ... going concern" is the auditor's phrase, but it appears
+# in the *negative* far more often than the positive: a healthy filing states
+# that management identified no conditions raising substantial doubt, and a
+# recovering one states that its plans alleviate the doubt. A naive search for
+# the phrase flags most of the S&P 500.
+_GOING_CONCERN = re.compile(
+    r"substantial\s+doubt.{0,240}?going\s+concern", re.I | re.S)
+
+# Cues that turn a match into a denial or a resolution. Scanned in the ~200
+# characters *before* the phrase and inside the match itself.
+_NEGATIONS = re.compile(
+    r"\b(no|not|non|never|without|alleviate[sd]?|alleviating|mitigate[sd]?|"
+    r"resolved|no\s+longer|did\s+not|does\s+not|has\s+not|have\s+not|"
+    r"were\s+not|was\s+not|absence\s+of)\b", re.I)
+
+# 8-K item codes worth knowing about, and what each one means when it appears.
+ITEM_MEANINGS = {
+    "1.03": "bankruptcy or receivership",
+    "2.04": "debt acceleration or covenant trigger",
+    "3.01": "listing-rule non-compliance or delisting notice",
+    "3.02": "unregistered sale of equity",
+    "4.01": "change of certifying accountant",
+    "4.02": "non-reliance on previously issued financials",
+    "5.02": "departure of a director or principal officer",
+}
+
+
+def _within(dates: list, months: int) -> set:
+    """Indices of filings made within the last `months`.
+
+    EDGAR reports `filingDate` as an ISO date string, so the comparison is a
+    plain string compare against the cutoff -- no parsing, and no timezone to
+    get wrong.
+    """
+    if not dates:
+        return set()
+    today = date.today()
+    total = today.month - 1 - months
+    cutoff = date(today.year + total // 12, total % 12 + 1,
+                  min(today.day, 28)).isoformat()
+    return {i for i, d in enumerate(dates) if isinstance(d, str) and d >= cutoff}
+
+
+def going_concern_hits(text: str) -> int:
+    """How many *affirmative* going-concern statements this filing contains.
+
+    Every match is checked against the negation cues around it, because the
+    boilerplate denial ("no conditions or events were identified that raise
+    substantial doubt about our ability to continue as a going concern") is far
+    more common than the real thing. A remaining hit is still only a hint --
+    which is why the deep-dive pass is asked to corroborate it from the text
+    rather than the veto being the last word.
+    """
+    hits = 0
+    for match in _GOING_CONCERN.finditer(text or ""):
+        window = text[max(0, match.start() - 200):match.end()]
+        if not _NEGATIONS.search(window):
+            hits += 1
+    return hits
+
+
+def flags(ticker: str, cfg: dict | None = None) -> dict:
+    """Filing-derived distress flags for one ticker, as `int` 0/1 or counts.
+
+    Every value is an `int`, never a `bool`: `quality.scalar` rejects booleans
+    and would read one as a missing value, which for a veto parameter means "no
+    veto" -- a flag that looks right in config and never fires.
+
+    Returns `{}` on any failure, and that is the whole safety story for this
+    resolver. A missing value never trips a veto (`quality.veto_failures`), so
+    an EDGAR outage, a renamed form or an unparseable document can only make
+    the layer quieter. It fails open on purpose: excluding a company because
+    the SEC was briefly unreachable would be far worse than missing a flag.
+    """
+    cfg = cfg or load_config()
+    sec = cfg.get("research", {}).get("sec", {})
+    lookback = int(sec.get("flag_lookback_months", 12))
+    restate_lookback = int(sec.get("restatement_lookback_months", 24))
+    forms = sec.get("forms", ["10-Q", "10-K"])
+    try:
+        cik = ticker_to_cik(ticker, cfg)
+        if not cik:
+            log_step("SEC", "miss", f"no CIK for {ticker} -- no filing flags")
+            return {}
+        recent = _recent(cik, cfg)
+        form_list = recent.get("form", [])
+        items_list = recent.get("items", [])
+        dates = recent.get("filingDate", [])
+
+        window = _within(dates, lookback)
+        restate_window = _within(dates, restate_lookback)
+
+        def item_seen(code: str, indices: set) -> int:
+            for i in indices:
+                if i < len(form_list) and form_list[i] == "8-K" \
+                        and code in str(items_list[i] if i < len(items_list) else ""):
+                    return 1
+            return 0
+
+        def form_seen(names: tuple, indices: set) -> int:
+            return int(any(i < len(form_list) and form_list[i] in names
+                           for i in indices))
+
+        out = {
+            "bankruptcy_filing": item_seen("1.03", window),
+            "debt_acceleration": item_seen("2.04", window),
+            "delisting_notice": item_seen("3.01", window),
+            "unregistered_sale": item_seen("3.02", window),
+            "auditor_change": item_seen("4.01", window),
+            "restatement": item_seen("4.02", restate_window),
+            "officer_departure": item_seen("5.02", window),
+            "late_filing": form_seen(("NT 10-K", "NT 10-Q"), window),
+            "shelf_registration": form_seen(("S-3", "S-3ASR"), window),
+        }
+
+        # Going concern needs the filing text, so it reuses whatever
+        # `fetch_filing_sections` already pulled for this ticker this run.
+        concern = 0
+        for form, meta in _pick_latest(cik, cfg, forms).items():
+            try:
+                text, _ = _document_text(cik, meta, cfg)
+                concern = max(concern, going_concern_hits(text))
+            except Exception as exc:  # noqa: BLE001 - one bad doc must not sink the rest
+                log_step("SEC", "failed", f"going-concern scan {form} {ticker}: {exc}")
+        out["going_concern"] = int(concern > 0)
+
+        tripped = [k for k, v in out.items() if v]
+        log_step("SEC", "ok", f"flags for {ticker}: "
+                              f"{', '.join(tripped) if tripped else 'none tripped'}")
+        return out
+    except Exception as exc:  # noqa: BLE001 - flags are optional, always
+        log_step("SEC", "failed", f"flags for {ticker}: {exc}")
+        return {}
+
+
 def fetch_filing_sections(ticker: str, cfg: dict | None = None) -> dict | None:
     """Latest 10-Q + 10-K narrative sections + curated XBRL facts, or None."""
     cfg = cfg or load_config()
@@ -167,8 +333,7 @@ def fetch_filing_sections(ticker: str, cfg: dict | None = None) -> dict | None:
                      "period": meta["report_date"], "sections": {}}
             try:
                 t0 = time.perf_counter()
-                resp = _get(url, cfg)
-                text = _clean_text(resp.content)
+                text, raw_bytes = _document_text(cik, meta, cfg)
                 entry["text_len"] = len(text)
                 if form == "10-K":
                     entry["sections"] = {
@@ -192,7 +357,7 @@ def fetch_filing_sections(ticker: str, cfg: dict | None = None) -> dict | None:
                             [r"item\s*2\.?\s*unregist", r"item\s*5\.?\s*other", r"item\s*6\.?\s*exhibit"], maxc),
                     }
                 log_step("SEC", "ok",
-                         f"{form} {resp.status_code} {fmt_bytes(len(resp.content))} "
+                         f"{form} {fmt_bytes(raw_bytes)} "
                          f"{_sections_summary(entry['sections'])}",
                          ms=(time.perf_counter() - t0) * 1000)
             except Exception as exc:  # noqa: BLE001 - one bad doc must not sink the rest

@@ -161,7 +161,7 @@
             "rules": {
                 "trailingPE": {"max": 37},
                 "trailingPegRatio": {"max": 2.1},
-                "debtToEquity": {"max": 85},
+                "debtToEquity": {"max": 71},
                 "revenueGrowth": {"min": 10},
                 "dividendYield": {"min": 0},
                 "payoutRatio": {"max": 60},
@@ -188,7 +188,15 @@
             "earnings_quality": {"enabled": true, "weight": 0.10},
             "financial_quality": {"enabled": true, "weight": 0.24},
             "analyst_sentiment": {"enabled": true, "weight": 0.11},
-            "shareholder_returns": {"enabled": true, "weight": 0.10}
+            "shareholder_returns": {"enabled": true, "weight": 0.10},
+            "moat": {
+                "enabled": true,
+                "weight": 0.14
+            },
+            "risk": {
+                "enabled": true,
+                "weight": 0.1
+            }
         },
         "parameters": {
             "trailingPE": {
@@ -220,7 +228,7 @@
                 "enabled": true, "label": "Div Yield %", "source": "yahoo_info.dividendYield",
                 "group": "shareholder_returns", "stage": "fast", "weight": 1.0,
                 "display": true, "format": "number",
-                "gate": {"min": 0}, "score": {"good": 3, "bad": 0}
+                "gate": null, "score": {"good": 3, "bad": 0}
             },
             "payoutRatio": {
                 "enabled": true, "label": "Payout %", "source": "yahoo_info.payoutRatio",
@@ -348,7 +356,7 @@
                 "gate": null, "score": {"good": 0.8, "bad": 0.3}
             },
             "ibkr_implied_volatility": {
-                "enabled": true, "label": "IV (IBKR)",
+                "enabled": false, "label": "IV (IBKR)",
                 "source": "ibkr.implied_volatility",
                 "group": "analyst_sentiment", "stage": "deep", "weight": 1.0,
                 "display": false, "format": "number",
@@ -367,11 +375,645 @@
                 "group": "growth", "stage": "deep", "weight": 1.0,
                 "display": false, "format": "pct",
                 "gate": null, "score": {"good": 20, "bad": 0}
+            },
+            "negative_equity_burn": {
+                "enabled": true,
+                "label": "Neg equity + burn",
+                "source": "distress.negative_equity_burn",
+                "group": "risk",
+                "stage": "fast",
+                "weight": 1,
+                "display": false,
+                "format": "number",
+                "veto": true,
+                "gate": {
+                    "max": 1
+                },
+                "score": null
+            },
+            "interest_coverage": {
+                "enabled": true,
+                "label": "Int coverage",
+                "source": "distress.interest_coverage",
+                "group": "risk",
+                "stage": "fast",
+                "weight": 1,
+                "display": false,
+                "format": "number",
+                "veto": true,
+                "gate": {
+                    "min": 1
+                },
+                "score": {
+                    "good": 12,
+                    "bad": 2
+                }
+            },
+            "altman_z": {
+                "enabled": true,
+                "label": "Altman Z",
+                "source": "distress.altman_z",
+                "group": "risk",
+                "stage": "fast",
+                "weight": 1,
+                "display": false,
+                "format": "number",
+                "veto": true,
+                "gate": {
+                    "min": 1.1
+                },
+                "score": {
+                    "good": 4,
+                    "bad": 1.8
+                }
+            },
+            "fcf_negative_years": {
+                "enabled": true,
+                "label": "FCF neg yrs",
+                "source": "distress.fcf_negative_years",
+                "group": "risk",
+                "stage": "fast",
+                "weight": 1,
+                "display": false,
+                "format": "number",
+                "veto": true,
+                "gate": {
+                    "max": 3
+                },
+                "score": {
+                    "good": 0,
+                    "bad": 3
+                }
+            },
+            "cash_runway_quarters": {
+                "enabled": true,
+                "label": "Cash runway (q)",
+                "source": "distress.cash_runway_quarters",
+                "group": "risk",
+                "stage": "fast",
+                "weight": 1,
+                "display": false,
+                "format": "number",
+                "veto": true,
+                "gate": {
+                    "min": 4
+                },
+                "score": null
+            },
+            "earnings_cash_divergence_years": {
+                "enabled": true,
+                "label": "NI+ CFO- yrs",
+                "source": "distress.earnings_cash_divergence_years",
+                "group": "risk",
+                "stage": "fast",
+                "weight": 1,
+                "display": false,
+                "format": "number",
+                "veto": true,
+                "gate": {
+                    "max": 3
+                },
+                "score": null
+            },
+            "beneish_m": {
+                "enabled": true,
+                "label": "Beneish M",
+                "source": "distress.beneish_m",
+                "group": "risk",
+                "stage": "fast",
+                "weight": 1,
+                "display": false,
+                "format": "number",
+                "veto": true,
+                "gate": {
+                    "max": -0.5
+                },
+                "score": {
+                    "good": -3,
+                    "bad": -1.78
+                }
+            },
+            "short_percent_float": {
+                "enabled": true,
+                "label": "Short % float",
+                "source": "distress.short_percent_float",
+                "group": "risk",
+                "stage": "fast",
+                "weight": 1,
+                "display": false,
+                "format": "number",
+                "veto": true,
+                "gate": {
+                    "max": 20
+                },
+                "score": {
+                    "good": 1,
+                    "bad": 15
+                }
+            },
+            "negative_equity": {
+                "enabled": true,
+                "label": "Neg equity",
+                "source": "distress.negative_equity",
+                "group": "risk",
+                "stage": "fast",
+                "weight": 1,
+                "display": false,
+                "format": "number",
+                "gate": null,
+                "score": {
+                    "good": 0,
+                    "bad": 1
+                }
+            },
+            "short_term_debt_to_cash": {
+                "enabled": true,
+                "label": "ST debt/cash",
+                "source": "distress.short_term_debt_to_cash",
+                "group": "risk",
+                "stage": "fast",
+                "weight": 1,
+                "display": false,
+                "format": "number",
+                "gate": null,
+                "score": {
+                    "good": 0.2,
+                    "bad": 2
+                }
+            },
+            "accruals_ratio": {
+                "enabled": true,
+                "label": "Accruals",
+                "source": "distress.accruals_ratio",
+                "group": "risk",
+                "stage": "fast",
+                "weight": 1,
+                "display": false,
+                "format": "number",
+                "gate": null,
+                "score": {
+                    "good": -0.05,
+                    "bad": 0.1
+                }
+            },
+            "short_interest_change_pct": {
+                "enabled": true,
+                "label": "Short chg MoM %",
+                "source": "distress.short_interest_change_pct",
+                "group": "risk",
+                "stage": "fast",
+                "weight": 1,
+                "display": false,
+                "format": "number",
+                "gate": null,
+                "score": {
+                    "good": -10,
+                    "bad": 25
+                }
+            },
+            "short_ratio": {
+                "enabled": true,
+                "label": "Days to cover",
+                "source": "distress.short_ratio",
+                "group": "risk",
+                "stage": "fast",
+                "weight": 1,
+                "display": false,
+                "format": "number",
+                "gate": null,
+                "score": {
+                    "good": 2,
+                    "bad": 10
+                }
+            },
+            "going_concern": {
+                "enabled": true,
+                "label": "Going concern",
+                "source": "sec_flags.going_concern",
+                "group": "risk",
+                "stage": "deep",
+                "weight": 1,
+                "display": false,
+                "format": "number",
+                "veto": true,
+                "gate": {
+                    "max": 1
+                },
+                "score": null
+            },
+            "restatement": {
+                "enabled": true,
+                "label": "Restatement",
+                "source": "sec_flags.restatement",
+                "group": "risk",
+                "stage": "deep",
+                "weight": 1,
+                "display": false,
+                "format": "number",
+                "veto": true,
+                "gate": {
+                    "max": 1
+                },
+                "score": null
+            },
+            "bankruptcy_filing": {
+                "enabled": true,
+                "label": "Bankruptcy 8-K",
+                "source": "sec_flags.bankruptcy_filing",
+                "group": "risk",
+                "stage": "deep",
+                "weight": 1,
+                "display": false,
+                "format": "number",
+                "veto": true,
+                "gate": {
+                    "max": 1
+                },
+                "score": null
+            },
+            "delisting_notice": {
+                "enabled": true,
+                "label": "Delisting notice",
+                "source": "sec_flags.delisting_notice",
+                "group": "risk",
+                "stage": "deep",
+                "weight": 1,
+                "display": false,
+                "format": "number",
+                "veto": true,
+                "gate": {
+                    "max": 1
+                },
+                "score": null
+            },
+            "late_filing": {
+                "enabled": true,
+                "label": "Late filing",
+                "source": "sec_flags.late_filing",
+                "group": "risk",
+                "stage": "deep",
+                "weight": 1,
+                "display": false,
+                "format": "number",
+                "veto": true,
+                "gate": {
+                    "max": 1
+                },
+                "score": null
+            },
+            "auditor_change": {
+                "enabled": true,
+                "label": "Auditor change",
+                "source": "sec_flags.auditor_change",
+                "group": "risk",
+                "stage": "deep",
+                "weight": 1,
+                "display": false,
+                "format": "number",
+                "gate": null,
+                "score": {
+                    "good": 0,
+                    "bad": 1
+                }
+            },
+            "debt_acceleration": {
+                "enabled": true,
+                "label": "Debt acceleration",
+                "source": "sec_flags.debt_acceleration",
+                "group": "risk",
+                "stage": "deep",
+                "weight": 1,
+                "display": false,
+                "format": "number",
+                "gate": null,
+                "score": {
+                    "good": 0,
+                    "bad": 1
+                }
+            },
+            "officer_departure": {
+                "enabled": true,
+                "label": "Officer exit",
+                "source": "sec_flags.officer_departure",
+                "group": "risk",
+                "stage": "deep",
+                "weight": 1,
+                "display": false,
+                "format": "number",
+                "gate": null,
+                "score": {
+                    "good": 0,
+                    "bad": 1
+                }
+            },
+            "shelf_registration": {
+                "enabled": true,
+                "label": "Shelf S-3",
+                "source": "sec_flags.shelf_registration",
+                "group": "risk",
+                "stage": "deep",
+                "weight": 1,
+                "display": false,
+                "format": "number",
+                "gate": null,
+                "score": {
+                    "good": 0,
+                    "bad": 1
+                }
+            },
+            "unregistered_sale": {
+                "enabled": true,
+                "label": "Unregistered sale",
+                "source": "sec_flags.unregistered_sale",
+                "group": "risk",
+                "stage": "deep",
+                "weight": 1,
+                "display": false,
+                "format": "number",
+                "gate": null,
+                "score": {
+                    "good": 0,
+                    "bad": 1
+                }
+            },
+            "net_debt_to_ebitda_veto": {
+                "enabled": true,
+                "label": "NetDebt/EBITDA veto",
+                "source": "yahoo_deep.net_debt_to_ebitda",
+                "group": "risk",
+                "stage": "deep",
+                "weight": 1,
+                "display": false,
+                "format": "number",
+                "veto": true,
+                "gate": {
+                    "max": 6
+                },
+                "score": null
+            },
+            "dilution_veto": {
+                "enabled": true,
+                "label": "Dilution veto",
+                "source": "yahoo_deep.buyback_2y",
+                "group": "risk",
+                "stage": "deep",
+                "weight": 1,
+                "display": false,
+                "format": "number",
+                "veto": true,
+                "gate": {
+                    "max": 10
+                },
+                "score": null
+            },
+            "eps_collapse_veto": {
+                "enabled": true,
+                "label": "EPS collapse veto",
+                "source": "yahoo_deep.eps_revision_net",
+                "group": "risk",
+                "stage": "deep",
+                "weight": 1,
+                "display": false,
+                "format": "number",
+                "veto": true,
+                "gate": {
+                    "min": -0.5
+                },
+                "score": null
+            },
+            "liquidity_distress": {
+                "enabled": true,
+                "label": "Liquidity distress",
+                "source": "yahoo_deep.liquidity_distress",
+                "group": "risk",
+                "stage": "deep",
+                "weight": 1,
+                "display": false,
+                "format": "number",
+                "veto": true,
+                "gate": {
+                    "max": 1
+                },
+                "score": null
+            },
+            "current_ratio": {
+                "enabled": true,
+                "label": "Current ratio",
+                "source": "yahoo_deep.current_ratio",
+                "group": "risk",
+                "stage": "deep",
+                "weight": 1,
+                "display": false,
+                "format": "number",
+                "gate": null,
+                "score": {
+                    "good": 2.5,
+                    "bad": 1.0
+                }
+            },
+            "quick_ratio": {
+                "enabled": true,
+                "label": "Quick ratio",
+                "source": "yahoo_deep.quick_ratio",
+                "group": "risk",
+                "stage": "deep",
+                "weight": 1,
+                "display": false,
+                "format": "number",
+                "gate": null,
+                "score": {
+                    "good": 1.5,
+                    "bad": 0.6
+                }
+            },
+            "insider_net_shares_6m": {
+                "enabled": true,
+                "label": "Insider net 6m",
+                "source": "yahoo_deep.insider_net_shares_6m",
+                "group": "risk",
+                "stage": "deep",
+                "weight": 1,
+                "display": false,
+                "format": "number",
+                "gate": null,
+                "score": {
+                    "good": 0,
+                    "bad": -500000
+                }
+            },
+            "downgrades_90d": {
+                "enabled": true,
+                "label": "Downgrades 90d",
+                "source": "yahoo_deep.downgrades_90d",
+                "group": "risk",
+                "stage": "deep",
+                "weight": 1,
+                "display": false,
+                "format": "number",
+                "gate": null,
+                "score": {
+                    "good": 0,
+                    "bad": 3
+                }
+            },
+            "roic_years_above": {
+                "enabled": true,
+                "label": "ROIC yrs > hurdle",
+                "source": "moat.roic_years_above",
+                "group": "moat",
+                "stage": "fast",
+                "weight": 1,
+                "display": false,
+                "format": "number",
+                "gate": null,
+                "score": {
+                    "good": 5,
+                    "bad": 1
+                }
+            },
+            "roic_stability": {
+                "enabled": true,
+                "label": "ROIC stability",
+                "source": "moat.roic_stability",
+                "group": "moat",
+                "stage": "fast",
+                "weight": 1,
+                "display": false,
+                "format": "number",
+                "gate": null,
+                "score": {
+                    "good": 6,
+                    "bad": 1
+                }
+            },
+            "gross_margin_slope": {
+                "enabled": true,
+                "label": "GM trend pp/yr",
+                "source": "moat.gross_margin_slope",
+                "group": "moat",
+                "stage": "fast",
+                "weight": 1,
+                "display": false,
+                "format": "number",
+                "gate": null,
+                "score": {
+                    "good": 1.0,
+                    "bad": -1.5
+                }
+            },
+            "operating_margin_stability": {
+                "enabled": true,
+                "label": "OpM stability",
+                "source": "moat.operating_margin_stability",
+                "group": "moat",
+                "stage": "fast",
+                "weight": 1,
+                "display": false,
+                "format": "number",
+                "gate": null,
+                "score": {
+                    "good": 8,
+                    "bad": 1
+                }
+            },
+            "revenue_growth_years": {
+                "enabled": true,
+                "label": "Rev growth yrs",
+                "source": "moat.revenue_growth_years",
+                "group": "moat",
+                "stage": "fast",
+                "weight": 1,
+                "display": false,
+                "format": "number",
+                "gate": null,
+                "score": {
+                    "good": 4,
+                    "bad": 1
+                }
+            },
+            "revenue_cagr_5y": {
+                "enabled": true,
+                "label": "Rev CAGR 5y",
+                "source": "moat.revenue_cagr_5y",
+                "group": "moat",
+                "stage": "fast",
+                "weight": 1,
+                "display": false,
+                "format": "number",
+                "gate": null,
+                "score": {
+                    "good": 12,
+                    "bad": 0
+                }
+            },
+            "fcf_conversion": {
+                "enabled": true,
+                "label": "FCF/NI",
+                "source": "moat.fcf_conversion",
+                "group": "moat",
+                "stage": "fast",
+                "weight": 1,
+                "display": false,
+                "format": "number",
+                "gate": null,
+                "score": {
+                    "good": 1.0,
+                    "bad": 0.4
+                }
+            },
+            "fcf_margin": {
+                "enabled": true,
+                "label": "FCF margin",
+                "source": "moat.fcf_margin",
+                "group": "moat",
+                "stage": "fast",
+                "weight": 1,
+                "display": false,
+                "format": "number",
+                "gate": null,
+                "score": {
+                    "good": 20,
+                    "bad": 2
+                }
+            },
+            "capex_intensity": {
+                "enabled": true,
+                "label": "Capex/Rev",
+                "source": "moat.capex_intensity",
+                "group": "moat",
+                "stage": "fast",
+                "weight": 1,
+                "display": false,
+                "format": "number",
+                "gate": null,
+                "score": {
+                    "good": 3,
+                    "bad": 15
+                }
+            },
+            "incremental_roic": {
+                "enabled": true,
+                "label": "Incr. ROIC",
+                "source": "moat.incremental_roic",
+                "group": "moat",
+                "stage": "fast",
+                "weight": 1,
+                "display": false,
+                "format": "number",
+                "gate": null,
+                "score": {
+                    "good": 20,
+                    "bad": 3
+                }
             }
-        }
+        },
+        "statement_years": 5,
+        "moat_roic_hurdle_pct": 12,
+        "veto_badge": "🚫",
+        "veto_tier": "AVOID"
     },
     "ibkr": {
-        "enabled": true,
+        "enabled": false,
         "host": "127.0.0.1",
         "port": 4001,
         "client_id": 17,
@@ -389,7 +1031,7 @@
         "auto": {
             "enabled": true,
             "gate": "all",
-            "max_reports": 3,
+            "max_reports": 15,
             "discord_send": true
         },
         "narrative": {
