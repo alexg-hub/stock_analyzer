@@ -108,10 +108,13 @@ python research_report.py verdicts MSFT JNJ
 python research_report.py scan PGR RL
 run_ondemand.bat PGR
 
-# The risk/reward plane over the whole index. ~13 min for 500 tickers; cached
-# per ticker, so a re-run is instant and a weekly refresh is enough. No Discord.
-python universe_scan.py                      # whole index -> table + PNG + HTML
-python universe_scan.py --tickers MSFT KO    # just these
+# The risk/reward plane. Cached per ticker, so a re-run is instant. No Discord.
+# Each scope writes its OWN table/PNG/HTML -- a subset can never overwrite the
+# whole-index plane (it silently did until 2026-08-10).
+python universe_scan.py                      # all 503 -> risk_reward_*    ~13 min
+python universe_scan.py --from-signals       # the week's signals -> signals_plane_*
+python universe_scan.py --from-signals 14    # ...a 14-day window instead
+python universe_scan.py --tickers MSFT KO    # just these -> subset_plane_*
 python universe_scan.py --limit 30           # timing probe before committing
 python universe_scan.py --no-fetch           # re-render from cache, no network
 python universe_scan.py --refresh            # ignore the cache (needed after a
@@ -405,11 +408,30 @@ real send.
     only, so beta has no benchmark — and the benchmark cannot just be added to
     the scan download because every column there goes through every screen. It
     is a handful of tickers, so one batched call. Fail-open to the scan panel.
-  - **`universe_scan.py` is weekly, on its own Task Scheduler entry** ("SP500
-    Universe Plane", Sunday 18:00, `run_universe.bat`), because fundamentals move
-    quarterly and a 12-minute pass has no business inside the nightly chain. It
-    posts nothing to Discord: it is a reference artifact, not an event, and the
-    nightly card already carries the part that is actionable that day.
+  - **`universe_scan.py` runs weekly over the *week's signals*, not the index**
+    ("SP500 Universe Plane", Sunday 18:00, `run_universe.bat`, which passes
+    `--from-signals`). `signal_tickers` reads `signals.csv` — which holds screen
+    signals only, so "identified by a strategy" needs no extra filtering — for
+    the last `universe.signal_window_days` (7), de-duplicated across screens and
+    nights. A quiet week exits 0 having written nothing, rather than re-rendering
+    the previous week's page over it. It posts nothing to Discord: a reference
+    artifact is not an event, and the nightly card already carries the part that
+    is actionable that day.
+    **The full 503-ticker pass is therefore on no schedule.** Run it by hand when
+    the whole plane needs refreshing — and note it is the base population for the
+    sector-relative percentiles the scoring still needs, so it going stale
+    silently blocks that work.
+  - **Scope decides which files a run may write**, and this is load-bearing. The
+    artifacts are date-stamped, so before `artifact_paths` existed a ten-ticker
+    run resolved to *exactly* the same `risk_reward_<date>.csv`,
+    `risk_reward.png` and `.html` as the full pass and silently replaced the
+    day's whole-index plane with a plane of ten — no error, just a quietly wrong
+    chart. Three scopes now: `SCOPE_UNIVERSE` keeps the configured names (the MCP
+    tools glob them and the published page is built from them), `SCOPE_SIGNALS`
+    writes `signals_plane_*`, `SCOPE_SUBSET` writes `subset_plane_*`. The
+    **cache is shared** by all three, which is correct — it is keyed per ticker,
+    so any run simply refreshes the rows it touched. A test pins that the three
+    scopes cannot collide.
 - **`price_risk.py` is the `price_risk` resolver**, and its whole point is that
   the risk axis was built from accounting data alone — no volatility, no
   drawdown, no beta, which are the three most directly *measurable* risks a

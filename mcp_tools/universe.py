@@ -173,19 +173,26 @@ def register(mcp) -> None:
 
     @mcp.tool()
     def universe_scan(refresh: bool = False, tickers: list[str] | None = None,
+                      from_signals: int | None = None,
                       limit: int | None = None) -> dict:
-        """Grade the whole S&P 500 on the risk/reward plane. Long job.
+        """Grade tickers on the risk/reward plane. Long job.
 
-        ~1.6s per ticker over four Yahoo calls each, so a full pass is roughly
-        15 minutes; cached tickers are skipped unless `refresh`. Returns a
-        job_id -- poll `job_status`. Writes the table, PNG and interactive HTML
-        under output/universe/. No Discord.
+        Three scopes, and each writes its **own** files so none can overwrite
+        another: no arguments grades every constituent (~1.5s per ticker over
+        four Yahoo calls, so ~13 minutes) into `risk_reward_*`; `tickers=[...]`
+        grades just those into `subset_plane_*`; `from_signals=N` grades what the
+        screens flagged in the last N days into `signals_plane_*`.
+
+        Cached tickers are skipped unless `refresh`. Returns a job_id -- poll
+        `job_status`. No Discord.
         """
         args = ["universe_scan.py"]
         if refresh:
             args.append("--refresh")
         if tickers:
             args += ["--tickers", *[t.upper() for t in tickers]]
+        elif from_signals is not None:
+            args += ["--from-signals", str(int(from_signals))]
         if limit:
             args += ["--limit", str(int(limit))]
         return backtests._script_job("universe_scan", args)

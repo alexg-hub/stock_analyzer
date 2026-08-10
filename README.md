@@ -1386,10 +1386,16 @@ $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -WakeToRun -Executi
 Register-ScheduledTask -TaskName "SP500 Breakout Scanner" -Action $action -Trigger $trigger -Settings $settings -Description "Scans S&P 500 for breakouts from consolidation ~30 min after US market close, alerts via Discord webhook, then runs the tier-3 deep-dive on the gated candidates."
 ```
 
-A second, **weekly** task grades the whole index on the risk/reward plane. It is
-separate on purpose: fundamentals move quarterly, the pass takes ~12 minutes, and
-it posts nothing to Discord — the nightly card already carries each signal's own
-coordinates, which is the part that is actionable on the day.
+A second, **weekly** task puts the week's signals on the risk/reward plane
+(`--from-signals`, a 7-day window over `signals.csv`). It posts nothing to
+Discord — the nightly card already carries each signal's own coordinates, which is
+the part that is actionable on the day.
+
+Each scope writes its **own** files, so none can overwrite another:
+`risk_reward_*` for the full index, `signals_plane_*` for the weekly window,
+`subset_plane_*` for a named list. The full 503-ticker pass is deliberately on no
+schedule — it is the base population for peer-relative scoring, so run
+`python universe_scan.py` when you want the whole plane refreshed.
 
 ```powershell
 $action   = New-ScheduledTaskAction -Execute "C:\Users\Lenovo\CC\stock_analyzer\run_universe.bat" -WorkingDirectory "C:\Users\Lenovo\CC\stock_analyzer"

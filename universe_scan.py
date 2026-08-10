@@ -27,18 +27,30 @@ Three things about it are deliberate:
     tickers and a bounded retry with backoff -- the only such handling in the
     codebase, and it exists because 500x is a load shape we have not measured.
 
+**Scope decides which files a run may write.** The cache is shared -- it is keyed
+per ticker, so any run refreshes the rows it touched -- but the table, scatter and
+page are named for the population behind them, because they are date-stamped and
+a ten-ticker run used to resolve to the *same* filenames as the 503-ticker pass
+and silently replace the day's whole-index plane with a plane of ten.
+
 Outputs (all under `output/<universe.dir>/`):
-  * `fundamentals_cache.pkl`   -- per-ticker values + axes + collected_at
-  * `risk_reward_<date>.csv`   -- the durable table, one row per ticker
-  * `risk_reward.png`          -- the quadrant scatter
-  * `risk_reward.html`         -- the same, interactive, all 500 hoverable
+  * `fundamentals_cache.pkl`       -- per-ticker values + axes + collected_at
+  * `risk_reward_<date>.csv` + `.png`/`.html`     -- the full-index pass
+  * `signals_plane_<date>.csv` + `.png`/`.html`   -- `--from-signals`
+  * `subset_plane_<date>.csv` + `.png`/`.html`    -- `--tickers`
 
 Usage:
-    python universe_scan.py                       # whole index, cache-aware
+    python universe_scan.py                        # whole index, cache-aware
+    python universe_scan.py --from-signals         # what the screens flagged
+    python universe_scan.py --from-signals 14      # ...in the last 14 days
     python universe_scan.py --tickers MSFT KO      # just these
     python universe_scan.py --refresh              # ignore the cache
     python universe_scan.py --no-fetch             # re-render from cache only
     python universe_scan.py --limit 30             # first N, for a timing probe
+
+The weekly scheduled task runs `--from-signals`; the full pass is on no schedule,
+because it is the base population for the sector-relative percentiles the scoring
+still needs and is re-run deliberately rather than automatically.
 """
 
 import argparse
@@ -79,6 +91,50 @@ TABLE_COLUMNS = [
     "reward_metrics_used", "reward_metrics_total",
     "worst_risk", "collected_at", "error",
 ]
+
+# What a run covers, which decides **which files it may write**. The cache is
+# shared by every scope (it is keyed per ticker, so a subset run simply refreshes
+# the rows it touched), but the table, PNG and page are not: they are named for
+# the population behind them.
+#
+# This exists because the artifacts are date-stamped, so a ten-ticker run and the
+# 503-ticker pass resolved to the *same* filenames -- and the subset silently
+# replaced the full day's table, scatter and page. Nothing errored; the plane
+# just quietly became a plane of ten names.
+SCOPE_UNIVERSE = "universe"     # every constituent
+SCOPE_SIGNALS = "signals"       # what the screens flagged in a recent window
+SCOPE_SUBSET = "subset"         # tickers named on the command line
+
+#: Filename stems per scope. Only the universe stem is configurable, because
+#: only it is referenced from elsewhere (`mcp_tools.universe` globs it, and the
+#: published page is built from it).
+_SCOPE_STEMS = {SCOPE_SIGNALS: "signals_plane", SCOPE_SUBSET: "subset_plane"}
+
+
+def artifact_stem(cfg: dict, scope: str) -> str:
+    if scope == SCOPE_UNIVERSE:
+        return section(cfg).get("table_csv", "risk_reward")
+    return _SCOPE_STEMS.get(scope, scope)
+
+
+def artifact_paths(cfg: dict, scope: str) -> dict:
+    """Where this scope's table, scatter and page go.
+
+    The universe scope keeps the exact configured names so the MCP tools and the
+    published page keep resolving; every other scope is derived from its stem and
+    therefore cannot collide with it.
+    """
+    stem = artifact_stem(cfg, scope)
+    stamp = pd.Timestamp.today().date().isoformat()
+    directory = universe_dir(cfg)
+    if scope == SCOPE_UNIVERSE:
+        png = section(cfg).get("chart_path", "risk_reward.png")
+        html = section(cfg).get("html_path", "risk_reward.html")
+    else:
+        png, html = f"{stem}.png", f"{stem}.html"
+    return {"csv": directory / f"{stem}_{stamp}.csv",
+            "png": directory / png,
+            "html": directory / html}
 
 
 def section(cfg: dict) -> dict:
@@ -373,12 +429,54 @@ def build_table(cfg: dict, cache: dict, constituents: pd.DataFrame
     return table
 
 
-def write_table(cfg: dict, table: pd.DataFrame) -> Path:
-    stamp = pd.Timestamp.today().date().isoformat()
-    stem = section(cfg).get("table_csv", "risk_reward")
-    path = universe_dir(cfg) / f"{stem}_{stamp}.csv"
+def write_table(cfg: dict, table: pd.DataFrame,
+                scope: str = SCOPE_UNIVERSE) -> Path:
+    path = artifact_paths(cfg, scope)["csv"]
     table.round(2).to_csv(path, index=False)
     return path
+
+
+def _with_sectors(cfg: dict, tickers: list[str]) -> pd.DataFrame:
+    """A constituents frame for `tickers`, sector filled in where known.
+
+    One Wikipedia request buys the sector labels, which the chart colours nothing
+    by but the table and the peer lookup both use. Fail-open: a scoped run must
+    still work when Wikipedia is unreachable, just without sectors.
+    """
+    blank = pd.DataFrame({"ticker": tickers, "sector": "", "sub_industry": ""})
+    try:
+        full = sp500_constituents(cfg["data"]["sp500_source_url"])
+    except Exception as exc:  # noqa: BLE001 - sector is a nicety, not a gate
+        log_step("UNIVERSE", "warn",
+                 f"no sector labels ({exc}) -- grading anyway", cfg=cfg)
+        return blank
+    merged = blank[["ticker"]].merge(full, on="ticker", how="left")
+    return merged.fillna({"sector": "", "sub_industry": ""})
+
+
+def signal_tickers(cfg: dict, days: int) -> list[str]:
+    """Tickers the screens flagged in the last `days` days, newest first.
+
+    Read from `signals.csv`, which holds one row per (scan_date, screen, ticker)
+    and **only** screen signals -- an ad-hoc look is recorded in the on-demand
+    table instead, so "identified by a strategy" needs no extra filtering here.
+    A ticker that fired on two screens, or on two nights, appears once.
+
+    Goes through `ledger.read_table` rather than `pd.read_csv` because a night on
+    which nothing fired writes a zero-byte file, and reading that raises.
+    """
+    from portfolio_sim.ledger import read_table
+    from scanner_common import signals_csv_path
+
+    frame = read_table(signals_csv_path(cfg))
+    if frame.empty or "ticker" not in frame.columns:
+        return []
+    dates = pd.to_datetime(frame.get("scan_date"), errors="coerce")
+    cutoff = pd.Timestamp.today().normalize() - pd.Timedelta(days=int(days))
+    recent = frame[dates >= cutoff].copy()
+    recent["_d"] = dates[dates >= cutoff]
+    ordered = recent.sort_values("_d", ascending=False)["ticker"].astype(str)
+    return list(dict.fromkeys(ordered))            # de-duplicated, order kept
 
 
 def summarize(table: pd.DataFrame, cfg: dict) -> str:
@@ -683,10 +781,15 @@ def html_payload(table: pd.DataFrame, cfg: dict) -> tuple[str, dict]:
     """
     keep = ["ticker", "company", "sector", "reward", "risk", "vetoed",
             "veto_reasons", "worst_risk", "quadrant"]
-    frame = table.reindex(columns=keep).where(pd.notna(table.reindex(
-        columns=keep)), None)
-    records = frame.to_dict(orient="records")
+    records = table.reindex(columns=keep).to_dict(orient="records")
     for row in records:
+        # NaN -> None per value, not via `DataFrame.where`: that preserves the
+        # column dtype, so `None` lands back as NaN and `allow_nan=False` below
+        # raises. Which is the right guard -- JSON has no NaN and no browser can
+        # parse one -- but it means the conversion has to actually happen here.
+        for key, value in list(row.items()):
+            if isinstance(value, float) and pd.isna(value):
+                row[key] = None
         row["vetoed"] = bool(row.get("vetoed"))
         for key in ("company", "sector", "veto_reasons", "worst_risk"):
             row[key] = row.get(key) or ""
@@ -755,6 +858,10 @@ def write_html(table: pd.DataFrame, cfg: dict, out_path: Path,
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     parser.add_argument("--tickers", nargs="*", help="grade only these")
+    parser.add_argument("--from-signals", nargs="?", type=int, const=-1,
+                        metavar="DAYS",
+                        help="grade what the screens flagged in the last DAYS "
+                             "days (default universe.signal_window_days)")
     parser.add_argument("--limit", type=int,
                         help="only the first N of the universe (timing probe)")
     parser.add_argument("--refresh", action="store_true",
@@ -767,10 +874,30 @@ def main(argv=None) -> int:
     cfg = load_config()
     started = time.time()
 
+    # The scope decides which files this run may write. Only a full pass touches
+    # the shared universe artifacts; everything narrower writes its own, because
+    # the filenames are date-stamped and a subset would otherwise replace the
+    # day's whole-index table, scatter and page without a word.
     if args.tickers:
-        constituents = pd.DataFrame({"ticker": [t.upper() for t in args.tickers],
-                                     "sector": "", "sub_industry": ""})
+        scope = SCOPE_SUBSET
+        wanted = [t.upper() for t in args.tickers]
+        constituents = _with_sectors(cfg, wanted)
+    elif args.from_signals is not None:
+        scope = SCOPE_SIGNALS
+        days = (int(section(cfg).get("signal_window_days", 7))
+                if args.from_signals < 0 else args.from_signals)
+        wanted = signal_tickers(cfg, days)
+        log_step("UNIVERSE", "ok" if wanted else "none",
+                 f"{len(wanted)} ticker(s) flagged by a screen in the last "
+                 f"{days} day(s)", cfg=cfg)
+        if not wanted:
+            # Not a failure: a quiet week is a real outcome, and re-rendering the
+            # previous week's page over it would misreport this one.
+            print(f"No screen signals in the last {days} days -- nothing to grade.")
+            return 0
+        constituents = _with_sectors(cfg, wanted)
     else:
+        scope = SCOPE_UNIVERSE
         constituents = sp500_constituents(cfg["data"]["sp500_source_url"])
         if args.limit:
             constituents = constituents.head(args.limit)
@@ -778,13 +905,14 @@ def main(argv=None) -> int:
     tickers = constituents["ticker"].tolist()
     cache = scan(cfg, tickers, refresh=args.refresh, fetch=not args.no_fetch)
 
-    # Render the tickers asked for, not the whole cache -- a --tickers run must
-    # not silently republish a table built from a months-old universe pass.
+    # Render the tickers asked for, not the whole cache -- a scoped run must not
+    # silently republish a table built from a months-old universe pass.
     view = {t: cache[t] for t in tickers if t in cache}
     table = build_table(cfg, view, constituents)
-    csv_path = write_table(cfg, table)
+    paths = artifact_paths(cfg, scope)
+    csv_path = write_table(cfg, table, scope)
 
-    print(summarize(table, cfg))
+    print(f"[{scope}] {summarize(table, cfg)}")
     print(f"Table -> {csv_path}")
     if not table.empty:
         cols = ["ticker", "sector", "reward", "risk", "quadrant", "vetoed"]
@@ -797,18 +925,14 @@ def main(argv=None) -> int:
         reward_min, risk_max = quality.quadrant_thresholds(cfg)
         chart_cfg = dict(section(cfg),
                          reward_min=reward_min, risk_max=risk_max)
-        png = universe_dir(cfg) / section(cfg).get("chart_path",
-                                                  "risk_reward.png")
         try:
-            charts.plot_risk_reward(table, chart_cfg, png,
+            charts.plot_risk_reward(table, chart_cfg, paths["png"],
                                     dpi=int(section(cfg).get("chart_dpi", 120)))
         except Exception as exc:  # noqa: BLE001 - a chart never kills the pass
             log_step("UNIVERSE", "failed", f"chart: {exc}", cfg=cfg)
-        html = universe_dir(cfg) / section(cfg).get("html_path",
-                                                   "risk_reward.html")
         try:
-            write_html(table, cfg, html)
-            print(f"Interactive -> {html}")
+            write_html(table, cfg, paths["html"])
+            print(f"Interactive -> {paths['html']}")
         except Exception as exc:  # noqa: BLE001
             log_step("UNIVERSE", "failed", f"html: {exc}", cfg=cfg)
 
