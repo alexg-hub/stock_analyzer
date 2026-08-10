@@ -314,7 +314,16 @@ than a quality gate, and the two are kept deliberately apart.
 | expected to fire | often — most names fail one | rarely |
 | a **missing value** | **fails** the gate | **never** vetoes |
 | appears in | `Quality Missing` | `Veto Reasons` |
-| effect on the verdict | none directly | forces the tier to `AVOID` |
+| effect on the verdict | none directly | labels the row; gates it only if `veto_enforced` |
+
+`quality.veto_enforced` is **`false`**, so a tripped veto is recorded and badged
+but does not override the tier. That is a measurement decision, not leniency: the
+thesis is that excluding the losers beats owning them, and only tier 4 grading
+excluded names *against* clean ones can show it. Relabelled `AVOID`, an excluded
+name stops being comparable to anything, and on the risk/reward plane it becomes
+a category rather than a point. As a label the same rule is a hypothesis you can
+watch — vetoed names should cluster in the high-risk quadrant, and if they don't,
+that is a finding about the rules rather than a bug.
 
 That middle row is the load-bearing one. Unverifiable quality doesn't earn the
 badge, but unverifiable is not *proof of disaster* — and Yahoo leaves holes in
@@ -398,7 +407,10 @@ proves the gates and anchors reproduce the two sections they replaced.
 pip install -r requirements.txt
 python run_scanners.py            # tiers 1+2: full S&P 500 scan + Discord alert
 python run_scanners.py --no-send  # the same scan, cards printed instead of posted
+python universe_scan.py           # the whole index on the risk/reward plane (~13 min)
+python universe_scan.py --no-fetch                   # re-render from cache, no network
 python research_report.py candidates                 # tier 3: who to deep-dive
+python research_report.py risk INTC MSFT             # every risk rule beside its threshold
 python research_report.py scan PGR                   # on-demand: tiers 1+2 for one ticker
 run_ondemand.bat PGR                                 # on-demand: all three tiers
 type output\logs\<run_id>.log                        # what that deep-dive actually did

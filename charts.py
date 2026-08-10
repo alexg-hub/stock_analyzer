@@ -645,6 +645,44 @@ def plot_financials(fin: dict, ticker: str, out_path: Path,
 #: worst of the avoid quadrant.
 _SCATTER_LABELS = 12
 
+#: Minimum gap, in axis units, between two placed labels. Both axes are 0-100 so
+#: one number covers them.
+_LABEL_GAP = 6.0
+
+
+def _label_extremes(ax, points: pd.DataFrame, xt: float, rt: float) -> None:
+    """Name the most extreme point in each quadrant, skipping collisions.
+
+    "Extreme" is distance from the quadrant threshold corner, so each quadrant
+    contributes its own most characteristic names rather than the whole label
+    budget going to one end of one axis.
+    """
+    corners = ((-1, 1), (1, 1), (-1, -1), (1, -1))   # (risk dir, reward dir)
+    per_corner = max(1, _SCATTER_LABELS // len(corners))
+    placed: list[tuple[float, float]] = []
+    for dx, dy in corners:
+        side = points[((points["risk"] > xt) == (dx > 0))
+                      & ((points["reward"] > rt) == (dy > 0))]
+        if side.empty:
+            continue
+        # Distance from the crossing point, so "most extreme" means furthest into
+        # the corner on both axes at once.
+        score = ((side["risk"] - xt) * dx + (side["reward"] - rt) * dy)
+        # Consider more candidates than needed, since collisions skip some.
+        shown = 0
+        for _, row in side.loc[score.nlargest(per_corner * 4).index].iterrows():
+            if shown >= per_corner or len(placed) >= _SCATTER_LABELS:
+                break
+            x, y = float(row["risk"]), float(row["reward"])
+            if any(abs(x - px) < _LABEL_GAP and abs(y - py) < _LABEL_GAP
+                   for px, py in placed):
+                continue
+            ax.annotate(str(row["ticker"]), xy=(x, y), xytext=(6, 4),
+                        textcoords="offset points", fontsize=8.5,
+                        color=C["ink2"], zorder=6)
+            placed.append((x, y))
+            shown += 1
+
 
 def plot_risk_reward(table: pd.DataFrame, chart_cfg: dict, out_path: Path,
                      dpi: int = 120) -> None:
@@ -693,14 +731,13 @@ def plot_risk_reward(table: pd.DataFrame, chart_cfg: dict, out_path: Path,
                        alpha=0.75, edgecolor=C["surface"], linewidth=0.7,
                        zorder=3, label=f"{label} ({len(subset)})")
 
-        # Name only the extremes: best of the target quadrant, worst overall.
-        best = points.nlargest(_SCATTER_LABELS // 2, "reward")
-        worst = points.nsmallest(_SCATTER_LABELS // 2, "reward")
-        for _, row in pd.concat([best, worst]).iterrows():
-            ax.annotate(str(row["ticker"]),
-                        xy=(row["risk"], row["reward"]),
-                        xytext=(5, 4), textcoords="offset points",
-                        fontsize=8.5, color=C["ink2"], zorder=4)
+        # Name the corner-most point of each quadrant rather than the top and
+        # bottom of one axis: sorting by reward alone picks a cluster of near-
+        # identical names and stacks their labels on top of each other.
+        # `_label_extremes` also skips any label that would collide with one
+        # already placed, so a dense corner silently shows fewer names instead of
+        # an illegible pile.
+        _label_extremes(ax, points, xt, rt)
 
     ax.set_xlabel("risk  (higher = more dangerous)", color=C["ink2"],
                   fontsize=10)
@@ -718,8 +755,10 @@ def plot_risk_reward(table: pd.DataFrame, chart_cfg: dict, out_path: Path,
                 va="top" if y > 50 else "bottom", zorder=2)
 
     if not points.empty:
+        # Below the axis, not inside it: at 500 points every interior position
+        # covers data, and the upper-centre default sat right on the dense band.
         ax.legend(frameon=False, fontsize=9, labelcolor=C["ink2"],
-                  loc="upper center", ncol=2)
+                  loc="upper center", bbox_to_anchor=(0.5, -0.09), ncol=2)
 
     stage = (table["stage"].dropna().iloc[0]
              if "stage" in table.columns and table["stage"].notna().any()

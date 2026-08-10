@@ -431,66 +431,117 @@ _HTML_TAIL = "</body></html>\n"
 #: published Artifact, where a strict CSP blocks every external host.
 _HTML_BODY = """
 <style>
+/* Palette and type tokens. The two hues are `charts.py`'s validated pair, so the
+   PNG and this page describe the same data in the same colours; the semantic
+   trio is used ONLY on the quadrant chips, where it encodes a judgment, and
+   never on the marks, where the sole categorical split is excluded/not. */
 :root {
-  --bg: #fcfcfb; --panel: #ffffff; --ink: #0b0b0b; --ink2: #52514e;
-  --muted: #898781; --grid: #e1e0d9; --axis: #c3c2b7;
-  --series: #2a78d6; --event: #eb6834; --shadow: rgba(11,11,11,.08);
+  --bg: #fcfcfb; --panel: #ffffff; --sunk: #f6f5f1;
+  --ink: #14140f; --ink2: #52514e; --muted: #898781;
+  --grid: #e1e0d9; --axis: #c3c2b7; --hair: #ecebe4;
+  --series: #2a78d6; --event: #eb6834;
+  --good: #276b47; --warn: #8a6212; --crit: #a33a22; --idle: #6b6a64;
+  --shadow: rgba(20,20,15,.09);
+  --display: "Helvetica Neue", Helvetica, Arial, system-ui, sans-serif;
+  --body: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --data: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --bg: #131311; --panel: #1c1c1a; --ink: #f4f3ef; --ink2: #b8b6ae;
-    --muted: #8a8880; --grid: #2c2c28; --axis: #3d3d38;
-    --series: #5fa3ee; --event: #f4884f; --shadow: rgba(0,0,0,.4);
+    --bg: #131311; --panel: #1c1c1a; --sunk: #191917;
+    --ink: #f4f3ef; --ink2: #b8b6ae; --muted: #8a8880;
+    --grid: #2c2c28; --axis: #3d3d38; --hair: #24241f;
+    --series: #5fa3ee; --event: #f4884f;
+    --good: #6cc08d; --warn: #d9a83c; --crit: #ef8163; --idle: #9b9a92;
+    --shadow: rgba(0,0,0,.45);
   }
 }
 :root[data-theme="dark"] {
-  --bg: #131311; --panel: #1c1c1a; --ink: #f4f3ef; --ink2: #b8b6ae;
-  --muted: #8a8880; --grid: #2c2c28; --axis: #3d3d38;
-  --series: #5fa3ee; --event: #f4884f; --shadow: rgba(0,0,0,.4);
+  --bg: #131311; --panel: #1c1c1a; --sunk: #191917;
+  --ink: #f4f3ef; --ink2: #b8b6ae; --muted: #8a8880;
+  --grid: #2c2c28; --axis: #3d3d38; --hair: #24241f;
+  --series: #5fa3ee; --event: #f4884f;
+  --good: #6cc08d; --warn: #d9a83c; --crit: #ef8163; --idle: #9b9a92;
+  --shadow: rgba(0,0,0,.45);
 }
 * { box-sizing: border-box; }
-body { margin: 0; padding: 24px; background: var(--bg); color: var(--ink);
-  font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
-.wrap { max-width: 1100px; margin: 0 auto; }
-h1 { font-size: 1.5rem; margin: 0 0 .2rem; letter-spacing: -.01em; }
-.sub { color: var(--ink2); font-size: .9rem; margin-bottom: 1.4rem; }
-.controls { display: flex; flex-wrap: wrap; gap: 1.2rem; align-items: center;
-  padding: .9rem 1.1rem; background: var(--panel); border: 1px solid var(--grid);
-  border-radius: 10px; margin-bottom: 1rem; font-size: .875rem; }
-.controls label { color: var(--ink2); display: flex; align-items: center; gap: .5rem; }
+body { margin: 0; padding: 28px 24px 48px; background: var(--bg);
+  color: var(--ink); font: 15px/1.55 var(--body); }
+.wrap { max-width: 1120px; margin: 0 auto;
+  display: flex; flex-direction: column; gap: 1.15rem; }
+header { display: flex; flex-direction: column; gap: .35rem; }
+.eyebrow { font: 600 .7rem/1 var(--data); letter-spacing: .1em;
+  text-transform: uppercase; color: var(--muted); }
+h1 { font: 600 1.75rem/1.15 var(--display); letter-spacing: -.022em; margin: 0;
+  text-wrap: balance; }
+.sub { color: var(--ink2); font-size: .875rem; max-width: 68ch; margin: 0; }
+
+.counts { display: flex; flex-wrap: wrap; gap: .45rem; }
+.chip { display: inline-flex; align-items: baseline; gap: .4rem;
+  padding: .34rem .7rem .34rem .6rem; border-radius: 4px; font-size: .78rem;
+  background: var(--sunk); border: 1px solid var(--hair); color: var(--ink2);
+  border-left: 3px solid var(--idle); }
+.chip b { font: 600 .95rem/1 var(--data); font-variant-numeric: tabular-nums;
+  color: var(--ink); }
+.chip.buy { border-left-color: var(--good); }
+.chip.avoid { border-left-color: var(--crit); }
+.chip.speculative { border-left-color: var(--warn); }
+.chip.excluded { border-left-color: var(--event); }
+
+.controls { display: flex; flex-wrap: wrap; gap: 1.1rem 1.4rem;
+  align-items: center; padding: .8rem 1rem; background: var(--panel);
+  border: 1px solid var(--grid); border-radius: 6px; font-size: .82rem; }
+.controls label { color: var(--ink2); display: flex; align-items: center;
+  gap: .45rem; }
+.controls b { font: 600 .82rem/1 var(--data); font-variant-numeric: tabular-nums;
+  color: var(--ink); min-width: 2ch; text-align: right; }
 select, input[type=range] { accent-color: var(--series); }
 select { background: var(--bg); color: var(--ink); border: 1px solid var(--axis);
-  border-radius: 6px; padding: .25rem .4rem; font: inherit; }
-.counts { display: flex; flex-wrap: wrap; gap: .5rem; margin-bottom: 1rem; }
-.pill { padding: .3rem .7rem; border-radius: 999px; font-size: .8rem;
-  background: var(--panel); border: 1px solid var(--grid); color: var(--ink2); }
-.pill b { color: var(--ink); }
+  border-radius: 4px; padding: .25rem .4rem; font: inherit; }
+:is(select, input, .dot):focus-visible { outline: 2px solid var(--series);
+  outline-offset: 2px; }
+
 .plotwrap { position: relative; background: var(--panel);
-  border: 1px solid var(--grid); border-radius: 10px; padding: 8px;
+  border: 1px solid var(--grid); border-radius: 6px; padding: 10px;
   overflow-x: auto; }
-svg { display: block; width: 100%; height: auto; min-width: 560px; }
+svg { display: block; width: 100%; height: auto; min-width: 580px; }
+svg text { font-family: var(--data); }
 .dot { cursor: pointer; }
-#tip { position: absolute; pointer-events: none; opacity: 0; transition: opacity .1s;
-  background: var(--panel); color: var(--ink); border: 1px solid var(--axis);
-  border-radius: 8px; padding: .55rem .7rem; font-size: .8rem; max-width: 280px;
-  box-shadow: 0 4px 14px var(--shadow); z-index: 5; }
-#tip .t { font-weight: 600; }
+#tip { position: absolute; pointer-events: none; opacity: 0;
+  transition: opacity .09s; background: var(--panel); color: var(--ink);
+  border: 1px solid var(--axis); border-radius: 5px; padding: .55rem .7rem;
+  font-size: .78rem; max-width: 290px; box-shadow: 0 6px 18px var(--shadow);
+  z-index: 5; }
+#tip .t { font: 600 .85rem/1.3 var(--display); letter-spacing: -.01em; }
 #tip .m { color: var(--ink2); }
-table { border-collapse: collapse; width: 100%; font-size: .82rem;
-  margin-top: 1.4rem; }
-th, td { text-align: left; padding: .4rem .55rem;
-  border-bottom: 1px solid var(--grid); }
-th { color: var(--ink2); font-weight: 600; }
-td.num { text-align: right; font-variant-numeric: tabular-nums; }
-caption { text-align: left; color: var(--ink2); font-size: .85rem;
-  padding-bottom: .5rem; }
-.note { color: var(--muted); font-size: .8rem; margin-top: 1.6rem;
-  border-top: 1px solid var(--grid); padding-top: .9rem; }
+#tip .n { font-family: var(--data); font-variant-numeric: tabular-nums; }
+
+.tablewrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: .8rem;
+  min-width: 620px; }
+th, td { text-align: left; padding: .42rem .6rem;
+  border-bottom: 1px solid var(--hair); }
+th { color: var(--muted); font: 600 .68rem/1 var(--data);
+  letter-spacing: .07em; text-transform: uppercase; }
+td.t { font-weight: 600; }
+td.num { text-align: right; font-family: var(--data);
+  font-variant-numeric: tabular-nums; }
+caption { text-align: left; color: var(--ink2); font-size: .82rem;
+  padding-bottom: .55rem; }
+.note { color: var(--muted); font-size: .78rem; border-top: 1px solid var(--grid);
+  padding-top: .9rem; max-width: 78ch; }
+.note strong { color: var(--ink2); }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 </style>
 
 <div class="wrap">
-  <h1>Universe risk vs reward</h1>
-  <div class="sub" id="sub"></div>
+  <header>
+    <div class="eyebrow">S&amp;P 500 &middot; deterministic scoring</div>
+    <h1>Every name on the risk/reward plane</h1>
+    <p class="sub" id="sub"></p>
+  </header>
+
+  <div class="counts" id="counts"></div>
 
   <div class="controls">
     <label>Sector <select id="sector"><option value="">all</option></select></label>
@@ -498,10 +549,8 @@ caption { text-align: left; color: var(--ink2); font-size: .85rem;
       <b id="rtv"></b></label>
     <label>Risk &le; <input type="range" id="xt" min="0" max="100" step="1">
       <b id="xtv"></b></label>
-    <label><input type="checkbox" id="onlyv"> only vetoed</label>
+    <label><input type="checkbox" id="onlyv"> only excluded</label>
   </div>
-
-  <div class="counts" id="counts"></div>
 
   <div class="plotwrap">
     <svg id="plot" viewBox="0 0 760 560" role="img"
@@ -509,13 +558,15 @@ caption { text-align: left; color: var(--ink2); font-size: .85rem;
     <div id="tip"></div>
   </div>
 
-  <table id="buytable">
-    <caption id="buycap"></caption>
-    <thead><tr><th>Ticker</th><th>Company</th><th>Sector</th>
-      <th class="num">Reward</th><th class="num">Risk</th>
-      <th>Worst risk readings</th></tr></thead>
-    <tbody></tbody>
-  </table>
+  <div class="tablewrap">
+    <table id="buytable">
+      <caption id="buycap"></caption>
+      <thead><tr><th>Ticker</th><th>Company</th><th>Sector</th>
+        <th class="num">Reward</th><th class="num">Risk</th>
+        <th>Worst risk readings</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
 
   <p class="note" id="note"></p>
 </div>
@@ -530,7 +581,7 @@ const esc = s => String(s == null ? "" : s).replace(/[&<>"]/g,
   c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
 
 $("sub").textContent = META.subtitle;
-$("note").textContent = META.note;
+$("note").innerHTML = META.note;
 $("rt").value = META.reward_threshold; $("xt").value = META.risk_threshold;
 
 const sectors = [...new Set(DATA.map(d => d.sector).filter(Boolean))].sort();
@@ -593,17 +644,21 @@ function draw() {
     if (sector && d.sector !== sector) continue;
     tally[quadrant(d, rt, xt)]++;
   }
+  const LABEL = {buy: "low risk · high reward", speculative: "high reward · high risk",
+    dull: "low risk · low reward", avoid: "high risk · low reward",
+    unknown: "not measurable"};
   $("counts").innerHTML = Object.entries(tally).map(([k, v]) =>
-    `<span class="pill">${k} <b>${v}</b></span>`).join("")
-    + `<span class="pill">vetoed <b>${DATA.filter(d => d.vetoed
-        && (!sector || d.sector === sector)).length}</b></span>`;
+    `<span class="chip ${k}"><b>${v}</b> ${LABEL[k]}</span>`).join("")
+    + `<span class="chip excluded"><b>${DATA.filter(d => d.vetoed
+        && (!sector || d.sector === sector)).length}</b> excluded by a rule</span>`;
 
   const buys = shown.filter(d => quadrant(d, rt, xt) === "buy")
     .sort((a, b) => b.reward - a.reward);
   $("buycap").textContent =
     `Low-risk / high-reward quadrant — ${buys.length} name(s)`;
   $("buytable").querySelector("tbody").innerHTML = buys.map(d => `<tr>
-    <td>${esc(d.ticker)}</td><td>${esc(d.company)}</td><td>${esc(d.sector)}</td>
+    <td class="t">${esc(d.ticker)}</td><td>${esc(d.company)}</td>
+    <td>${esc(d.sector)}</td>
     <td class="num">${d.reward.toFixed(1)}</td>
     <td class="num">${d.risk.toFixed(1)}</td>
     <td>${esc(d.worst_risk)}</td></tr>`).join("")
@@ -618,9 +673,9 @@ $("plot").addEventListener("mouseover", e => {
   tip.innerHTML = `<div class="t">${esc(d.ticker)}${d.company
       ? " — " + esc(d.company) : ""}</div>
     <div class="m">${esc(d.sector) || "sector n/a"}</div>
-    <div>reward <b>${d.reward.toFixed(1)}</b> &nbsp; risk <b>${d.risk.toFixed(1)}</b></div>
+    <div class="n">reward ${d.reward.toFixed(1)} &nbsp; risk ${d.risk.toFixed(1)}</div>
     ${d.vetoed ? `<div class="m">excluded: ${esc(d.veto_reasons)}</div>` : ""}
-    ${d.worst_risk ? `<div class="m">worst: ${esc(d.worst_risk)}</div>` : ""}`;
+    ${d.worst_risk ? `<div class="m n">worst: ${esc(d.worst_risk)}</div>` : ""}`;
   const box = $("plot").getBoundingClientRect();
   const host = tip.parentElement.getBoundingClientRect();
   tip.style.left = (e.clientX - host.left + 14) + "px";
@@ -654,13 +709,45 @@ def html_payload(table: pd.DataFrame, cfg: dict) -> tuple[str, dict]:
         "subtitle": summarize(table, cfg),
         "reward_threshold": float(section(cfg).get("reward_threshold", 60)),
         "risk_threshold": float(section(cfg).get("risk_threshold", 25)),
-        "note": ("Scores are deterministic, computed from the quality registry "
-                 "in force at collection time. A fast-stage risk reading omits "
-                 "the SEC filing flags, so it is not comparable to a deep-stage "
-                 "one. Thresholds here are display-only -- moving them re-labels "
-                 "the quadrants but changes no recorded score."),
+        "note": ("<strong>How to read this.</strong> Every score is computed in "
+                 "Python from the quality registry in force at collection time; "
+                 "no model produced any number here. Thresholds are display-only "
+                 "&mdash; moving them re-labels the quadrants and changes no "
+                 "recorded score. A fast-stage risk reading omits the SEC filing "
+                 "flags, so it is not comparable to a deep-stage one. "
+                 + _sector_caveat(table)),
     }
     return json.dumps(records, allow_nan=False), meta
+
+
+def _sector_caveat(table: pd.DataFrame) -> str:
+    """The measured sector skew, stated on the page rather than left to be found.
+
+    Every anchor in the registry is *absolute*, and several are only meaningful
+    against a peer group -- so the plane ranks sectors as well as companies. That
+    is a real limitation of the current scoring and belongs next to the chart, not
+    in a commit message. Computed rather than asserted, so it stops appearing when
+    it stops being true.
+    """
+    if table.empty or "sector" not in table.columns:
+        return ""
+    buys = table[(table["quadrant"] == BUY) & (table["sector"] != "")]
+    if buys.empty:
+        return ""
+    counts = buys["sector"].value_counts()
+    top, n = counts.index[0], int(counts.iloc[0])
+    share = n / len(buys) * 100
+    base = int((table["sector"] == top).sum()) / max(1, len(table)) * 100
+    if share < 1.5 * base:
+        return ""
+    return (f"<strong>Known bias:</strong> {top} is {share:.0f}% of the "
+            f"low-risk/high-reward quadrant ({n} of {len(buys)}) against "
+            f"{base:.0f}% of the index. The registry's thresholds are absolute, "
+            f"and several only mean something against a peer group &mdash; "
+            f"Altman Z and interest coverage are structurally low for banks and "
+            f"for capital-intensive regulated businesses. Read the quadrant as a "
+            f"shortlist to examine, not a portfolio, until scoring is "
+            f"peer-relative.")
 
 
 def write_html(table: pd.DataFrame, cfg: dict, out_path: Path,
