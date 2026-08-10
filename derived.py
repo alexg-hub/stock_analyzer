@@ -203,6 +203,21 @@ def _ratio(num, den):
     return num / den
 
 
+def _one_minus(value):
+    """`1 - value`, or None when the value is missing.
+
+    Exists because `1 - _ratio(...)` is a trap: `_ratio` returns None whenever
+    its denominator is missing or zero, so the expression raises `TypeError` for
+    any company whose total-assets row Yahoo does not publish. Guarding the
+    *inputs* is not enough -- the guard has to cover the ratio's own result.
+
+    The symptom was invisible: `quality.fetch_fast` catches per ticker, so an
+    affected name simply vanished from tier 2 with one `YAHOO failed` line, and
+    the universe pass is what finally made the pattern obvious at 500x.
+    """
+    return None if not _is_num(value) else 1 - value
+
+
 def _flag(condition) -> int | None:
     """A veto-safe 0/1 flag. `None` propagates as "unknown", never as "clean".
 
@@ -343,8 +358,10 @@ def beneish_m(frames: dict):
     gm_t = _ratio(sales_t - cogs_t, sales_t) if _is_num(sales_t) and _is_num(cogs_t) else None
     gm_p = _ratio(sales_p - cogs_p, sales_p) if _is_num(sales_p) and _is_num(cogs_p) else None
     gmi = _ratio(gm_p, gm_t)
-    aq_t = 1 - _ratio(ca_t + ppe_t, ta_t) if _is_num(ca_t) and _is_num(ppe_t) else None
-    aq_p = 1 - _ratio(ca_p + ppe_p, ta_p) if _is_num(ca_p) and _is_num(ppe_p) else None
+    aq_t = _one_minus(_ratio(ca_t + ppe_t, ta_t)) \
+        if _is_num(ca_t) and _is_num(ppe_t) else None
+    aq_p = _one_minus(_ratio(ca_p + ppe_p, ta_p)) \
+        if _is_num(ca_p) and _is_num(ppe_p) else None
     aqi = _ratio(aq_t, aq_p)
     sgi = _ratio(sales_t, sales_p)
 

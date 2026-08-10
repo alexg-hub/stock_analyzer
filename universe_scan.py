@@ -177,8 +177,10 @@ def load_prices(cfg: dict, tickers: list[str]):
     from scanner_common import download_price_data
     bench = cfg.get("backtest", {}).get("benchmark_ticker", "SPY")
     period = str(section(cfg).get("price_period", "5y"))
+    interval = cfg.get("data", {}).get("download_interval", "1d")
     try:
-        panel = download_price_data(sorted(set(tickers) | {bench}), period=period)
+        panel = download_price_data(sorted(set(tickers) | {bench}), period,
+                                    interval)
         closes = panel["Close"]
         series = closes[bench] if bench in closes.columns else None
         log_step("UNIVERSE", "ok",

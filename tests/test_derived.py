@@ -149,6 +149,32 @@ c.ok("one missing index yields None, never a partial score",
      derived.beneish_m(missing_sga) is None,
      "a six-of-eight M is a different statistic, not a weaker one")
 
+# Guarding a ratio's *inputs* is not the same as guarding its result: `_ratio`
+# returns None whenever the denominator is missing, and the asset-quality index
+# then did `1 - None`. That raised `TypeError` for any company whose Total Assets
+# row Yahoo omits -- and because `quality.fetch_fast` catches per ticker, the
+# symptom was the ticker silently vanishing from tier 2, not an error anyone saw.
+# Found on ADM during the first universe pass. Two more callers below it use the
+# same `_ratio` result, so the whole function has to survive the shape.
+no_assets = frames(
+    income={"Total Revenue": [100, 110, 120, 130, 140],
+            "Cost Of Revenue": [60, 64, 68, 71, 74],
+            "Net Income": [7, 9, 10, 12, 13],
+            "Selling General And Administration": [20, 21, 22, 23, 24]},
+    cashflow={"Operating Cash Flow": [12, 13, 15, 17, 19]},
+    balance={"Current Assets": [50, 52, 54, 56, 58],
+             "Net PPE": [80, 84, 88, 92, 96]})
+c.ok("a balance sheet with no Total Assets row yields None, never raises",
+     derived.beneish_m(no_assets) is None,
+     "1 - _ratio(...) raised TypeError here and dropped the ticker in silence")
+
+c.ok("_one_minus passes None through rather than arithmetic on it",
+     derived._one_minus(None) is None and derived._one_minus(0.25) == 0.75)
+
+# The whole resolver must survive it too, not just the one index.
+c.ok("distress_metrics survives a missing Total Assets row",
+     isinstance(derived.distress_metrics(no_assets, INFO, 5), dict))
+
 # --------------------------------------------------------------------------
 c.section("distress -- flags are ints, and conjunctions need both legs")
 
