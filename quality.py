@@ -93,6 +93,17 @@ STAGES = (STAGE_FAST, STAGE_DEEP)
 # refusal rather than a rule that silently never fires.
 GATE_KEYS = ("min", "max", "increasing")
 
+# The two axes of the risk/reward plane. Every group declares one, and the pair
+# is what a quadrant decision reads -- `AXIS_REWARD` is expected return,
+# `AXIS_RISK` is the probability of permanent loss. They are deliberately NOT
+# blended into each other: a single number cannot say whether a 53 means
+# "mid risk, mid reward" or "high reward, high risk", which is precisely the
+# distinction a quadrant exists to draw. The blended `score` survives alongside
+# them because every recorded conviction is denominated in it.
+AXIS_REWARD = "reward"
+AXIS_RISK = "risk"
+AXES = (AXIS_REWARD, AXIS_RISK)
+
 
 @dataclass
 class QualityResult:
@@ -106,12 +117,19 @@ class QualityResult:
     parameters: list[str] = field(default_factory=list)   # the enabled keys
     vetoed: bool | None = None          # None = the layer never ran
     veto_reasons: list[str] = field(default_factory=list)
+    # The risk/reward coordinates. `risk` is 100 - `safety`, i.e. high = bad,
+    # so it reads as a chart axis; None on either means "not measured".
+    reward: float | None = None
+    safety: float | None = None
+    risk: float | None = None
 
     def as_dict(self) -> dict:
         return {"passed": self.passed, "failed": list(self.failed),
                 "score": self.score, "groups": self.groups,
                 "values": self.values, "parameters": list(self.parameters),
-                "vetoed": self.vetoed, "veto_reasons": list(self.veto_reasons)}
+                "vetoed": self.vetoed, "veto_reasons": list(self.veto_reasons),
+                "reward": self.reward, "safety": self.safety,
+                "risk": self.risk}
 
 
 # --------------------------------------------------------------------------
@@ -370,23 +388,55 @@ def normalize(value: float, good: float, bad: float) -> float:
     return max(0.0, min(1.0, (value - bad) / (good - bad)))
 
 
-def score_of(values: dict, cfg: dict, stage: str | None = None):
-    """The weighted 0-100 score and its per-group breakdown.
+def axis_of(gspec: dict) -> str:
+    """Which axis a group scores on. Unmarked groups are reward.
+
+    Defaulting rather than requiring keeps every pre-axis config readable: a
+    group nobody has classified yet still contributes to the blended score
+    exactly as before, and only the risk axis needs opting into.
+    """
+    axis = (gspec.get("axis") or AXIS_REWARD)
+    return axis if axis in AXES else AXIS_REWARD
+
+
+def _combine(parts: list, pw: list, gspec: dict) -> float:
+    """Reduce one group's normalized metrics to a single 0-1 score.
+
+    `mean` is the default and what every group did before axes existed.
+    `{"worst_k": n}` averages the **n lowest** readings instead, which is the
+    aggregation the risk axis needs: averaging 19 distress metrics lets one
+    catastrophic reading be washed out by eighteen benign ones, so a company
+    visibly failing two tests scores almost the same as one failing none. Taking
+    the worst few is the same argument that makes a veto a veto rather than a
+    deduction -- risk is about the worst thing true of a company, not the
+    average thing.
+
+    Fewer than `n` participating metrics is not a problem: it reduces to the
+    mean of what there is, which is already the most pessimistic read available.
+    """
+    agg = gspec.get("aggregate") or "mean"
+    if isinstance(agg, dict) and _is_num(agg.get("worst_k")):
+        k = max(1, int(agg["worst_k"]))
+        order = sorted(range(len(parts)), key=lambda i: parts[i])[:k]
+        parts = [parts[i] for i in order]
+        pw = [pw[i] for i in order]
+    return sum(p * w for p, w in zip(parts, pw)) / sum(pw)
+
+
+def group_scores(values: dict, cfg: dict, stage: str | None = None) -> dict:
+    """Per-group 0-1 scores -- the one pass the blend and both axes share.
 
     Two kinds of emptiness, deliberately treated differently:
 
       * a group with **no participating parameters at this stage** is dropped
-        from the weighted mean entirely -- at `fast` there is no estimate data
-        to be neutral *about*, and folding in a 0.5 would drag every score
-        toward the middle for no reason;
+        entirely -- at `fast` there is no estimate data to be neutral *about*,
+        and folding in a 0.5 would drag every score toward the middle for no
+        reason;
       * a group that has parameters but no *values* scores a neutral **0.5**,
         which is the rule that keeps banks from being zeroed by statement rows
         Yahoo does not publish for them.
-
-    Weights renormalize over what actually participated, so switching one
-    parameter off never silently reweights the rest.
     """
-    breakdown, total, wsum = {}, 0.0, 0.0
+    breakdown = {}
     for name, gspec in groups(cfg).items():
         members = {k: s for k, s in parameters(cfg, stage).items()
                    if s.get("group") == name and s.get("score")}
@@ -403,16 +453,70 @@ def score_of(values: dict, cfg: dict, stage: str | None = None):
                 continue
             parts.append(normalize(value, anchors["good"], anchors["bad"]))
             pw.append(weight)
-        gscore = (sum(p * w for p, w in zip(parts, pw)) / sum(pw)) if parts else 0.5
-        gweight = float(gspec.get("weight", 0.0) or 0.0)
-        breakdown[name] = {"score": round(gscore, 3), "weight": gweight,
+        gscore = _combine(parts, pw, gspec) if parts else 0.5
+        breakdown[name] = {"score": round(gscore, 3),
+                           "weight": float(gspec.get("weight", 0.0) or 0.0),
+                           "axis": axis_of(gspec),
                            "metrics_used": len(parts),
                            "metrics_total": len(members)}
-        total += gweight * gscore
-        wsum += gweight
+    return breakdown
+
+
+def _weighted(breakdown: dict, names=None) -> float | None:
+    """Weighted mean of `breakdown`'s group scores, renormalized over members.
+
+    Renormalizing is what makes switching a group off, or an axis holding one
+    group, behave the same as any other configuration -- no weight has to sum
+    to anything in particular.
+    """
+    rows = [g for n, g in breakdown.items() if names is None or n in names]
+    wsum = sum(g["weight"] for g in rows)
     if not wsum:
-        return None, breakdown
-    return round(100 * total / wsum, 1), breakdown
+        return None
+    return round(100 * sum(g["weight"] * g["score"] for g in rows) / wsum, 1)
+
+
+def score_of(values: dict, cfg: dict, stage: str | None = None):
+    """The blended 0-100 score and its per-group breakdown.
+
+    Weights renormalize over what actually participated, so switching one
+    parameter off never silently reweights the rest.
+    """
+    breakdown = group_scores(values, cfg, stage)
+    return _weighted(breakdown), breakdown
+
+
+def axis_scores(values: dict, cfg: dict, stage: str | None = None) -> dict:
+    """The risk/reward coordinates: `reward`, `safety`, `risk`, 0-100 each.
+
+    **Polarity, stated explicitly because a silent sign flip here would be a
+    quiet catastrophe.** Every `normalize` call maps good->1, so the risk
+    group's composite is a *safety* reading -- high means healthy. `risk` is
+    its complement, so it reads the way a chart axis labelled "risk" must:
+    high means dangerous. Both are returned rather than just one, so no caller
+    has to remember which direction the underlying metrics ran.
+
+    A `None` axis means no group on it had anything scorable -- "not measured",
+    never zero. Plotting a missing axis as 0 would put an unmeasurable company
+    in the best quadrant.
+    """
+    return _axes_from(group_scores(values, cfg, stage))
+
+
+def _axes_from(breakdown: dict) -> dict:
+    """Split an existing group breakdown into axis coordinates.
+
+    Separate from `axis_scores` so `evaluate` can produce the blend and both
+    axes from **one** pass over the registry rather than three.
+    """
+    by_axis = {axis: {n for n, g in breakdown.items() if g["axis"] == axis}
+               for axis in AXES}
+    reward = _weighted(breakdown, by_axis[AXIS_REWARD])
+    safety = _weighted(breakdown, by_axis[AXIS_RISK])
+    return {"reward": reward,
+            "safety": safety,
+            "risk": None if safety is None else round(100 - safety, 1),
+            "groups": breakdown}
 
 
 # --------------------------------------------------------------------------
@@ -430,16 +534,20 @@ def evaluate(values: dict, cfg: dict, stage: str | None = None) -> QualityResult
     specs = parameters(cfg, stage)
     failed = gate_failures(values, cfg, stage)
     vetoes = veto_failures(values, cfg, stage)
-    score, breakdown = score_of(values, cfg, stage)
+    breakdown = group_scores(values, cfg, stage)
+    axes = _axes_from(breakdown)
     return QualityResult(
         passed=not failed,
         failed=failed,
-        score=score,
+        score=_weighted(breakdown),
         groups=breakdown,
         values={k: values.get(k) for k in specs},
         parameters=list(specs),
         vetoed=bool(vetoes),
         veto_reasons=vetoes,
+        reward=axes["reward"],
+        safety=axes["safety"],
+        risk=axes["risk"],
     )
 
 
@@ -964,12 +1072,37 @@ def validate(cfg: dict) -> list[str]:
         return problems
 
     known_groups = set((sect.get("groups") or {}).keys())
+    axis_seen = {axis: 0 for axis in AXES}
     for name, spec in (sect.get("groups") or {}).items():
         weight = spec.get("weight")
-        if spec.get("enabled", True) and not (isinstance(weight, (int, float))
-                                              and weight > 0):
+        enabled = spec.get("enabled", True)
+        if enabled and not (isinstance(weight, (int, float)) and weight > 0):
             problems.append(f"quality.groups.{name}: enabled but weight is "
                             f"{weight!r} -- it would contribute nothing")
+        # An unknown axis silently falls back to reward, which would move a
+        # group off the risk axis without any visible sign -- exactly the class
+        # of failure this function exists to convert into a refusal.
+        axis = spec.get("axis")
+        if axis is not None and axis not in AXES:
+            problems.append(f"quality.groups.{name}.axis: {axis!r} is not one "
+                            f"of {', '.join(AXES)}")
+        elif enabled:
+            axis_seen[axis_of(spec)] += 1
+        agg = spec.get("aggregate")
+        if agg is not None and agg != "mean":
+            if not (isinstance(agg, dict) and set(agg) == {"worst_k"}
+                    and _is_num(agg.get("worst_k")) and agg["worst_k"] >= 1):
+                problems.append(
+                    f"quality.groups.{name}.aggregate: expected \"mean\" or "
+                    f"{{\"worst_k\": n>=1}}, got {agg!r} -- an unrecognised "
+                    f"value would silently fall back to the mean")
+    # An axis with no groups yields None, which every caller must read as "not
+    # measured". That is correct behaviour but almost never intended, so say so.
+    for axis, count in axis_seen.items():
+        if not count:
+            problems.append(f"quality.groups: no enabled group is on the "
+                            f"{axis!r} axis -- that coordinate can only ever "
+                            f"come back unmeasured")
 
     for key, spec in (sect.get("parameters") or {}).items():
         where = f"quality.parameters.{key}"

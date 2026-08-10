@@ -364,4 +364,92 @@ c.ok("a veto with no gate is caught",
 c.ok("a parameter with neither a gate nor a score is caught",
      problems(_inert), "it would be collected and never used")
 
+
+# --------------------------------------------------------------------------
+# The risk/reward axes -- the quadrant coordinates
+# --------------------------------------------------------------------------
+# What is pinned here is the *polarity* and the *separation*, never a number.
+# A silent sign flip on the risk axis would put the most dangerous companies in
+# the buy quadrant, and no other check in the file would notice.
+
+axis_names = {quality.axis_of(g) for g in quality.groups(cfg).values()}
+c.ok("every enabled group lands on a known axis",
+     axis_names <= set(quality.AXES), f"got {sorted(axis_names)}")
+c.ok("both axes have at least one enabled group",
+     axis_names == set(quality.AXES),
+     "an axis with no groups can only ever report 'not measured'")
+
+
+def _axis_probe(risk_value: float, reward_value: float) -> dict:
+    """Values that drive every risk metric one way and every reward metric the
+    other, so the two coordinates must move independently."""
+    out = {}
+    for key, spec in quality.parameters(cfg, None).items():
+        anchors = spec.get("score")
+        if not anchors:
+            continue
+        group = quality.groups(cfg).get(spec.get("group")) or {}
+        frac = risk_value if quality.axis_of(group) == quality.AXIS_RISK \
+            else reward_value
+        # Interpolate in anchor space so direction is handled for us.
+        out[key] = anchors["bad"] + frac * (anchors["good"] - anchors["bad"])
+    return out
+
+
+best = quality.axis_scores(_axis_probe(1.0, 1.0), cfg, None)
+worst = quality.axis_scores(_axis_probe(0.0, 0.0), cfg, None)
+safe_dull = quality.axis_scores(_axis_probe(1.0, 0.0), cfg, None)
+risky_rich = quality.axis_scores(_axis_probe(0.0, 1.0), cfg, None)
+
+c.ok("all-good scores maximum reward and minimum risk",
+     best["reward"] == 100.0 and best["risk"] == 0.0,
+     f"reward={best['reward']} risk={best['risk']}")
+c.ok("all-bad scores minimum reward and maximum risk",
+     worst["reward"] == 0.0 and worst["risk"] == 100.0,
+     f"reward={worst['reward']} risk={worst['risk']}")
+c.ok("risk is the complement of safety, not a second copy of it",
+     all(abs(a["risk"] - (100 - a["safety"])) < 1e-9
+         for a in (best, worst, safe_dull, risky_rich)))
+c.ok("the axes are independent -- safe-and-dull is not risky-and-rich",
+     safe_dull["reward"] == 0.0 and safe_dull["risk"] == 0.0
+     and risky_rich["reward"] == 100.0 and risky_rich["risk"] == 100.0,
+     "a blended score cannot tell these two apart, which is why axes exist")
+
+no_values = quality.axis_scores({}, cfg, None)
+c.ok("an unmeasurable ticker reports neutral axes, never zero risk",
+     no_values["risk"] == 50.0 and no_values["reward"] == 50.0,
+     "groups with no values are neutral 0.5; plotting 0 would file an "
+     "unknown company in the buy quadrant")
+
+c.ok("the blended score still agrees with score_of",
+     quality.score_of(_axis_probe(1.0, 1.0), cfg, None)[0] == 100.0,
+     "the axes are additive -- they must not have changed the old number")
+
+
+# `worst_k` selects the lowest readings, so it can only ever be <= the mean.
+_wk = copy.deepcopy(cfg)
+_risk_group = next(n for n, g in quality.groups(cfg).items()
+                   if quality.axis_of(g) == quality.AXIS_RISK)
+_wk["quality"]["groups"][_risk_group]["aggregate"] = {"worst_k": 1}
+mixed = _axis_probe(1.0, 1.0)
+# Drag exactly one risk metric to its bad anchor.
+_one = next(k for k, s in quality.parameters(cfg, None).items()
+            if s.get("score") and s.get("group") == _risk_group)
+mixed[_one] = quality.parameters(cfg, None)[_one]["score"]["bad"]
+c.ok("worst_k is never kinder than the mean",
+     quality.axis_scores(mixed, _wk, None)["risk"]
+     >= quality.axis_scores(mixed, cfg, None)["risk"],
+     "one catastrophic reading must not be averaged away by benign ones")
+c.ok("worst_k:1 keys the axis off the single worst reading",
+     quality.axis_scores(mixed, _wk, None)["risk"] == 100.0)
+
+c.ok("an unknown axis is caught",
+     problems(lambda v: v["quality"]["groups"][first_group].update(
+         {"axis": "sideways"})),
+     "it would silently fall back to reward and move the group off risk")
+c.ok("an unrecognised aggregate is caught",
+     problems(lambda v: v["quality"]["groups"][first_group].update(
+         {"aggregate": {"worst_k": 0}})),
+     "it would silently fall back to the mean")
+
 raise SystemExit(c.finish())

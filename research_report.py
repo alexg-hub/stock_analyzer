@@ -1417,6 +1417,17 @@ def risk_report(ticker: str, cfg: dict) -> dict:
             if specs[k].get("group") == "moat"}
     risk = {k: quality.scalar(values.get(k), specs[k]) for k in specs
             if specs[k].get("group") == "risk" and not specs[k].get("veto")}
+    # Each risk metric's own 0-1 reading, worst first. This is what makes the
+    # group's aggregation auditable: a `worst_k` axis is only as good as the
+    # anchors on the metrics it selects, and a metric every company trips shows
+    # up here as a 0.0 sitting at the top of the list.
+    normalized = sorted(
+        ((k, quality.normalize(v, specs[k]["score"]["good"],
+                               specs[k]["score"]["bad"]))
+         for k in specs
+         if specs[k].get("group") == "risk" and specs[k].get("score")
+         and (v := quality.scalar(values.get(k), specs[k])) is not None),
+        key=lambda kv: kv[1])
     return {
         "ticker": ticker,
         "company": bundle.get(COMPANY_COL),
@@ -1429,6 +1440,12 @@ def risk_report(ticker: str, cfg: dict) -> dict:
         "moat_score": (result.groups.get("moat") or {}).get("score"),
         "risk_score": (result.groups.get("risk") or {}).get("score"),
         "quant_score": result.score,
+        # The quadrant coordinates. `risk_axis` is high-is-bad; `risk_score`
+        # above is the raw group reading, high-is-good -- they are complements,
+        # not duplicates, and the names are deliberately not interchangeable.
+        "reward_axis": result.reward,
+        "risk_axis": result.risk,
+        "risk_normalized": normalized,
     }
 
 
@@ -1443,6 +1460,12 @@ def _print_risk(report: dict, cfg: dict) -> None:
     print(f"  moat {_num_or_na(report['moat_score'], '{:.2f}')}   "
           f"risk {_num_or_na(report['risk_score'], '{:.2f}')}   "
           f"overall {_num_or_na(report['quant_score'])}/100")
+    print(f"  QUADRANT: reward {_num_or_na(report.get('reward_axis'))}/100   "
+          f"risk {_num_or_na(report.get('risk_axis'))}/100")
+    worst = report.get("risk_normalized") or []
+    if worst:
+        print("  worst risk readings: "
+              + ", ".join(f"{k}={v:.2f}" for k, v in worst[:5]))
 
     for state in ("tripped", "clean", "unknown"):
         rules = [r for r in report["rules"] if r["state"] == state]

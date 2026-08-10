@@ -182,20 +182,23 @@
             {"label": "PASS", "min": 0, "color": "898781"}
         ],
         "groups": {
-            "valuation": {"enabled": true, "weight": 0.16},
-            "growth": {"enabled": true, "weight": 0.16},
-            "estimate_momentum": {"enabled": true, "weight": 0.13},
-            "earnings_quality": {"enabled": true, "weight": 0.10},
-            "financial_quality": {"enabled": true, "weight": 0.24},
-            "analyst_sentiment": {"enabled": true, "weight": 0.11},
-            "shareholder_returns": {"enabled": true, "weight": 0.10},
+            "valuation": {"enabled": true, "weight": 0.16, "axis": "reward"},
+            "growth": {"enabled": true, "weight": 0.16, "axis": "reward"},
+            "estimate_momentum": {"enabled": true, "weight": 0.13, "axis": "reward"},
+            "earnings_quality": {"enabled": true, "weight": 0.10, "axis": "reward"},
+            "financial_quality": {"enabled": true, "weight": 0.24, "axis": "reward"},
+            "analyst_sentiment": {"enabled": true, "weight": 0.11, "axis": "reward"},
+            "shareholder_returns": {"enabled": true, "weight": 0.10, "axis": "reward"},
             "moat": {
                 "enabled": true,
-                "weight": 0.14
+                "weight": 0.14,
+                "axis": "reward"
             },
             "risk": {
                 "enabled": true,
-                "weight": 0.1
+                "weight": 0.1,
+                "axis": "risk",
+                "aggregate": "mean"
             }
         },
         "parameters": {
@@ -692,7 +695,7 @@
                 }
             },
             "officer_departure": {
-                "enabled": true,
+                "enabled": false,
                 "label": "Officer exit",
                 "source": "sec_flags.officer_departure",
                 "group": "risk",

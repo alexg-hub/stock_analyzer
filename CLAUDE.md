@@ -248,6 +248,37 @@ real send.
     still bought by tier 4, flagged — same argument as `exits.py` flagging
     rather than closing: a ledger that declined to buy what it excluded would
     answer the thesis by deleting the evidence.
+  - **Risk and reward are two axes, and the blend is kept only for
+    continuity.** Every `quality.groups` entry declares an `axis`
+    (`reward` | `risk`, default `reward`), and `quality.axis_scores` returns
+    `reward`/`safety`/`risk` alongside the old 0-100 `score`. The point is that
+    a single number cannot say whether a 53 means "mid risk, mid reward" or
+    "high reward, high risk" — which is exactly the distinction the intended
+    risk/reward quadrant chart exists to draw. This also fixed the weighting
+    problem without touching a weight: on the blend the `risk` group fought for
+    `0.10/1.24` ≈ 8% of the score against 19 metrics diluting each other to 0.4%
+    apiece, and on its own axis it holds 100%. Three rules:
+    - **The polarity is stated, never inferred.** Every `normalize` maps
+      good→1, so the risk group's composite is a *safety* reading; `risk` is its
+      complement so it reads the way an axis labelled "risk" must (high = bad).
+      Both are returned so no caller has to remember the direction. A silent
+      sign flip here would file the most dangerous companies in the buy
+      quadrant and nothing else would notice.
+    - **A missing axis is `None`, and must never be plotted as 0** — that would
+      put an unmeasurable company in the best quadrant. Same rule as
+      `quality.has_values`: not measured is not good news.
+    - **`aggregate: {"worst_k": n}` averages the n *lowest* readings** instead
+      of all of them, because risk is about the worst thing true of a company,
+      not the average thing. It is deliberately **still `"mean"`** for now:
+      switching it on scored MSFT at risk 77 and KO at 93, because it amplifies
+      miscalibrated anchors that averaging had been hiding. `officer_departure`
+      was the worst (8-K item 5.02 covers routine director elections, so it
+      read 0.00 for MSFT, INTC *and* KO — a 100%-base-rate flag carries no
+      information) and is now `enabled: false`. `shelf_registration` (routine
+      S-3 renewals for large caps) and the `current_ratio`/`quick_ratio` anchors
+      are the same shape of problem and still need the index-wide distribution
+      before anyone picks new numbers by eye. **Fix the anchors before enabling
+      `worst_k`.**
   - **`enabled: false` makes a parameter invisible** — not gated, not scored,
     absent from `Quality Missing` and from the embed fields, and not counted in
     any weight. That is the flag's whole purpose: a company with no dividend
