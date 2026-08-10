@@ -69,6 +69,8 @@ import time
 from dataclasses import dataclass, field
 
 import pandas as pd
+
+import peers
 import yfinance as yf
 
 from scanner_common import (
@@ -381,7 +383,8 @@ def veto_parameters(cfg: dict, stage: str | None = None) -> dict:
             if s.get("veto") and s.get("gate")}
 
 
-def veto_failures(values: dict, cfg: dict, stage: str | None = None) -> list[str]:
+def veto_failures(values: dict, cfg: dict, stage: str | None = None,
+                  sector: str = "") -> list[str]:
     """Which veto rules this ticker trips, by parameter key. Empty = keep it.
 
     The gate arithmetic is `gate_failures`', but the missing-value rule is
@@ -394,8 +397,25 @@ def veto_failures(values: dict, cfg: dict, stage: str | None = None) -> list[str
     gateway or a statement Yahoo does not publish can only ever make this layer
     *quieter*, never trigger-happy. It fails open, on purpose.
     """
-    return [key for key, spec in veto_parameters(cfg, stage).items()
-            if _gate_ok(values.get(key), spec, spec["gate"]) is False]
+    out = []
+    for key, spec in veto_parameters(cfg, stage).items():
+        if _gate_ok(values.get(key), spec, spec["gate"]) is not False:
+            continue                    # satisfied, or missing -- either way no veto
+        # A `sector_relative` veto needs a **second** condition: the value must
+        # also sit in the worst tail of its own peer group. Measured reason --
+        # regulated utilities carry heavy debt against rate-based cash flows by
+        # design, so Altman Z, cash runway and consecutive negative FCF breached
+        # for 26 of 31 of them and the rule stopped saying anything about the
+        # company. As a conjunction it can only ever make the exclusion quieter,
+        # and `in_sector_tail` returning None (thin sector, no stats) leaves the
+        # absolute verdict standing exactly as before.
+        if peers.is_enabled(cfg) and spec.get("sector_relative"):
+            tail = peers.in_sector_tail(key, spec, sector,
+                                        scalar(values.get(key), spec), cfg)
+            if tail is False:
+                continue
+        out.append(key)
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -448,7 +468,8 @@ def _combine(parts: list, pw: list, gspec: dict) -> float:
     return sum(p * w for p, w in zip(parts, pw)) / sum(pw)
 
 
-def group_scores(values: dict, cfg: dict, stage: str | None = None) -> dict:
+def group_scores(values: dict, cfg: dict, stage: str | None = None,
+                 sector: str = "") -> dict:
     """Per-group 0-1 scores -- the one pass the blend and both axes share.
 
     Two kinds of emptiness, deliberately treated differently:
@@ -476,7 +497,18 @@ def group_scores(values: dict, cfg: dict, stage: str | None = None) -> dict:
             weight = float(spec.get("weight", 1.0) or 0.0)
             if weight <= 0:
                 continue
-            parts.append(normalize(value, anchors["good"], anchors["bad"]))
+            # A `sector_relative` metric is scored by its rank among peers
+            # instead of against a fixed pair of anchors, because for these the
+            # absolute number is dominated by the sector: a 1.2 current ratio is
+            # prudent for Microsoft and alarming for a miner, and a utility's
+            # Altman Z says more about rate-base financing than about distress.
+            # Falls back to the anchors whenever the peer group is too thin to
+            # rank against.
+            relative = (peers.relative_score(key, spec, sector, value, cfg)
+                        if peers.is_enabled(cfg) and spec.get("sector_relative")
+                        else None)
+            parts.append(relative if relative is not None
+                         else normalize(value, anchors["good"], anchors["bad"]))
             pw.append(weight)
         gscore = _combine(parts, pw, gspec) if parts else 0.5
         breakdown[name] = {"score": round(gscore, 3),
@@ -501,17 +533,19 @@ def _weighted(breakdown: dict, names=None) -> float | None:
     return round(100 * sum(g["weight"] * g["score"] for g in rows) / wsum, 1)
 
 
-def score_of(values: dict, cfg: dict, stage: str | None = None):
+def score_of(values: dict, cfg: dict, stage: str | None = None,
+             sector: str = ""):
     """The blended 0-100 score and its per-group breakdown.
 
     Weights renormalize over what actually participated, so switching one
     parameter off never silently reweights the rest.
     """
-    breakdown = group_scores(values, cfg, stage)
+    breakdown = group_scores(values, cfg, stage, sector)
     return _weighted(breakdown), breakdown
 
 
-def axis_scores(values: dict, cfg: dict, stage: str | None = None) -> dict:
+def axis_scores(values: dict, cfg: dict, stage: str | None = None,
+                sector: str = "") -> dict:
     """The risk/reward coordinates: `reward`, `safety`, `risk`, 0-100 each.
 
     **Polarity, stated explicitly because a silent sign flip here would be a
@@ -525,7 +559,7 @@ def axis_scores(values: dict, cfg: dict, stage: str | None = None) -> dict:
     never zero. Plotting a missing axis as 0 would put an unmeasurable company
     in the best quadrant.
     """
-    return _axes_from(group_scores(values, cfg, stage))
+    return _axes_from(group_scores(values, cfg, stage, sector))
 
 
 def _axes_from(breakdown: dict) -> dict:
@@ -548,7 +582,8 @@ def _axes_from(breakdown: dict) -> dict:
 # One call, both verdicts
 # --------------------------------------------------------------------------
 
-def evaluate(values: dict, cfg: dict, stage: str | None = None) -> QualityResult:
+def evaluate(values: dict, cfg: dict, stage: str | None = None,
+             sector: str = "") -> QualityResult:
     """Grade one ticker: the badge, the score, and everything behind them.
 
     A no-op returning `passed=None` when the layer is off -- callers must read
@@ -558,8 +593,8 @@ def evaluate(values: dict, cfg: dict, stage: str | None = None) -> QualityResult
         return QualityResult()
     specs = parameters(cfg, stage)
     failed = gate_failures(values, cfg, stage)
-    vetoes = veto_failures(values, cfg, stage)
-    breakdown = group_scores(values, cfg, stage)
+    vetoes = veto_failures(values, cfg, stage, sector)
+    breakdown = group_scores(values, cfg, stage, sector)
     axes = _axes_from(breakdown)
     return QualityResult(
         passed=not failed,
@@ -664,8 +699,15 @@ def annotate(hits: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     if hits.empty or not is_enabled(cfg):
         return hits
     graded = [row_values(row, cfg, STAGE_FAST) for _, row in hits.iterrows()]
+    # The sector each ticker is judged against, from the peer stats' own map --
+    # the hits frame does not carry one, and looking it up here keeps every
+    # sector-relative rule reading the same source as the universe pass did.
+    # Unknown sector is the empty string, which every peer lookup treats as "no
+    # peer opinion" and falls back to the absolute anchors for.
+    sectors = [peers.sector_of(str(t), cfg) for t in hits.index]
     failures = [gate_failures(v, cfg, STAGE_FAST) for v in graded]
-    vetoes = [veto_failures(v, cfg, STAGE_FAST) for v in graded]
+    vetoes = [veto_failures(v, cfg, STAGE_FAST, s)
+              for v, s in zip(graded, sectors)]
     hits[QUALITY_COL] = [not f for f in failures]
     hits[QUALITY_MISSING_COL] = pd.Series(failures, index=hits.index, dtype=object)
     hits[VETO_COL] = [bool(v) for v in vetoes]
@@ -676,7 +718,7 @@ def annotate(hits: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     # tier 4 all read one answer. Deliberately the **fast**-stage axis, which is
     # what makes a signal's position comparable to the universe plane -- a
     # deep-stage reading includes the SEC flags and sits on a different scale.
-    axes = [axis_scores(v, cfg, STAGE_FAST) for v in graded]
+    axes = [axis_scores(v, cfg, STAGE_FAST, s) for v, s in zip(graded, sectors)]
     hits[REWARD_COL] = [a["reward"] for a in axes]
     hits[RISK_COL] = [a["risk"] for a in axes]
     hits[QUADRANT_COL] = [quadrant_of(a["reward"], a["risk"], cfg) for a in axes]

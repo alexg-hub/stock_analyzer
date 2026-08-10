@@ -209,6 +209,7 @@
         },
         "parameters": {
             "trailingPE": {
+                "sector_relative": true,
                 "enabled": true, "label": "P/E", "source": "yahoo_info.trailingPE",
                 "group": "valuation", "stage": "fast", "weight": 1.0,
                 "display": true, "format": "number",
@@ -221,6 +222,7 @@
                 "gate": {"max": 2.1}, "score": {"good": 0.8, "bad": 3.0}
             },
             "debtToEquity": {
+                "sector_relative": true,
                 "enabled": true, "label": "Total Debt/Equity",
                 "source": "yahoo_info.debtToEquity",
                 "group": "financial_quality", "stage": "fast", "weight": 1.0,
@@ -228,42 +230,49 @@
                 "gate": {"max": 85}, "score": {"good": 20, "bad": 150}
             },
             "revenueGrowth": {
+                "sector_relative": true,
                 "enabled": true, "label": "Rev YoY %", "source": "yahoo_info.revenueGrowth",
                 "group": "growth", "stage": "fast", "weight": 1.0,
                 "display": true, "format": "number", "percent": true,
                 "gate": {"min": 10}, "score": {"good": 20, "bad": 0}
             },
             "dividendYield": {
+                "sector_relative": true,
                 "enabled": true, "label": "Div Yield %", "source": "yahoo_info.dividendYield",
                 "group": "shareholder_returns", "stage": "fast", "weight": 1.0,
                 "display": true, "format": "number",
                 "gate": null, "score": {"good": 3, "bad": 0}
             },
             "payoutRatio": {
+                "sector_relative": true,
                 "enabled": true, "label": "Payout %", "source": "yahoo_info.payoutRatio",
                 "group": "shareholder_returns", "stage": "fast", "weight": 1.0,
                 "display": true, "format": "number", "percent": true,
                 "gate": {"max": 60}, "score": {"good": 30, "bad": 80}
             },
             "roe": {
+                "sector_relative": true,
                 "enabled": true, "label": "ROE", "source": "yahoo_stmt.roe",
                 "group": "financial_quality", "stage": "fast", "weight": 1.0,
                 "display": true, "format": "pct",
                 "gate": {"min": 12}, "score": {"good": 25, "bad": 5}
             },
             "roic": {
+                "sector_relative": true,
                 "enabled": true, "label": "ROIC", "source": "yahoo_stmt.roic",
                 "group": "financial_quality", "stage": "fast", "weight": 1.0,
                 "display": true, "format": "pct",
                 "gate": {"min": 12}, "score": {"good": 20, "bad": 4}
             },
             "operating_margin": {
+                "sector_relative": true,
                 "enabled": true, "label": "OpM", "source": "yahoo_stmt.operating_margin",
                 "group": "financial_quality", "stage": "fast", "weight": 1.0,
                 "display": true, "format": "pct_series",
                 "gate": {"min": 10, "increasing": true}, "score": {"good": 30, "bad": 5}
             },
             "profit_margin": {
+                "sector_relative": true,
                 "enabled": true, "label": "PM", "source": "yahoo_stmt.profit_margin",
                 "group": "financial_quality", "stage": "fast", "weight": 1.0,
                 "display": true, "format": "pct_series",
@@ -331,12 +340,14 @@
                 "gate": null, "score": {"good": 1.0, "bad": 0.5}
             },
             "return_on_assets": {
+                "sector_relative": true,
                 "enabled": true, "label": "ROA", "source": "yahoo_deep.return_on_assets",
                 "group": "financial_quality", "stage": "deep", "weight": 1.0,
                 "display": false, "format": "pct",
                 "gate": null, "score": {"good": 15, "bad": 2}
             },
             "gross_margin": {
+                "sector_relative": true,
                 "enabled": true, "label": "Gross margin",
                 "source": "yahoo_deep.gross_margin",
                 "group": "financial_quality", "stage": "deep", "weight": 1.0,
@@ -401,6 +412,7 @@
                 "score": null
             },
             "interest_coverage": {
+                "sector_relative": true,
                 "enabled": true,
                 "label": "Int coverage",
                 "source": "distress.interest_coverage",
@@ -419,6 +431,7 @@
                 }
             },
             "altman_z": {
+                "sector_relative": true,
                 "enabled": true,
                 "label": "Altman Z",
                 "source": "distress.altman_z",
@@ -437,6 +450,7 @@
                 }
             },
             "fcf_negative_years": {
+                "sector_relative": true,
                 "enabled": true,
                 "label": "FCF neg yrs",
                 "source": "distress.fcf_negative_years",
@@ -455,6 +469,7 @@
                 }
             },
             "cash_runway_quarters": {
+                "sector_relative": true,
                 "enabled": true,
                 "label": "Cash runway (q)",
                 "source": "distress.cash_runway_quarters",
@@ -470,6 +485,7 @@
                 "score": null
             },
             "earnings_cash_divergence_years": {
+                "sector_relative": true,
                 "enabled": true,
                 "label": "NI+ CFO- yrs",
                 "source": "distress.earnings_cash_divergence_years",
@@ -536,6 +552,7 @@
                 }
             },
             "short_term_debt_to_cash": {
+                "sector_relative": true,
                 "enabled": true,
                 "label": "ST debt/cash",
                 "source": "distress.short_term_debt_to_cash",
@@ -746,6 +763,7 @@
                 }
             },
             "net_debt_to_ebitda_veto": {
+                "sector_relative": true,
                 "enabled": true,
                 "label": "NetDebt/EBITDA veto",
                 "source": "yahoo_deep.net_debt_to_ebitda",
@@ -806,6 +824,7 @@
                 "score": null
             },
             "current_ratio": {
+                "sector_relative": true,
                 "enabled": true,
                 "label": "Current ratio",
                 "source": "yahoo_deep.current_ratio",
@@ -821,6 +840,7 @@
                 }
             },
             "quick_ratio": {
+                "sector_relative": true,
                 "enabled": true,
                 "label": "Quick ratio",
                 "source": "yahoo_deep.quick_ratio",
@@ -1001,6 +1021,7 @@
                 }
             },
             "roic_years_above": {
+                "sector_relative": true,
                 "enabled": true,
                 "label": "ROIC yrs > hurdle",
                 "source": "moat.roic_years_above",
@@ -1016,6 +1037,7 @@
                 }
             },
             "roic_stability": {
+                "sector_relative": true,
                 "enabled": true,
                 "label": "ROIC stability",
                 "source": "moat.roic_stability",
@@ -1031,6 +1053,7 @@
                 }
             },
             "gross_margin_slope": {
+                "sector_relative": true,
                 "enabled": true,
                 "label": "GM trend pp/yr",
                 "source": "moat.gross_margin_slope",
@@ -1046,6 +1069,7 @@
                 }
             },
             "operating_margin_stability": {
+                "sector_relative": true,
                 "enabled": true,
                 "label": "OpM stability",
                 "source": "moat.operating_margin_stability",
@@ -1061,6 +1085,7 @@
                 }
             },
             "revenue_growth_years": {
+                "sector_relative": true,
                 "enabled": true,
                 "label": "Rev growth yrs",
                 "source": "moat.revenue_growth_years",
@@ -1076,6 +1101,7 @@
                 }
             },
             "revenue_cagr_5y": {
+                "sector_relative": true,
                 "enabled": true,
                 "label": "Rev CAGR 5y",
                 "source": "moat.revenue_cagr_5y",
@@ -1091,6 +1117,7 @@
                 }
             },
             "fcf_conversion": {
+                "sector_relative": true,
                 "enabled": true,
                 "label": "FCF/NI",
                 "source": "moat.fcf_conversion",
@@ -1106,6 +1133,7 @@
                 }
             },
             "fcf_margin": {
+                "sector_relative": true,
                 "enabled": true,
                 "label": "FCF margin",
                 "source": "moat.fcf_margin",
@@ -1121,6 +1149,7 @@
                 }
             },
             "capex_intensity": {
+                "sector_relative": true,
                 "enabled": true,
                 "label": "Capex/Rev",
                 "source": "moat.capex_intensity",
@@ -1136,6 +1165,7 @@
                 }
             },
             "incremental_roic": {
+                "sector_relative": true,
                 "enabled": true,
                 "label": "Incr. ROIC",
                 "source": "moat.incremental_roic",
@@ -1157,8 +1187,14 @@
         "veto_tier": "AVOID",
         "veto_enforced": false,
         "quadrant": {
-            "reward_min": 60,
-            "risk_max": 25
+            "reward_min": 58,
+            "risk_max": 30
+        },
+        "peers": {
+            "enabled": true,
+            "path": "universe/peer_stats.json",
+            "min_peers": 12,
+            "veto_percentile": 0.10
         }
     },
     "universe": {

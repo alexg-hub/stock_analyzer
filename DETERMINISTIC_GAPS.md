@@ -78,18 +78,22 @@ it must sit on the *reward* axis, not risk. 🟨
 
 ## B. Free, but a new source has to be wired
 
-### B1. GICS sector — ✅ captured, 🟨 not yet used for scoring
+### B1. GICS sector — ✅ captured, ✅ used for scoring
 
 `sp500_constituents` now keeps the Sector and Sub-Industry columns that
 `get_sp500_tickers` was parsing and throwing away.
 
-The reason this matters more than any single metric: **every anchor in the
-registry is absolute**, and several are only meaningful against a peer group.
-Altman Z and interest coverage are structurally low for banks and anything with
-a captive finance arm; a 1.2 current ratio is prudent for Microsoft and alarming
-for a miner. **Sector-relative percentile scoring** is the systematic fix, and it
-is the thing standing between the risk axis and `aggregate: worst_k` — which is
-currently disabled precisely because it amplifies miscalibrated anchors.
+Done 2026-08-10: `peers.py` scores any parameter carrying
+`sector_relative: true` against its sector's distribution instead of its fixed
+anchors, and confirms a `sector_relative` veto only when the value is *also* in
+the worst decile of its peer group. Utilities went from 26 of 31 excluded to 5,
+sector mean risk 38.7 → 28.7, and Financials' share of the buy quadrant from 42%
+to 23% against a 15% index weight.
+
+**This also unblocks `aggregate: worst_k`**, which was disabled because it
+amplified miscalibrated anchors. With the worst offenders now ranked against peers
+rather than absolute bars, revisit that decision — it is the next thing to try on
+the risk axis.
 
 ### B2. SEC XBRL `frames` — the strategic one
 

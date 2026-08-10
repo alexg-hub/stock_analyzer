@@ -432,6 +432,48 @@ real send.
     **cache is shared** by all three, which is correct — it is keyed per ticker,
     so any run simply refreshes the rows it touched. A test pins that the three
     scopes cannot collide.
+- **`peers.py` is sector-relative scoring — the fix for absolute anchors.** A
+  parameter carrying `sector_relative: true` is read against its **sector's
+  distribution** instead of its fixed `good`/`bad` pair. Measured cause: the first
+  full pass excluded **26 of 31 utilities** on Altman Z, consecutive negative FCF
+  and cash runway — all structural for a regulated business financing a rate base
+  — and scored the sector the *highest* risk in the index. After: **5 of 31**
+  vetoed, sector mean risk 38.7 → 28.7, and Financials' share of the buy quadrant
+  42% → 23% against a 15% index weight. Five rules:
+  - **It reads, never fetches.** The distributions come from `universe_scan`'s
+    cache, which already holds resolved values for every constituent, and are
+    written to `output/universe/peer_stats.json` by a **full** pass only — a
+    subset run must never narrow the population everything else is compared
+    against.
+  - **The veto is a conjunction, never a percentile rule of its own.** A
+    `sector_relative` veto fires only when the absolute threshold is breached
+    **and** the value sits in the worst `veto_percentile` (10%) of its sector. So
+    the layer can only ever make the exclusion *quieter* — a test asserts the
+    vetoed set is always a subset of the absolute one. A pure percentile veto
+    would exclude a fixed share of every sector forever and stop meaning "visibly
+    falling over".
+  - **Ties take the midpoint of their range, and this is load-bearing.**
+    `fcf_negative_years` is capped at the statement window, so 20 of 31 utilities
+    hold the identical worst value. Counting "peers at or below" handed all twenty
+    rank 1.00 and therefore "worst 10% of sector" — reproducing the exact
+    sector-wide false positive the module exists to remove. It was the difference
+    between 67.7% and 16.1% of utilities vetoed. Never revert to `bisect_right`.
+  - **Thin evidence falls back rather than guessing.** A missing stats file, an
+    unknown sector, an uncollected parameter and a bucket under `min_peers` (12)
+    all return None and the absolute anchor stands. That is what keeps a fresh
+    install, a thin sector and a cold cache behaving exactly as before.
+  - **Percentile scoring re-centres a metric at 0.5**, so switching it on moves
+    the *level* of both axes and invalidates fixed quadrant thresholds. They were
+    recalibrated once (`reward_min` 60→58, `risk_max` 25→30, giving 41 buys across
+    all 11 sectors); expect to do that again if the flagged set changes materially.
+  Note the ⭐ gates stay on absolute anchors deliberately — the badge is meant to
+  be strict, and moving it would also move tier 3's candidate gate.
+- **`universe_scan.regrade` re-grades cached entries at render time.** The cache's
+  expensive content is `values`; the axes stored beside them are only what the
+  config at collection time made of those numbers. Grading therefore happens when
+  the table is built, so a threshold change or a peer-stats rebuild takes effect
+  with `--no-fetch` and no network — the same rule `quality.verdict_of` already
+  follows for tier 3. Don't "optimise" it back to trusting the stored axes.
 - **`price_risk.py` is the `price_risk` resolver**, and its whole point is that
   the risk axis was built from accounting data alone — no volatility, no
   drawdown, no beta, which are the three most directly *measurable* risks a

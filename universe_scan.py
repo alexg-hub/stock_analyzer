@@ -64,6 +64,7 @@ from pathlib import Path
 import pandas as pd
 
 import charts
+import peers
 import quality
 from scanner_common import (
     enable_utf8_output,
@@ -386,30 +387,66 @@ def _worst_risk(entry: dict, cfg: dict, top: int = 3) -> str:
     return "; ".join(f"{label} {score:.2f}" for score, label in scored[:top])
 
 
+def regrade(entry: dict, sector: str, cfg: dict) -> dict:
+    """Re-evaluate one cached entry against the rules in force **now**.
+
+    The cache's expensive content is `values` -- what Yahoo said. The axes,
+    quadrant and veto reasons stored beside them are just what the *config at
+    collection time* made of those numbers, and config is retuned constantly: the
+    day sector-relative scoring was switched on, every stored axis became stale
+    while every stored value stayed perfectly good.
+
+    So grading happens here, at render time, from the values. That makes a scoring
+    change visible with `--no-fetch` and no network at all, and it is the same
+    rule tier 3 already follows in `quality.verdict_of` -- re-grade rather than
+    trust a recorded verdict, because a stale answer to a changed question is
+    worse than no answer.
+
+    Falls back to the stored verdict for an entry that has no values (an errored
+    fetch), so a failed ticker still reports what it reported.
+    """
+    values = (entry or {}).get("values") or {}
+    if not values:
+        return {"reward": entry.get("reward"), "risk": entry.get("risk"),
+                "safety": entry.get("safety"), "groups": entry.get("groups") or {},
+                "vetoed": entry.get("vetoed"),
+                "veto_reasons": entry.get("veto_reasons") or []}
+    result = quality.evaluate(values, cfg, entry.get("stage") or quality.STAGE_FAST,
+                              sector)
+    return {"reward": result.reward, "risk": result.risk, "safety": result.safety,
+            "groups": result.groups, "vetoed": result.vetoed,
+            "veto_reasons": list(result.veto_reasons or [])}
+
+
 def build_table(cfg: dict, cache: dict, constituents: pd.DataFrame
                 ) -> pd.DataFrame:
-    """One row per ticker, sorted best-quadrant-first then by reward."""
+    """One row per ticker, sorted best-quadrant-first then by reward.
+
+    Every row is re-graded against the current config (see `regrade`), so this is
+    where a threshold change or a peer-stats rebuild takes effect.
+    """
     sectors = constituents.set_index("ticker") if not constituents.empty \
         else pd.DataFrame()
     rows = []
     for ticker, entry in cache.items():
         meta = sectors.loc[ticker] if ticker in sectors.index else {}
-        r_used, r_total = _axis_counts(entry, quality.AXIS_RISK)
-        w_used, w_total = _axis_counts(entry, quality.AXIS_REWARD)
+        sector = (meta.get("sector") if hasattr(meta, "get") else "") or ""
+        graded = regrade(entry, sector, cfg)
+        fresh = dict(entry or {}, **graded)
+        r_used, r_total = _axis_counts(fresh, quality.AXIS_RISK)
+        w_used, w_total = _axis_counts(fresh, quality.AXIS_REWARD)
         rows.append({
             "ticker": ticker,
             "company": entry.get("company"),
-            "sector": (meta.get("sector") if hasattr(meta, "get") else "") or "",
+            "sector": sector,
             "sub_industry": (meta.get("sub_industry")
                              if hasattr(meta, "get") else "") or "",
-            "reward": entry.get("reward"),
-            "risk": entry.get("risk"),
-            "safety": entry.get("safety"),
-            "quadrant": quality.quadrant_of(entry.get("reward"),
-                                            entry.get("risk"), cfg),
-            "vetoed": entry.get("vetoed"),
-            "veto_reasons": quality.veto_text(entry.get("veto_reasons") or [],
-                                              cfg),
+            "reward": graded["reward"],
+            "risk": graded["risk"],
+            "safety": graded["safety"],
+            "quadrant": quality.quadrant_of(graded["reward"], graded["risk"], cfg),
+            "vetoed": graded["vetoed"],
+            "veto_reasons": quality.veto_text(graded["veto_reasons"], cfg),
             "stage": entry.get("stage"),
             "risk_metrics_used": r_used,
             "risk_metrics_total": r_total,
@@ -904,6 +941,19 @@ def main(argv=None) -> int:
 
     tickers = constituents["ticker"].tolist()
     cache = scan(cfg, tickers, refresh=args.refresh, fetch=not args.no_fetch)
+
+    # Peer statistics are rebuilt only by a **full** pass, because only a full
+    # pass has the whole sector to describe. A subset run must never narrow the
+    # distributions every other reading is compared against -- that would make
+    # the thresholds drift with whatever you last looked at.
+    if scope == SCOPE_UNIVERSE:
+        try:
+            sectors = dict(zip(constituents["ticker"], constituents["sector"]))
+            peers.write(peers.build(cache, sectors, cfg), cfg)
+            peers.reset_cache()
+        except Exception as exc:  # noqa: BLE001 - absent stats fall back to anchors
+            log_step("PEERS", "failed", f"{exc} -- absolute anchors stand",
+                     cfg=cfg)
 
     # Render the tickers asked for, not the whole cache -- a scoped run must not
     # silently republish a table built from a months-old universe pass.
