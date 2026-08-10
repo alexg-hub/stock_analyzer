@@ -332,12 +332,12 @@ def _facts(ticker: str, scan_date: str, yahoo: dict, quant: dict,
     # The exclusion verdict over **every** stage, which is why it is computed
     # here rather than read off the trigger row: the scan could only answer the
     # `fast` rules, and the SEC filing flags, Beneish and the liquidity pair
-    # arrive with this pass. A veto overrides the tier and leaves the score
-    # alone -- the number stays on the record so tier 4 can ask, later, whether
-    # excluding this name actually cost anything.
+    # arrive with this pass. The reasons are recorded either way; whether they
+    # also override the tier is `quality.veto_enforced`, off by default so an
+    # excluded name keeps a comparable score for tier 4 to grade.
     vetoes = quant.get("veto_reasons") or []
     tier = tier_for(score, cfg) if score is not None else None
-    if vetoes:
+    if vetoes and quality.veto_enforced(cfg):
         tier = quality.veto_tier(cfg)
     return {
         "ticker": ticker,
@@ -930,8 +930,13 @@ def enforce_veto(verdict: dict, facts: dict, cfg: dict) -> dict:
 
     The conviction is left exactly as it stands, so the record still says what
     the company scored and tier 4 can measure what the exclusion cost.
+
+    Gated on `quality.veto_enforced`: with the veto demoted to a label there is
+    no forced tier to protect, and the narrative pass's own tier stands. What
+    the model still cannot do is edit `facts["veto"]` -- the flag and its reasons
+    are written by Python before this runs.
     """
-    if not facts.get("veto"):
+    if not facts.get("veto") or not quality.veto_enforced(cfg):
         return verdict
     forced = quality.veto_tier(cfg)
     if verdict.get("tier") != forced:

@@ -130,7 +130,9 @@ def scan_ticker(ticker: str, cfg: dict) -> dict:
                     ScanResult(title=NO_SIGNAL_TITLE, hits=row))]
 
     # -- tier 2, the same two steps and the same single grading call as main() --
-    fundamentals = quality.fetch_fast([ticker], cfg)
+    # Same panel reuse as the nightly path, so an on-demand look reads the price
+    # risk off the bars it just downloaded rather than fetching them twice.
+    fundamentals = quality.fetch_fast([ticker], cfg, closes=data.get("Close"))
     if not fundamentals.empty:
         for _, result in results:
             result.hits = result.hits.join(fundamentals)
@@ -316,7 +318,11 @@ def main(argv: list[str] | None = None) -> int:
         for ticker in result.hits.index:
             if ticker not in wanted:
                 wanted.append(ticker)
-    fundamentals = quality.fetch_fast(wanted, cfg)
+    # The panel is already in memory, so the `price_risk` parameters cost
+    # nothing here. No benchmark: SPY is not a constituent and adding it to the
+    # download would put a non-constituent through every screen, so the two beta
+    # readings stay missing on this path and the universe pass supplies them.
+    fundamentals = quality.fetch_fast(wanted, cfg, closes=data.get("Close"))
     if not fundamentals.empty:
         for _, result in results:
             result.hits = result.hits.join(fundamentals)

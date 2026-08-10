@@ -69,7 +69,7 @@ FAST = quality.parameters(base_cfg, quality.STAGE_FAST)
 LABELS = {k: quality.label_of(k, s) for k, s in FAST.items()}
 
 
-def stub_fast(tickers, _cfg):
+def stub_fast(tickers, _cfg, closes=None, benchmark=None):
     """Fundamentals without Yahoo: one row per ticker, values off the gates."""
     rows = {}
     for i, ticker in enumerate(tickers):
@@ -108,7 +108,7 @@ DEEP_BUNDLE = {
 }
 
 
-def stub_collect(ticker, c_, stage="fast", close=None):
+def stub_collect(ticker, c_, stage="fast", close=None, benchmark=None):
     return json.loads(json.dumps(DEEP_BUNDLE))
 
 

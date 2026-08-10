@@ -427,18 +427,28 @@ c.ok("the blended score still agrees with score_of",
 
 
 # `worst_k` selects the lowest readings, so it can only ever be <= the mean.
+# Isolated to a single group on the risk axis: there is more than one now
+# (accounting distress and market risk), and a weighted mean across two of them
+# would dilute the effect being measured and make the check prove nothing.
 _wk = copy.deepcopy(cfg)
-_risk_group = next(n for n, g in quality.groups(cfg).items()
-                   if quality.axis_of(g) == quality.AXIS_RISK)
+_risk_groups = [n for n, g in quality.groups(cfg).items()
+                if quality.axis_of(g) == quality.AXIS_RISK]
+_risk_group = _risk_groups[0]
+for _name in _risk_groups[1:]:
+    _wk["quality"]["groups"][_name]["enabled"] = False
 _wk["quality"]["groups"][_risk_group]["aggregate"] = {"worst_k": 1}
 mixed = _axis_probe(1.0, 1.0)
 # Drag exactly one risk metric to its bad anchor.
 _one = next(k for k, s in quality.parameters(cfg, None).items()
             if s.get("score") and s.get("group") == _risk_group)
 mixed[_one] = quality.parameters(cfg, None)[_one]["score"]["bad"]
+# Compared against the *same* single-group config with a mean, so the only
+# difference between the two readings is the aggregation.
+_mean_one = copy.deepcopy(_wk)
+_mean_one["quality"]["groups"][_risk_group]["aggregate"] = "mean"
 c.ok("worst_k is never kinder than the mean",
      quality.axis_scores(mixed, _wk, None)["risk"]
-     >= quality.axis_scores(mixed, cfg, None)["risk"],
+     >= quality.axis_scores(mixed, _mean_one, None)["risk"],
      "one catastrophic reading must not be averaged away by benign ones")
 c.ok("worst_k:1 keys the axis off the single worst reading",
      quality.axis_scores(mixed, _wk, None)["risk"] == 100.0)

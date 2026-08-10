@@ -29,11 +29,20 @@ import anyio
 from mcp.server.fastmcp import FastMCP
 from mcp.server.stdio import stdio_server
 
-from mcp_tools import backtests, config_tools, deepdive, jobs, portfolio, signals
+from mcp_tools import (
+    backtests,
+    config_tools,
+    deepdive,
+    jobs,
+    portfolio,
+    signals,
+    universe,
+)
 
 mcp = FastMCP("stock_analyzer")
 
-for module in (signals, deepdive, portfolio, backtests, config_tools, jobs):
+for module in (signals, deepdive, portfolio, backtests, config_tools, jobs,
+               universe):
     module.register(mcp)
 
 
@@ -90,6 +99,7 @@ def _selftest() -> int:
         ("config_get", config_tools.get_impl),
         ("params_list", config_tools.params_list_impl),
         ("list_jobs", jobs.listing),
+        ("universe_quadrant", universe.quadrant_impl),
     ]
     for name, fn in checks:
         try:

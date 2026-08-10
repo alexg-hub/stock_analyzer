@@ -18,7 +18,10 @@
       "mcp__stock_analyzer__params_list",
       "mcp__stock_analyzer__job_status",
       "mcp__stock_analyzer__job_result",
-      "mcp__stock_analyzer__list_jobs"
+      "mcp__stock_analyzer__list_jobs",
+      "mcp__stock_analyzer__universe_quadrant",
+      "mcp__stock_analyzer__universe_scan",
+      "mcp__stock_analyzer__risk_research"
     ]
   }
 }

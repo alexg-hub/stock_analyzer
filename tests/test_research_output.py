@@ -426,7 +426,7 @@ falling = pd.DataFrame({("Open", TICK): _close / 0.999,
 falling.columns = pd.MultiIndex.from_tuples(falling.columns)
 
 
-def stub_fundamentals(tickers, _cfg):
+def stub_fundamentals(tickers, _cfg, closes=None, benchmark=None):
     return pd.DataFrame({pe_label: [12.0], scanner_common.COMPANY_COL: ["Alpha Corp"]},
                         index=list(tickers)).rename_axis("Ticker")
 
@@ -607,20 +607,37 @@ c.ok("an adjustment exactly at the bound is left alone",
      adj_ok["narrative_adj"] == limit and adj_ok["conviction"] == 40,
      "the bound is inclusive; clamping it would move a legal verdict")
 
-# A veto is a deterministic rule over collected values. The skill may override
-# a tier "with an explicit written justification", and that latitude must not
-# extend to talking the pipeline out of an exclusion.
+# A veto is a deterministic rule over collected values, so whether it overrides
+# the tier is a config decision (`quality.veto_enforced`) -- but in neither mode
+# may the narrative pass talk the pipeline out of the exclusion *record*. Both
+# modes are pinned, because each one silently breaks a different thing: enforcing
+# always makes excluded names incomparable for tier 4, and enforcing never would
+# let a "STRONG" label stand on a company the rules disqualified.
 _facts_file("EEE", research_report.SOURCE_ON_DEMAND, veto=True,
             veto_reasons=["altman_z"], veto_text="Altman Z")
+
+enforced = json.loads(json.dumps(od_cfg))
+enforced["quality"]["veto_enforced"] = True
+c.ok("veto_enforced is off by default",
+     not quality.veto_enforced(od_cfg),
+     "a gate would delete the evidence the exclusion thesis needs")
+
 vetoed = {"ticker": "EEE", "scan_date": scan_date, "tier": "STRONG",
           "conviction": 88, "narrative_adj": 0, "thesis": "x"}
-_quiet(research_report.record_verdict, vetoed, od_cfg)
-c.ok("a vetoed ticker keeps the veto tier whatever the verdict claimed",
-     vetoed["tier"] == quality.veto_tier(od_cfg),
+_quiet(research_report.record_verdict, vetoed, enforced)
+c.ok("enforced: a vetoed ticker keeps the veto tier whatever it claimed",
+     vetoed["tier"] == quality.veto_tier(enforced),
      f"reported STRONG -> recorded {vetoed['tier']}")
 c.ok("...but the conviction it scored is left on the record",
      vetoed["conviction"] == 88,
      "tier 4 needs the number to measure what the exclusion cost")
+
+labelled = {"ticker": "EEE", "scan_date": scan_date, "tier": "STRONG",
+            "conviction": 88, "narrative_adj": 0, "thesis": "x"}
+_quiet(research_report.record_verdict, labelled, od_cfg)
+c.ok("as a label: the tier stands, so the row stays comparable",
+     labelled["tier"] == "STRONG" and labelled["conviction"] == 88,
+     f"recorded {labelled['tier']}")
 
 off = json.loads(json.dumps(od_cfg))
 off["research"]["history"]["enabled"] = False

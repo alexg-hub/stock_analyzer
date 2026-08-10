@@ -108,6 +108,15 @@ python research_report.py verdicts MSFT JNJ
 python research_report.py scan PGR RL
 run_ondemand.bat PGR
 
+# The risk/reward plane over the whole index. ~13 min for 500 tickers; cached
+# per ticker, so a re-run is instant and a weekly refresh is enough. No Discord.
+python universe_scan.py                      # whole index -> table + PNG + HTML
+python universe_scan.py --tickers MSFT KO    # just these
+python universe_scan.py --limit 30           # timing probe before committing
+python universe_scan.py --no-fetch           # re-render from cache, no network
+python universe_scan.py --refresh            # ignore the cache (needed after a
+                                             # new parameter is added)
+
 # Tier C on demand: every disaster symptom and moat proxy for one ticker, with
 # each value beside the threshold it was compared against, split into
 # tripped / clean / unknown. Collects every stage, so it reaches the SEC filing
@@ -225,6 +234,20 @@ real send.
   (`min`/`max`/`increasing`), a `score` (`good`/`bad` anchors) and/or
   `veto: true`. One `quality.evaluate` call yields all three verdicts at once.
   Rules that hold it together:
+  - **The veto is a label, not a gate — `quality.veto_enforced` is `false`.**
+    The rules still run, still record `Veto`/`Veto Reasons` and `Deep Veto*`, and
+    still badge the card; what they no longer do is override the tier. The reason
+    is measurement, not leniency: the thesis is that excluding the losers beats
+    owning them, and only tier 4 grading vetoed names *against* clean ones can
+    confirm it. Relabelled to AVOID, an excluded name is no longer comparable to
+    anything, and on the risk/reward plane it would be a category rather than a
+    point. Left as a label the same rule becomes a hypothesis you can watch —
+    vetoed names should cluster in the high-risk quadrant, and if they do not,
+    that is a finding about the rules. Set it `true` to restore the gate; both
+    modes are pinned by tests, because each silently breaks a different thing.
+    This is deliberately not `enabled: false` per veto parameter, which would
+    stop them being collected and lose the record — the same distinction
+    `has_values` draws between "failed" and "not evaluated".
   - **A `veto: true` parameter is an exclusion rule, not a stricter gate**, and
     it is the whole of tier C ("identify the losers"). It is **skipped by
     `gate_failures`** — the ⭐ set is already strict enough that most tickers
@@ -239,10 +262,12 @@ real send.
     resolver produces must be an **`int` 0/1**. `validate` cannot catch that
     (it sees config, not values); `tests/test_quality.py` and
     `tests/test_derived.py` pin it instead.
-  - **A veto overrides the tier and never the score.** `_facts` forces
-    `quality.veto_tier` ("AVOID"), and `record_verdict` re-forces it over
-    whatever the narrative pass reports — the model may argue a rule is wrong
-    *in the report*, where a human reads it, but cannot relabel the row. The
+  - **When enforced, a veto overrides the tier and never the score.** With
+    `veto_enforced: true` `_facts` forces `quality.veto_tier` ("AVOID") and
+    `record_verdict` re-forces it over whatever the narrative pass reports — the
+    model may argue a rule is wrong *in the report*, where a human reads it, but
+    cannot relabel the row. Either way the model can never edit `facts["veto"]`
+    itself: the flag and its reasons are written by Python before it runs. The
     conviction stays on the record so tier 4 can measure what the exclusion
     cost. Vetoed signals are still alerted (sorted after the clean ones) and
     still bought by tier 4, flagged — same argument as `exits.py` flagging
@@ -324,6 +349,71 @@ real send.
   and prose. This is load-bearing because that pass *is* an LLM — left
   unconstrained it will happily invent a plot or mistype a percentage, which is
   why `SKILL.md` forbids both explicitly.
+- **`universe_scan.py` is the risk/reward plane — the first thing here that
+  grades the whole index.** Tiers 1–3 only ever grade what fired a screen or
+  passed a gate, so the thesis (own the index minus the losers) could be argued
+  but not *looked at*. This runs the `fast` stage over every constituent and
+  writes `output/universe/`: a per-ticker cache, `risk_reward_<date>.csv`, the
+  PNG (`charts.plot_risk_reward`) and a self-contained interactive HTML. Five
+  rules:
+  - **`fast` stage only, and it says so on every output.** The `deep` stage means
+    an EDGAR fetch plus a `collect_yahoo` pass per ticker — fine for a handful of
+    candidates, not for 500. So the risk axis here is the 13 `fast` distress
+    parameters plus the 9 `market_risk` ones and **not** the 18 `sec_flags`
+    ones. That is a genuinely partial reading, so `stage` and the metrics-used
+    counts ride along on the table, the chart subtitle and the MCP payload. Same
+    discipline as `metrics_used` and tier 4's `sufficient_n`.
+  - **Per-ticker cache freshness, not whole-file.**
+    `backtest_universe_cache.pkl` is one frame with one age check because it is
+    one download; this is 500 independent fetches where any one can fail, so
+    `is_stale` is per ticker and an entry that errored is always stale. Checkpointed
+    every `progress_every` tickers, so a kill costs ~10 tickers rather than the run.
+  - **It is the only thing here that retries or sleeps between calls.** The
+    `fast` stage is 4 sequential Yahoo calls per ticker and nothing else in the
+    repo had ever run that pattern more than ~21 times in a row; measured at
+    ~1.5s/ticker, so ~13 min for the index. `request_delay_s` and a bounded
+    backoff exist because 500× is a load shape we had not measured — not because
+    a throttle was ever observed.
+  - **Progress must be logged every N tickers.** `quality.fetch_fast` logs once
+    *after* its whole loop, which at universe scale looks exactly like the
+    stalled interpreter `mcp_tools.backtests.FIRST_OUTPUT_TIMEOUT` kills at 60s.
+  - **The price panel is downloaded in bulk and threaded down**, never per
+    ticker: `yf.download` batches server-side, so all 500 closes plus the
+    benchmark is one threaded call. Deliberately *not*
+    `backtest_universe.cached_panel` — that pickle is keyed to a fixed universe
+    and a volatility reading two weeks stale is wrong in a way nobody notices.
+- **`price_risk.py` is the `price_risk` resolver**, and its whole point is that
+  the risk axis was built from accounting data alone — no volatility, no
+  drawdown, no beta, which are the three most directly *measurable* risks a
+  listed company has. Volatility (60d/252d), max drawdown (1y/3y), downside
+  deviation, Ulcer index, beta and **downside** beta, SPY correlation, return
+  skew, distance from the 52-week high, and 12-1 momentum. Four rules:
+  - **No I/O, ever.** Every function takes a `close` series the caller already
+    has. `quality.collect` gained a `benchmark` argument beside the `close` it
+    already threaded through to `research_collect`, and `fetch_fast` takes a
+    whole `closes` frame — which is what makes these parameters free in the
+    nightly scan, the on-demand scan *and* the universe pass. Without a series
+    `collect` falls back to fetching history, which is what the offline tests
+    would otherwise have started doing.
+  - **Too little history returns `None`, never a number.** A 3-year drawdown over
+    40 bars is not a small drawdown, it is a wrong one, and the registry handles
+    None correctly while a plausible wrong number gets scored. Every window
+    carries its own `min_obs` — `pct_below_52w_high` included, or a young listing
+    reads a confident 0% below its high.
+  - **Benchmark series are intersected, not zipped** (`_aligned_returns`), the
+    same rule as `derived._aligned`: a beta against a benchmark offset by a day
+    returns a plausible number and raises nothing. A test shifts the dates and
+    asserts the answer changes.
+  - **Beta is missing on the nightly path**, because SPY is not a constituent and
+    adding it to that download would put a non-constituent through every screen.
+    The universe pass adds it explicitly, so the chart has beta and tier 2 does
+    not. `momentum_12_1` is computed but has no registry parameter yet — whichever
+    one consumes it must sit on the **reward** axis.
+  These live in their own `market_risk` group rather than in `risk`, and that is
+  load-bearing: members are averaged *within* a group, so folding 9 price metrics
+  into `risk` would have cut each existing distress metric's influence roughly in
+  half — diluting the group the addition was meant to strengthen, which is exactly
+  the mistake Tier C already made once.
 - **`derived.py` is the `distress` and `moat` resolvers** — Altman Z (the 1968
   public-manufacturer form), Beneish M, interest coverage, cash runway, the
   accrual and short-interest reads, and the ten moat-persistence proxies (ROIC
@@ -669,6 +759,21 @@ real send.
     these scripts use exit 1 to mean something specific. Relatedly, `jobs._tail`
     separates a **missing** log from an **unreadable** one: both used to return
     `[]`, which is the same answer a quiet run gives.
+  - **`mcp_tools/universe.py` holds the one door to AI risk research, and it runs
+    no model.** `risk_research(ticker)` assembles everything deterministic — every
+    rule beside the threshold it was compared against, the moat and risk metrics,
+    both axis coordinates, the sector peer group — and returns it with a prompt
+    naming *only* the questions arithmetic cannot answer (competitive position,
+    capital-allocation record, regulatory trajectory, whether a tripped rule is
+    real or a sector artifact). The calling session does the reasoning with the
+    tools it already has. This is deliberately **not** a third `claude -p` path:
+    `run_deepdive.bat` and `run_ondemand.bat` already carry allow-lists that must
+    stay byte-identical, and under `--permission-mode dontAsk` an un-allowed tool
+    is refused *silently*, so a third enumerated list would be a third way to
+    lose a section with no error. A tool that returns a bundle has no subprocess,
+    no allow-list and no new silent-failure mode.
+    `universe_scan` (a `_script_job`) and `universe_quadrant` (cache-only, no
+    network) are the other two.
   There are deliberately **no file-reading tools** — reports, logs, CSVs and
   charts under `output/` are read with `Read`/`Glob`, which do it better. A
   `read_report`/`tail_log`/`backtest_results` reappearing means the surface

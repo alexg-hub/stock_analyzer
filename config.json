@@ -199,6 +199,12 @@
                 "weight": 0.1,
                 "axis": "risk",
                 "aggregate": "mean"
+            },
+            "market_risk": {
+                "enabled": true,
+                "weight": 0.08,
+                "axis": "risk",
+                "aggregate": "mean"
             }
         },
         "parameters": {
@@ -859,6 +865,141 @@
                     "bad": 3
                 }
             },
+            "volatility_252d": {
+                "enabled": true,
+                "label": "Volatility 1y %",
+                "source": "price_risk.volatility_252d",
+                "group": "market_risk",
+                "stage": "fast",
+                "weight": 1,
+                "display": false,
+                "format": "number",
+                "gate": null,
+                "score": {
+                    "good": 15,
+                    "bad": 55
+                }
+            },
+            "max_drawdown_1y": {
+                "enabled": true,
+                "label": "Max DD 1y %",
+                "source": "price_risk.max_drawdown_1y",
+                "group": "market_risk",
+                "stage": "fast",
+                "weight": 1,
+                "display": false,
+                "format": "number",
+                "gate": null,
+                "score": {
+                    "good": 8,
+                    "bad": 55
+                }
+            },
+            "max_drawdown_3y": {
+                "enabled": true,
+                "label": "Max DD 3y %",
+                "source": "price_risk.max_drawdown_3y",
+                "group": "market_risk",
+                "stage": "fast",
+                "weight": 1,
+                "display": false,
+                "format": "number",
+                "gate": null,
+                "score": {
+                    "good": 15,
+                    "bad": 70
+                }
+            },
+            "downside_deviation": {
+                "enabled": true,
+                "label": "Downside dev %",
+                "source": "price_risk.downside_deviation",
+                "group": "market_risk",
+                "stage": "fast",
+                "weight": 1,
+                "display": false,
+                "format": "number",
+                "gate": null,
+                "score": {
+                    "good": 10,
+                    "bad": 40
+                }
+            },
+            "ulcer_index": {
+                "enabled": true,
+                "label": "Ulcer index",
+                "source": "price_risk.ulcer_index",
+                "group": "market_risk",
+                "stage": "fast",
+                "weight": 1,
+                "display": false,
+                "format": "number",
+                "gate": null,
+                "score": {
+                    "good": 3,
+                    "bad": 25
+                }
+            },
+            "beta": {
+                "enabled": true,
+                "label": "Beta",
+                "source": "price_risk.beta",
+                "group": "market_risk",
+                "stage": "fast",
+                "weight": 1,
+                "display": false,
+                "format": "number",
+                "gate": null,
+                "score": {
+                    "good": 0.6,
+                    "bad": 1.8
+                }
+            },
+            "downside_beta": {
+                "enabled": true,
+                "label": "Downside beta",
+                "source": "price_risk.downside_beta",
+                "group": "market_risk",
+                "stage": "fast",
+                "weight": 1,
+                "display": false,
+                "format": "number",
+                "gate": null,
+                "score": {
+                    "good": 0.6,
+                    "bad": 2.0
+                }
+            },
+            "return_skew": {
+                "enabled": true,
+                "label": "Return skew",
+                "source": "price_risk.return_skew",
+                "group": "market_risk",
+                "stage": "fast",
+                "weight": 1,
+                "display": false,
+                "format": "number",
+                "gate": null,
+                "score": {
+                    "good": 0.3,
+                    "bad": -1.0
+                }
+            },
+            "pct_below_52w_high": {
+                "enabled": true,
+                "label": "Below 52w high %",
+                "source": "price_risk.pct_below_52w_high",
+                "group": "market_risk",
+                "stage": "fast",
+                "weight": 1,
+                "display": false,
+                "format": "number",
+                "gate": null,
+                "score": {
+                    "good": 3,
+                    "bad": 40
+                }
+            },
             "roic_years_above": {
                 "enabled": true,
                 "label": "ROIC yrs > hurdle",
@@ -1013,7 +1154,23 @@
         "statement_years": 5,
         "moat_roic_hurdle_pct": 12,
         "veto_badge": "🚫",
-        "veto_tier": "AVOID"
+        "veto_tier": "AVOID",
+        "veto_enforced": false
+    },
+    "universe": {
+        "dir": "universe",
+        "cache": "fundamentals_cache.pkl",
+        "table_csv": "risk_reward",
+        "chart_path": "risk_reward.png",
+        "html_path": "risk_reward.html",
+        "chart_dpi": 120,
+        "cache_max_age_days": 7,
+        "price_period": "5y",
+        "request_delay_s": 0.2,
+        "retries": 2,
+        "progress_every": 10,
+        "reward_threshold": 60,
+        "risk_threshold": 25
     },
     "ibkr": {
         "enabled": false,

@@ -634,3 +634,112 @@ def plot_financials(fin: dict, ticker: str, out_path: Path,
     fig.savefig(out_path, dpi=dpi, bbox_inches="tight", facecolor=C["surface"])
     plt.close(fig)
     print(f"Chart saved to {out_path}")
+
+
+# --------------------------------------------------------------------------
+# Universe risk/reward quadrant scatter
+# --------------------------------------------------------------------------
+
+#: How many names get a text label. 500 labels do not fit on a page, and the
+#: ones worth naming are the extremes -- the best of the buy quadrant and the
+#: worst of the avoid quadrant.
+_SCATTER_LABELS = 12
+
+
+def plot_risk_reward(table: pd.DataFrame, chart_cfg: dict, out_path: Path,
+                     dpi: int = 120) -> None:
+    """The quadrant plane: reward (y) against risk (x), one point per ticker.
+
+    `table` is `universe_scan.build_table` output; `chart_cfg` is the `universe`
+    config section, read only for the two thresholds and the axis labels. The
+    caller shapes the frame -- this does no scoring and no lookups, same contract
+    as every other builder here.
+
+    **Colour is by hue role, not by quadrant.** The palette has exactly two hues,
+    so four quadrant colours would mean inventing two -- instead the quadrant is
+    drawn with divider lines and the points carry the one distinction that is
+    actually categorical: `event` (orange) for a name the veto excluded, `close`
+    (blue) for everything else. That way the chart answers the question the veto
+    exists to raise -- do excluded names really sit in the high-risk half -- and
+    it answers it visually rather than by assertion.
+
+    Unmeasurable rows are dropped rather than plotted at zero: a `None` axis has
+    no position, and plotting it as 0 would file it in the best quadrant.
+    """
+    rt = float(chart_cfg.get("reward_threshold", 60))
+    xt = float(chart_cfg.get("risk_threshold", 25))
+
+    points = table.dropna(subset=["reward", "risk"]) if not table.empty \
+        else table
+    dropped = len(table) - len(points)
+
+    fig, ax = _grid_figure(1, 1, figsize=(11, 8.5))
+    ax.grid(axis="both", color=C["grid"], linewidth=0.8)
+
+    # The quadrant dividers, drawn under the points.
+    ax.axvline(xt, color=C["axis"], linewidth=1.1, zorder=1)
+    ax.axhline(rt, color=C["axis"], linewidth=1.1, zorder=1)
+
+    if not points.empty:
+        vetoed = points["vetoed"].fillna(False).astype(bool) \
+            if "vetoed" in points.columns else pd.Series(False, index=points.index)
+        for mask, colour, label, size in (
+                (~vetoed, C["close"], "not excluded", 42),
+                (vetoed, C["event"], "excluded by a veto rule", 66)):
+            subset = points[mask]
+            if subset.empty:
+                continue
+            ax.scatter(subset["risk"], subset["reward"], s=size, color=colour,
+                       alpha=0.75, edgecolor=C["surface"], linewidth=0.7,
+                       zorder=3, label=f"{label} ({len(subset)})")
+
+        # Name only the extremes: best of the target quadrant, worst overall.
+        best = points.nlargest(_SCATTER_LABELS // 2, "reward")
+        worst = points.nsmallest(_SCATTER_LABELS // 2, "reward")
+        for _, row in pd.concat([best, worst]).iterrows():
+            ax.annotate(str(row["ticker"]),
+                        xy=(row["risk"], row["reward"]),
+                        xytext=(5, 4), textcoords="offset points",
+                        fontsize=8.5, color=C["ink2"], zorder=4)
+
+    ax.set_xlabel("risk  (higher = more dangerous)", color=C["ink2"],
+                  fontsize=10)
+    ax.set_ylabel("reward  (higher = better expected return)", color=C["ink2"],
+                  fontsize=10)
+    ax.set_xlim(-2, 102)
+    ax.set_ylim(-2, 102)
+
+    # Quadrant names in the corners, so the plane reads without a legend.
+    for x, y, text, align in ((1, 99, "low risk · high reward", "left"),
+                              (99, 99, "high risk · high reward", "right"),
+                              (1, 1, "low risk · low reward", "left"),
+                              (99, 1, "high risk · low reward", "right")):
+        ax.text(x, y, text, fontsize=9, color=C["muted"], ha=align,
+                va="top" if y > 50 else "bottom", zorder=2)
+
+    if not points.empty:
+        ax.legend(frameon=False, fontsize=9, labelcolor=C["ink2"],
+                  loc="upper center", ncol=2)
+
+    stage = (table["stage"].dropna().iloc[0]
+             if "stage" in table.columns and table["stage"].notna().any()
+             else "?")
+    used = table["risk_metrics_used"].mean() \
+        if "risk_metrics_used" in table.columns else float("nan")
+    total = table["risk_metrics_total"].max() \
+        if "risk_metrics_total" in table.columns else float("nan")
+    # The stage belongs on the chart, not just in the log: a `fast` risk reading
+    # omits every SEC filing flag, so it is not comparable to a `deep` one and a
+    # reader who does not know that will over-trust the x axis.
+    subtitle = (f"{len(points)} of {len(table)} tickers plotted"
+                + (f" · {dropped} unmeasurable, not shown" if dropped else "")
+                + f" · stage {stage}"
+                + (f" · risk from {used:.1f}/{total:.0f} metrics"
+                   if pd.notna(used) and pd.notna(total) else "")
+                + f" · thresholds reward {rt:g} / risk {xt:g}")
+    _title(ax, "Universe risk vs reward", subtitle)
+
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=dpi, bbox_inches="tight", facecolor=C["surface"])
+    plt.close(fig)
+    print(f"Chart saved to {out_path}")

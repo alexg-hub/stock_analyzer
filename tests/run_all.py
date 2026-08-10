@@ -19,6 +19,7 @@ HERE = Path(__file__).resolve().parent
 TESTS = [
     ("test_quality.py", "offline -- the quality registry: flags, gates, score"),
     ("test_derived.py", "offline -- Altman/Beneish, distress flags, moat proxies"),
+    ("test_price_risk.py", "offline -- volatility, drawdown, beta, alignment"),
     ("test_ibkr.py", "offline -- IBKR client: no account surface, degrades"),
     ("test_mcp_server.py", "offline -- MCP tool contract, stdout purity, dry-run"),
     ("test_forward_trades.py", "offline -- synthetic panel arithmetic"),

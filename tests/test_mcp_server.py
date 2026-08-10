@@ -34,7 +34,7 @@ c.section("import purity")
 before = sys.stdout
 import mcp_server                                                  # noqa: E402
 from mcp_tools import (backtests, config_tools, deepdive, jobs,  # noqa: E402
-                       portfolio, signals)
+                       portfolio, signals, universe)
 
 c.ok("importing the server writes nothing to stdout", sys.stdout is before)
 c.ok("import does not mutate global streams (no enable_utf8_output at import)",
@@ -74,14 +74,17 @@ with redirect_stdout(buffer):
                       ("portfolio_status", portfolio.status_impl),
                       ("portfolio_positions", portfolio.positions_impl),
                       ("config_get", config_tools.get_impl),
-                      ("list_jobs", jobs.listing)):
+                      ("list_jobs", jobs.listing),
+                      # Reads a pickle and a CSV through pandas, and reports a
+                      # missing cache -- both paths that print in this codebase.
+                      ("universe_quadrant", universe.quadrant_impl)):
         try:
             fn()
         except Exception as exc:                      # noqa: BLE001
             errors.append(f"{label}: {type(exc).__name__}: {exc}")
 
 c.ok("read-only tools all return without raising", not errors,
-     "; ".join(errors) or "6 called")
+     "; ".join(errors) or f"{7} called")
 c.ok("no tool wrote to stdout", buffer.getvalue() == "",
      repr(buffer.getvalue()[:200]) if buffer.getvalue() else "clean")
 

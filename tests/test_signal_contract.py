@@ -529,7 +529,7 @@ nan_key = resolvable[-1] if resolvable else None
 SHAPES = ["pass", "break", "nan"]
 
 
-def stub_fundamentals(tickers, _cfg):
+def stub_fundamentals(tickers, _cfg, closes=None, benchmark=None):
     """Cycle the three row shapes across the signalling tickers."""
     rows = {}
     for i, ticker in enumerate(tickers):

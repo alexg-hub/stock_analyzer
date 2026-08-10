@@ -159,6 +159,28 @@ def veto_tier(cfg: dict) -> str:
     return section(cfg).get("veto_tier", "AVOID")
 
 
+def veto_enforced(cfg: dict) -> bool:
+    """Whether a tripped veto **overrides the tier**, or is only recorded.
+
+    Default **false**: the rules still run, still record `Veto`/`Veto Reasons`
+    and still badge the card, but the tier comes from the score alone.
+
+    The reason is measurement, not leniency. The thesis is that excluding the
+    losers beats owning them, and the only thing that can confirm it is tier 4
+    grading vetoed names against clean ones. A gate answers that question by
+    deleting the evidence: relabelled to AVOID, an excluded name is no longer
+    comparable to anything, and on a risk/reward plane it would be a category
+    rather than a point. Left as a label, the same rule becomes a hypothesis you
+    can *see* being right or wrong -- vetoed names should visibly cluster in the
+    high-risk quadrant, and if they do not, that is a finding about the rules.
+
+    This is deliberately NOT `enabled: false` on each veto parameter, which
+    would stop them being collected and lose the record entirely -- the same
+    distinction `has_values` draws between "failed" and "not evaluated".
+    """
+    return bool(section(cfg).get("veto_enforced", False))
+
+
 def veto_text(reasons: list, cfg: dict) -> str:
     """Veto keys rendered as readable labels for a card or a report.
 
@@ -952,7 +974,7 @@ def resolve(bundle: dict, cfg: dict, stage: str | None = None) -> dict:
 
 
 def collect(ticker: str, cfg: dict, stage: str | None = STAGE_FAST,
-            close=None) -> dict:
+            close=None, benchmark=None) -> dict:
     """Fetch the source payloads the enabled parameters of `stage` need.
 
     `stage=None` means every stage, which is what tier 3 passes: it scores the
@@ -1011,6 +1033,25 @@ def collect(ticker: str, cfg: dict, stage: str | None = STAGE_FAST,
         bundle["yahoo_deep"] = deep_metrics(yahoo)
         bundle["_yahoo"] = yahoo          # the full bundle, for tier 3's report
 
+    if "price_risk" in wanted:
+        # `close` is whatever the caller already had -- the universe pass hands
+        # over a column of the cached panel, so the whole index is graded for no
+        # extra network at all. Without one, fetch it: a single history call is
+        # still cheaper than leaving the risk axis blind to volatility.
+        import price_risk
+        series = close
+        if series is None:
+            try:
+                series = tk.history(period=price_history_period(cfg))["Close"]
+            except Exception as exc:  # noqa: BLE001 - fail open, like every source
+                log_step("YAHOO", "failed", f"history for {ticker}: {exc}")
+                series = None
+        try:
+            bundle["price_risk"] = price_risk.metrics(series, benchmark)
+        except Exception as exc:  # noqa: BLE001
+            log_step("YAHOO", "failed", f"price risk for {ticker}: {exc}")
+            bundle["price_risk"] = {}
+
     if "ibkr" in wanted:
         import ibkr
         bundle["ibkr"] = ibkr.metrics(ticker, cfg)
@@ -1018,13 +1059,29 @@ def collect(ticker: str, cfg: dict, stage: str | None = STAGE_FAST,
     return bundle
 
 
-def fetch_fast(tickers: list[str], cfg: dict) -> pd.DataFrame:
+def price_history_period(cfg: dict) -> str:
+    """How much price history the `price_risk` resolver asks Yahoo for.
+
+    Long enough for the 3-year drawdown to be real rather than truncated; the
+    metric returns None below its own minimum either way.
+    """
+    return str(section(cfg).get("price_history_period", "5y"))
+
+
+def fetch_fast(tickers: list[str], cfg: dict, closes=None,
+               benchmark=None) -> pd.DataFrame:
     """The `fast` parameters for a list of tickers, as a label-keyed frame.
 
     This is what joins onto each screen's hits, so its columns are the display
     labels the whole downstream contract (`latest_hits.json`, `signals.csv`,
     the embed fields) is keyed by. Only ever runs on the handful of signalling
     tickers, so a plain loop is fine.
+
+    `closes` is an optional `(dates x tickers)` close frame -- the panel the
+    caller already downloaded. Supplying it is what keeps the `price_risk`
+    parameters free of network cost; without it `collect` fetches history per
+    ticker. `benchmark` is a single close series (SPY normally) and only the
+    beta readings need it, so leaving it out costs those two and nothing else.
     """
     if not is_enabled(cfg) or not tickers:
         return pd.DataFrame()
@@ -1032,8 +1089,19 @@ def fetch_fast(tickers: list[str], cfg: dict) -> pd.DataFrame:
     t0 = time.perf_counter()
     rows, failed = {}, []
     for ticker in tickers:
+        # The caller's own price panel, when it has one. Every caller of this
+        # function already downloaded the closes it is about to grade, so passing
+        # them keeps the `price_risk` resolver free -- and keeps the offline
+        # tests offline, since `collect` would otherwise fetch history itself.
+        close = None
+        if closes is not None:
+            try:
+                close = closes[ticker] if ticker in closes.columns else None
+            except Exception:  # noqa: BLE001 - an odd panel shape is not fatal
+                close = None
         try:
-            bundle = collect(ticker, cfg, STAGE_FAST)
+            bundle = collect(ticker, cfg, STAGE_FAST, close=close,
+                             benchmark=benchmark)
             values = resolve(bundle, cfg, STAGE_FAST)
         except Exception as exc:  # noqa: BLE001 - one bad ticker must not kill the alert
             log_step("YAHOO", "failed", f"fundamentals for {ticker}: {exc}")
@@ -1055,7 +1123,7 @@ def fetch_fast(tickers: list[str], cfg: dict) -> pd.DataFrame:
 # --------------------------------------------------------------------------
 
 RESOLVERS = ("yahoo_info", "yahoo_stmt", "yahoo_deep", "ibkr",
-             "distress", "moat", "sec_flags")
+             "distress", "moat", "sec_flags", "price_risk")
 
 
 def validate(cfg: dict) -> list[str]:

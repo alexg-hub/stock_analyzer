@@ -364,11 +364,30 @@ class ScanResult:
 # Data collection
 # --------------------------------------------------------------------------
 
-def get_sp500_tickers(source_url: str) -> list[str]:
-    """Scrape the current S&P 500 constituents from Wikipedia.
+#: What `sp500_constituents` renames Wikipedia's columns to. The table's own
+#: headings have moved before ("GICS Sector" has also appeared as "GICS
+#: sector"), so the lookup is case-insensitive and a heading that has vanished
+#: yields an empty column rather than a KeyError -- sector is a nice-to-have for
+#: peer grouping, never a reason to fail the universe.
+_CONSTITUENT_COLS = {"symbol": "ticker",
+                     "gics sector": "sector",
+                     "gics sub-industry": "sub_industry"}
 
-    Yahoo uses '-' where Wikipedia uses '.' in share-class tickers
-    (BRK.B -> BRK-B), so normalize before downloading.
+
+def sp500_constituents(source_url: str) -> pd.DataFrame:
+    """The S&P 500 table from Wikipedia: ticker, sector, sub_industry.
+
+    The single place that knows the shape of that table. `get_sp500_tickers`
+    takes its ticker column, so there is one fetch and one parse no matter which
+    of the two you call.
+
+    Sector matters because every threshold in the `quality` registry is an
+    *absolute* anchor, and several of them are only meaningful relative to a
+    peer group -- Altman Z and interest coverage are structurally low for banks
+    and anything with a captive finance arm, and a current ratio of 1.2 is
+    prudent for Microsoft and alarming for a miner. Sector is what a
+    peer-relative percentile would group by. The column was being parsed and
+    thrown away until 2026-08-10.
     """
     # Wikipedia rejects requests without a browser-like User-Agent.
     resp = requests.get(
@@ -379,16 +398,28 @@ def get_sp500_tickers(source_url: str) -> list[str]:
     resp.raise_for_status()
 
     tables = pd.read_html(io.StringIO(resp.text))
-    constituents = next(t for t in tables if "Symbol" in t.columns)
-    tickers = (
-        constituents["Symbol"]
-        .astype(str)
-        .str.strip()
-        .str.replace(".", "-", regex=False)
-        .tolist()
-    )
-    log_step("UNIVERSE", "ok", f"{len(tickers)} S&P 500 tickers from Wikipedia")
-    return tickers
+    raw = next(t for t in tables if "Symbol" in t.columns)
+    by_lower = {str(c).strip().lower(): c for c in raw.columns}
+
+    out = pd.DataFrame()
+    for heading, name in _CONSTITUENT_COLS.items():
+        source = by_lower.get(heading)
+        out[name] = (raw[source].astype(str).str.strip() if source is not None
+                     else pd.Series([""] * len(raw), index=raw.index))
+    # Yahoo uses '-' where Wikipedia uses '.' in share-class tickers
+    # (BRK.B -> BRK-B), so normalize before anything downloads.
+    out["ticker"] = out["ticker"].str.replace(".", "-", regex=False)
+
+    missing = int((out["sector"] == "").sum())
+    log_step("UNIVERSE", "ok" if not missing else "partial",
+             f"{len(out)} S&P 500 constituents from Wikipedia"
+             + (f" -- {missing} without a sector" if missing else ""))
+    return out
+
+
+def get_sp500_tickers(source_url: str) -> list[str]:
+    """Just the tickers, for the callers that only ever wanted a list."""
+    return sp500_constituents(source_url)["ticker"].tolist()
 
 
 def drop_unsettled_bars(data: pd.DataFrame, max_missing_pct: float = 0.5) -> pd.DataFrame:
