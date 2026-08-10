@@ -96,6 +96,18 @@ DEEP_VETO_COL = "Deep Veto"
 DEEP_VETO_REASONS_COL = "Deep Veto Reasons"
 DEEP_VETO_COLS = [DEEP_VETO_COL, DEEP_VETO_REASONS_COL]
 
+# The risk/reward coordinates and the quadrant they fall in, written by the same
+# `quality.annotate` pass. These are the **fast**-stage axis, which is what makes
+# a signal's position comparable to `universe_scan`'s plane -- the deep-stage
+# reading adds the SEC filing flags and so sits on a different scale. Like
+# `VETO_COLS` and unlike `DEEP_VETO_COLS` they are written by the scan itself, so
+# they must stay *out* of `merge_history_csv`'s `protect`: the incoming value is
+# the fresh one.
+REWARD_COL = "Reward"
+RISK_COL = "Risk"
+QUADRANT_COL = "Quadrant"
+AXIS_COLS = [REWARD_COL, RISK_COL, QUADRANT_COL]
+
 
 # --------------------------------------------------------------------------
 # Config
@@ -674,6 +686,14 @@ def build_embeds(module, result: ScanResult, cfg: dict,
         missing = row.get("Missing")
         if partial and isinstance(missing, str) and missing:
             description += f"\n**Missing:** {missing}"
+        # Where this signal sits on the risk/reward plane, from the columns
+        # `quality.annotate` recorded -- so the card and the plane cannot
+        # disagree, and a night's signal can be read against the whole index
+        # rather than only against the other signals. Absent columns mean the
+        # layer did not run, and print nothing at all.
+        plane = _plane_line(row, quality)
+        if plane:
+            description += f"\n{plane}"
         fields = quality.embed_fields(row, cfg)
         if vetoes:
             fields.insert(0, {"name": "Veto",
@@ -690,6 +710,29 @@ def build_embeds(module, result: ScanResult, cfg: dict,
             embed["image"] = {"url": f"attachment://{chart_files[ticker].name}"}
         (excluded if vetoes else clean).append(embed)
     return clean + excluded
+
+
+def _plane_line(row, quality) -> str:
+    """`**Plane:** low risk · high reward — reward 74 / risk 19`, or `""`.
+
+    Reads only what was recorded. Three cases have to stay distinguishable:
+    the layer never ran (no columns -> no line), an axis could not be measured
+    (`unknown` -> the line says so rather than printing a number), and a real
+    position. Never recomputes -- `annotate` is the single grading call.
+    """
+    quadrant = row.get(QUADRANT_COL)
+    if not isinstance(quadrant, str) or not quadrant:
+        return ""
+    label = quality.QUADRANT_LABELS.get(quadrant, quadrant)
+    reward, risk = row.get(REWARD_COL), row.get(RISK_COL)
+    if not (_is_number(reward) and _is_number(risk)):
+        return f"**Plane:** {label}"
+    return f"**Plane:** {label} — reward {reward:.0f} / risk {risk:.0f}"
+
+
+def _is_number(value) -> bool:
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and not pd.isna(value))
 
 
 def _embed_size(embed: dict) -> int:

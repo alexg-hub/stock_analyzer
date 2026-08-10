@@ -34,6 +34,15 @@ TRADING_DAYS = 252
 #: own minimum, applied per metric.
 MIN_OBS = 30
 
+#: For a metric whose **name makes a claim about the window** -- `max_drawdown_3y`
+#: -- the window has to be substantially filled or the number is mislabelled
+#: rather than merely noisy. A flat `min_obs` is not enough: the nightly scan
+#: carries `data.download_period` of prices (2y), which comfortably clears a
+#: 252-bar floor while covering only two thirds of a 756-bar window, so a
+#: "3-year" drawdown would quietly be a 2-year one. Returning None instead costs
+#: that one metric and is reported by `metrics_used`.
+WINDOW_FILL = 0.8
+
 
 def _clean(close) -> pd.Series:
     """A float series indexed by date, deduplicated, NaNs dropped."""
@@ -226,8 +235,10 @@ def metrics(close, benchmark=None) -> dict:
         "volatility_252d": volatility_pct(series, TRADING_DAYS),
         "downside_deviation": downside_deviation_pct(series),
         "max_drawdown_1y": max_drawdown_pct(series, TRADING_DAYS),
-        "max_drawdown_3y": max_drawdown_pct(series, TRADING_DAYS * 3,
-                                            min_obs=TRADING_DAYS),
+        # Its name claims three years, so it must have most of three years.
+        "max_drawdown_3y": max_drawdown_pct(
+            series, TRADING_DAYS * 3,
+            min_obs=int(TRADING_DAYS * 3 * WINDOW_FILL)),
         "ulcer_index": ulcer_index(series),
         "beta": beta(series, benchmark),
         "downside_beta": downside_beta(series, benchmark),

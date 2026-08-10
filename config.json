@@ -1155,7 +1155,11 @@
         "moat_roic_hurdle_pct": 12,
         "veto_badge": "🚫",
         "veto_tier": "AVOID",
-        "veto_enforced": false
+        "veto_enforced": false,
+        "quadrant": {
+            "reward_min": 60,
+            "risk_max": 25
+        }
     },
     "universe": {
         "dir": "universe",
@@ -1168,9 +1172,7 @@
         "price_period": "5y",
         "request_delay_s": 0.2,
         "retries": 2,
-        "progress_every": 10,
-        "reward_threshold": 60,
-        "risk_threshold": 25
+        "progress_every": 10
     },
     "ibkr": {
         "enabled": false,

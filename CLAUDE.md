@@ -382,6 +382,34 @@ real send.
     benchmark is one threaded call. Deliberately *not*
     `backtest_universe.cached_panel` — that pickle is keyed to a fixed universe
     and a volatility reading two weeks stale is wrong in a way nobody notices.
+- **The plane reaches the nightly alert; the universe pass does not run nightly.**
+  Two separate things, and conflating them is the mistake to avoid:
+  - `quality.annotate` records `Reward`/`Risk`/`Quadrant` (`AXIS_COLS`) on the
+    same single grading pass that writes the badge and the veto, so the card,
+    `latest_hits.json`, `signals.csv` and tier 4 all read one answer.
+    `build_embeds` renders it as a `**Plane:**` line via `_plane_line`, which
+    reads the recorded columns and **never recomputes**. Absent columns print
+    nothing (not evaluated); an `unknown` quadrant names itself without inventing
+    numbers. Like `VETO_COLS` and unlike `DEEP_VETO_COLS` these are written by the
+    scan, so they stay **out** of `merge_history_csv`'s `protect=`.
+  - The thresholds live in **`quality.quadrant`** (`reward_min`, `risk_max`), not
+    in the `universe` section, so the card, the table, the PNG and the
+    interactive page cannot disagree about where "buy" is.
+    `quality.quadrant_of`/`quadrant_thresholds` are the only definition;
+    `universe_scan` re-exports the labels rather than keeping a copy.
+  - `run_scanners.price_history` makes **one extra bulk download** for the
+    signalling tickers plus the benchmark, rather than reusing the scan's own
+    panel. Both reasons are about the card and the plane agreeing about the same
+    company on the same day: the scan panel is `data.download_period` (2y), which
+    is *shorter than the longest price-risk window*, and it holds constituents
+    only, so beta has no benchmark — and the benchmark cannot just be added to
+    the scan download because every column there goes through every screen. It
+    is a handful of tickers, so one batched call. Fail-open to the scan panel.
+  - **`universe_scan.py` is weekly, on its own Task Scheduler entry** ("SP500
+    Universe Plane", Sunday 18:00, `run_universe.bat`), because fundamentals move
+    quarterly and a 12-minute pass has no business inside the nightly chain. It
+    posts nothing to Discord: it is a reference artifact, not an event, and the
+    nightly card already carries the part that is actionable that day.
 - **`price_risk.py` is the `price_risk` resolver**, and its whole point is that
   the risk axis was built from accounting data alone — no volatility, no
   drawdown, no beta, which are the three most directly *measurable* risks a
@@ -981,9 +1009,11 @@ real send.
   schedule changes. Result code `3221225786` in `Get-ScheduledTaskInfo` means
   the run was killed mid-scan (usually PC shutdown), and that night's alert is
   simply lost — though the signals themselves are archived before tier 3
-  starts. **The task's `ExecutionTimeLimit` has to cover tier 3**: it was
-  registered at `PT30M`, which is ample for the scan but will guillotine a run
-  of five deep-dives.
+  starts. **The task's `ExecutionTimeLimit` has to cover tier 3**: it is
+  registered at `PT3H` (verified 2026-08-10 — this note previously said `PT30M`,
+  which would have guillotined a run of five deep-dives; check the live value
+  with `(Get-ScheduledTask …).Settings.ExecutionTimeLimit` rather than trusting
+  either doc).
 - Yahoo quirks the code already tolerates (don't "fix" into hard failures):
   missing `info` fundamentals render as `n/a` (e.g. negative-equity companies
   have no Debt/Equity); individual ticker download failures just drop out of

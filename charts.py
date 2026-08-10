@@ -704,8 +704,8 @@ def plot_risk_reward(table: pd.DataFrame, chart_cfg: dict, out_path: Path,
     Unmeasurable rows are dropped rather than plotted at zero: a `None` axis has
     no position, and plotting it as 0 would file it in the best quadrant.
     """
-    rt = float(chart_cfg.get("reward_threshold", 60))
-    xt = float(chart_cfg.get("risk_threshold", 25))
+    rt = float(chart_cfg.get("reward_min", 60))
+    xt = float(chart_cfg.get("risk_max", 25))
 
     points = table.dropna(subset=["reward", "risk"]) if not table.empty \
         else table

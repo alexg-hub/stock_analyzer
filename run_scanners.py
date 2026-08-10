@@ -130,9 +130,11 @@ def scan_ticker(ticker: str, cfg: dict) -> dict:
                     ScanResult(title=NO_SIGNAL_TITLE, hits=row))]
 
     # -- tier 2, the same two steps and the same single grading call as main() --
-    # Same panel reuse as the nightly path, so an on-demand look reads the price
-    # risk off the bars it just downloaded rather than fetching them twice.
-    fundamentals = quality.fetch_fast([ticker], cfg, closes=data.get("Close"))
+    # Same price-history call as the nightly path, so an ad-hoc look and a
+    # signalling night put the same ticker at the same point on the plane.
+    closes, benchmark = price_history([ticker], cfg, data)
+    fundamentals = quality.fetch_fast([ticker], cfg, closes=closes,
+                                      benchmark=benchmark)
     if not fundamentals.empty:
         for _, result in results:
             result.hits = result.hits.join(fundamentals)
@@ -141,6 +143,48 @@ def scan_ticker(ticker: str, cfg: dict) -> dict:
     log_quality(results, cfg)
 
     return build_hits_payload(scan_date, results)
+
+
+def price_history(tickers: list[str], cfg: dict, fallback=None):
+    """Closes and the benchmark for the `price_risk` parameters.
+
+    One extra bulk download rather than reusing the scan's own panel, for two
+    reasons that both come down to the card and the universe plane having to
+    agree about the same company on the same day:
+
+      * the scan's panel is `data.download_period` (2y), which is **shorter than
+        the longest price-risk window** -- so `max_drawdown_3y` returns None and
+        the risk axis silently loses a metric;
+      * the panel holds constituents only, and beta needs the benchmark, which
+        cannot simply be added to the scan download because every column there is
+        run through every screen.
+
+    Only signalling tickers are fetched, which is a handful, so this is one small
+    batched call and not a per-ticker cost. Fail-open: on any failure it falls
+    back to the scan's panel with no benchmark, which costs the long-window and
+    beta readings and nothing else.
+    """
+    if not tickers:
+        return (fallback.get("Close") if fallback is not None else None), None
+    benchmark_ticker = cfg.get("backtest", {}).get("benchmark_ticker", "SPY")
+    period = quality.price_history_period(cfg)
+    try:
+        panel = download_price_data(
+            sorted(set(tickers) | {benchmark_ticker}), period,
+            cfg["data"]["download_interval"])
+        closes = panel["Close"]
+        series = (closes[benchmark_ticker]
+                  if benchmark_ticker in closes.columns else None)
+        log_step("DOWNLOAD", "ok",
+                 f"{period} closes for price risk: {closes.shape[1]} ticker(s)"
+                 + ("" if series is not None
+                    else f" -- no {benchmark_ticker}, no beta"), cfg=cfg)
+        return closes, series
+    except Exception as exc:  # noqa: BLE001 - never costs more than two metrics
+        log_step("DOWNLOAD", "failed",
+                 f"price-risk history: {exc} -- falling back to the scan panel",
+                 cfg=cfg)
+        return (fallback.get("Close") if fallback is not None else None), None
 
 
 def log_quality(results: list, cfg: dict) -> None:
@@ -318,11 +362,9 @@ def main(argv: list[str] | None = None) -> int:
         for ticker in result.hits.index:
             if ticker not in wanted:
                 wanted.append(ticker)
-    # The panel is already in memory, so the `price_risk` parameters cost
-    # nothing here. No benchmark: SPY is not a constituent and adding it to the
-    # download would put a non-constituent through every screen, so the two beta
-    # readings stay missing on this path and the universe pass supplies them.
-    fundamentals = quality.fetch_fast(wanted, cfg, closes=data.get("Close"))
+    closes, benchmark = price_history(wanted, cfg, data)
+    fundamentals = quality.fetch_fast(wanted, cfg, closes=closes,
+                                      benchmark=benchmark)
     if not fundamentals.empty:
         for _, result in results:
             result.hits = result.hits.join(fundamentals)

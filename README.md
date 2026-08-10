@@ -1386,6 +1386,18 @@ $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -WakeToRun -Executi
 Register-ScheduledTask -TaskName "SP500 Breakout Scanner" -Action $action -Trigger $trigger -Settings $settings -Description "Scans S&P 500 for breakouts from consolidation ~30 min after US market close, alerts via Discord webhook, then runs the tier-3 deep-dive on the gated candidates."
 ```
 
+A second, **weekly** task grades the whole index on the risk/reward plane. It is
+separate on purpose: fundamentals move quarterly, the pass takes ~12 minutes, and
+it posts nothing to Discord — the nightly card already carries each signal's own
+coordinates, which is the part that is actionable on the day.
+
+```powershell
+$action   = New-ScheduledTaskAction -Execute "C:\Users\Lenovo\CC\stock_analyzer\run_universe.bat" -WorkingDirectory "C:\Users\Lenovo\CC\stock_analyzer"
+$trigger  = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At 18:00
+$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -WakeToRun -ExecutionTimeLimit (New-TimeSpan -Hours 1)
+Register-ScheduledTask -TaskName "SP500 Universe Plane" -Action $action -Trigger $trigger -Settings $settings -Description "Grades every S&P 500 constituent on the risk/reward plane and writes the table, scatter and interactive page under output/universe/. No Discord."
+```
+
 Useful commands:
 
 ```powershell
@@ -1393,6 +1405,8 @@ Get-ScheduledTaskInfo -TaskName "SP500 Breakout Scanner"   # last/next run + res
 Start-ScheduledTask   -TaskName "SP500 Breakout Scanner"   # trigger a run right now
 Get-Content output\scanner_log.txt  -Tail 40               # all four tiers
 Get-Content output\deepdive_log.txt -Tail 40               # the narrative pass
+Get-ScheduledTaskInfo -TaskName "SP500 Universe Plane"     # the weekly plane pass
+Get-Content output\universe_log.txt -Tail 20               # its progress lines
 ```
 
 Notes:

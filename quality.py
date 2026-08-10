@@ -73,8 +73,11 @@ import yfinance as yf
 
 from scanner_common import (
     COMPANY_COL,
+    QUADRANT_COL,
     QUALITY_COL,
     QUALITY_MISSING_COL,
+    REWARD_COL,
+    RISK_COL,
     VETO_COL,
     VETO_REASONS_COL,
     fmt_compact,
@@ -573,6 +576,52 @@ def evaluate(values: dict, cfg: dict, stage: str | None = None) -> QualityResult
     )
 
 
+# The four corners of the risk/reward plane, plus the honest fifth outcome.
+QUADRANT_BUY = "buy"                    # high reward, low risk -- the target
+QUADRANT_SPECULATIVE = "speculative"    # high reward, high risk
+QUADRANT_DULL = "dull"                  # low reward, low risk
+QUADRANT_AVOID = "avoid"                # low reward, high risk
+QUADRANT_UNKNOWN = "unknown"            # an axis could not be measured
+QUADRANTS = (QUADRANT_BUY, QUADRANT_SPECULATIVE, QUADRANT_DULL, QUADRANT_AVOID,
+             QUADRANT_UNKNOWN)
+
+#: Human phrasing for a card or a page, so the label is written once.
+QUADRANT_LABELS = {
+    QUADRANT_BUY: "low risk · high reward",
+    QUADRANT_SPECULATIVE: "high reward · high risk",
+    QUADRANT_DULL: "low risk · low reward",
+    QUADRANT_AVOID: "high risk · low reward",
+    QUADRANT_UNKNOWN: "not measurable",
+}
+
+
+def quadrant_thresholds(cfg: dict) -> tuple[float, float]:
+    """`(reward_min, risk_max)` -- the lines that divide the plane.
+
+    Lives in the `quality` section beside the axes that define it, so the nightly
+    card, `universe_scan`'s table and the interactive page cannot disagree about
+    where "buy" is. They are a *reading* convention, not a score: moving them
+    relabels rows and changes no recorded number.
+    """
+    quad = section(cfg).get("quadrant") or {}
+    return (float(quad.get("reward_min", 60)), float(quad.get("risk_max", 25)))
+
+
+def quadrant_of(reward, risk, cfg: dict) -> str:
+    """Which quadrant a point falls in. An unmeasured axis is `unknown`.
+
+    Never guesses. With one coordinate missing the point has no position, and the
+    dangerous default is the flattering one -- treating a `None` axis as 0 would
+    file every unmeasurable company in the buy quadrant.
+    """
+    if reward is None or risk is None:
+        return QUADRANT_UNKNOWN
+    reward_min, risk_max = quadrant_thresholds(cfg)
+    if reward >= reward_min:
+        return QUADRANT_BUY if risk <= risk_max else QUADRANT_SPECULATIVE
+    return QUADRANT_DULL if risk <= risk_max else QUADRANT_AVOID
+
+
 def tier_for(conviction: float, cfg: dict) -> str:
     """Map a 0-100 score to a tier label via the configured bands."""
     tiers = sorted(section(cfg).get("tiers") or [], key=lambda t: -t["min"])
@@ -621,6 +670,16 @@ def annotate(hits: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     hits[QUALITY_MISSING_COL] = pd.Series(failures, index=hits.index, dtype=object)
     hits[VETO_COL] = [bool(v) for v in vetoes]
     hits[VETO_REASONS_COL] = pd.Series(vetoes, index=hits.index, dtype=object)
+
+    # The quadrant coordinates, recorded on the same pass and for the same reason
+    # the badge is: computed once, so the card, the hand-off, `signals.csv` and
+    # tier 4 all read one answer. Deliberately the **fast**-stage axis, which is
+    # what makes a signal's position comparable to the universe plane -- a
+    # deep-stage reading includes the SEC flags and sits on a different scale.
+    axes = [axis_scores(v, cfg, STAGE_FAST) for v in graded]
+    hits[REWARD_COL] = [a["reward"] for a in axes]
+    hits[RISK_COL] = [a["risk"] for a in axes]
+    hits[QUADRANT_COL] = [quadrant_of(a["reward"], a["risk"], cfg) for a in axes]
     return hits
 
 

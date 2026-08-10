@@ -63,14 +63,13 @@ from scanner_common import (
 
 CONFIG_KEY = "universe"
 
-#: Quadrant labels. `UNKNOWN` is its own outcome, never folded into a corner:
-#: a ticker whose axes could not be measured must not land in the buy quadrant
-#: by default, which is exactly what treating a `None` axis as 0 would do.
-BUY = "buy"                    # high reward, low risk -- the target quadrant
-SPECULATIVE = "speculative"    # high reward, high risk
-DULL = "dull"                  # low reward, low risk
-AVOID = "avoid"                # low reward, high risk
-UNKNOWN = "unknown"
+#: Re-exported from `quality`, which owns the plane's definition so the nightly
+#: card, this table and the interactive page cannot disagree about where "buy" is.
+BUY = quality.QUADRANT_BUY
+SPECULATIVE = quality.QUADRANT_SPECULATIVE
+DULL = quality.QUADRANT_DULL
+AVOID = quality.QUADRANT_AVOID
+UNKNOWN = quality.QUADRANT_UNKNOWN
 
 TABLE_COLUMNS = [
     "ticker", "company", "sector", "sub_industry",
@@ -295,21 +294,6 @@ def scan(cfg: dict, tickers: list[str], refresh: bool = False,
 # The table
 # --------------------------------------------------------------------------
 
-def quadrant_of(reward, risk, cfg: dict) -> str:
-    """Which quadrant a point sits in. An unmeasured axis is `UNKNOWN`.
-
-    Never guesses: with one coordinate missing the point has no position, and the
-    dangerous default is the flattering one.
-    """
-    if reward is None or risk is None:
-        return UNKNOWN
-    rt = float(section(cfg).get("reward_threshold", 60))
-    xt = float(section(cfg).get("risk_threshold", 25))
-    if reward >= rt:
-        return BUY if risk <= xt else SPECULATIVE
-    return DULL if risk <= xt else AVOID
-
-
 def _axis_counts(entry: dict, axis: str) -> tuple[int, int]:
     """Metrics that produced a value, and metrics available, on one axis."""
     used = total = 0
@@ -365,7 +349,8 @@ def build_table(cfg: dict, cache: dict, constituents: pd.DataFrame
             "reward": entry.get("reward"),
             "risk": entry.get("risk"),
             "safety": entry.get("safety"),
-            "quadrant": quadrant_of(entry.get("reward"), entry.get("risk"), cfg),
+            "quadrant": quality.quadrant_of(entry.get("reward"),
+                                            entry.get("risk"), cfg),
             "vetoed": entry.get("vetoed"),
             "veto_reasons": quality.veto_text(entry.get("veto_reasons") or [],
                                               cfg),
@@ -707,8 +692,8 @@ def html_payload(table: pd.DataFrame, cfg: dict) -> tuple[str, dict]:
             row[key] = row.get(key) or ""
     meta = {
         "subtitle": summarize(table, cfg),
-        "reward_threshold": float(section(cfg).get("reward_threshold", 60)),
-        "risk_threshold": float(section(cfg).get("risk_threshold", 25)),
+        "reward_threshold": quality.quadrant_thresholds(cfg)[0],
+        "risk_threshold": quality.quadrant_thresholds(cfg)[1],
         "note": ("<strong>How to read this.</strong> Every score is computed in "
                  "Python from the quality registry in force at collection time; "
                  "no model produced any number here. Thresholds are display-only "
@@ -806,7 +791,12 @@ def main(argv=None) -> int:
         print(table[cols].head(25).to_string(index=False))
 
     if not args.no_chart and not table.empty:
-        chart_cfg = dict(section(cfg))
+        # `charts` never reads config, so the two threshold values are merged in
+        # here from where they actually live (`quality.quadrant`) rather than the
+        # builder reaching across sections for them.
+        reward_min, risk_max = quality.quadrant_thresholds(cfg)
+        chart_cfg = dict(section(cfg),
+                         reward_min=reward_min, risk_max=risk_max)
         png = universe_dir(cfg) / section(cfg).get("chart_path",
                                                   "risk_reward.png")
         try:

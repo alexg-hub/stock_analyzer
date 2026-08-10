@@ -36,6 +36,7 @@ def _table(cfg: dict, tickers: list[str] | None = None):
 
 def quadrant_impl(quadrant: str | None = None, sector: str | None = None,
                   limit: int = 50, vetoed_only: bool = False) -> dict:
+    import quality
     import universe_scan
     cfg = load_config()
     cache, table = _table(cfg)
@@ -69,8 +70,8 @@ def quadrant_impl(quadrant: str | None = None, sector: str | None = None,
         "counts": counts,
         "stage": stage,
         "thresholds": {
-            "reward": universe_scan.section(cfg).get("reward_threshold"),
-            "risk": universe_scan.section(cfg).get("risk_threshold"),
+            "reward": quality.quadrant_thresholds(cfg)[0],
+            "risk": quality.quadrant_thresholds(cfg)[1],
         },
         "note": ("Thresholds are display-only -- they label quadrants and change "
                  "no recorded score. A `fast` stage means the SEC filing flags "

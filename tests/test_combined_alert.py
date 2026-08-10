@@ -186,6 +186,40 @@ c.ok("the signal charts are preserved",
      len([e for e in with_image if "/100" not in e["title"]]) == len(signal_cards),
      "one chart per signal, as before the merge")
 
+# Where a signal sits on the risk/reward plane is the point of the whole layer,
+# so it has to reach the card the user actually reads -- and it has to be the
+# *recorded* coordinates, not a second computation that could disagree with the
+# hand-off. Absent columns must print nothing at all rather than "None".
+signal_embeds = [e for e in embeds
+                 if "/100" not in e["title"] and "double top" not in e["title"]]
+planed = [e for e in signal_embeds if "**Plane:**" in e.get("description", "")]
+c.ok("every signal card states its quadrant",
+     len(planed) == len(signal_embeds),
+     f"{len(planed)}/{len(signal_embeds)} cards carry a plane line")
+c.ok("...naming a real quadrant, never a raw None",
+     all(any(lab in e["description"]
+             for lab in quality.QUADRANT_LABELS.values()) for e in planed)
+     and not any("None" in e["description"] for e in planed),
+     # The plane line only, not the whole description: a detail containing a
+     # newline is truncated at it on display and would show the wrong fragment.
+     next((line for e in planed for line in e["description"].splitlines()
+           if line.startswith("**Plane:**")), "none found"))
+
+# The line is built from recorded columns, so a frame that never went through
+# `annotate` gets no line -- the same "absent means not evaluated" rule the
+# quality columns follow.
+bare = pd.DataFrame({"Setup": ["full"], "Missing": [""]},
+                    index=pd.Index(["ZZZ"], name="Ticker"))
+c.ok("an ungraded frame produces no plane line at all",
+     scanner_common._plane_line(bare.iloc[0], quality) == "",
+     "absent columns mean not evaluated, never a zero position")
+c.ok("an unmeasurable axis names the quadrant without inventing numbers",
+     scanner_common._plane_line(
+         pd.Series({scanner_common.QUADRANT_COL: quality.QUADRANT_UNKNOWN,
+                    scanner_common.REWARD_COL: None,
+                    scanner_common.RISK_COL: None}), quality)
+     == f"**Plane:** {quality.QUADRANT_LABELS[quality.QUADRANT_UNKNOWN]}")
+
 # --------------------------------------------------------------------------
 c.section("the verdict is deterministic and recorded either way")
 

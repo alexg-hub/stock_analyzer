@@ -77,6 +77,21 @@ c.ok("a 3-year drawdown over one year of bars is None, not a small number",
                                  min_obs=252) is None,
      f"{len(shape)} bars must not answer a 756-day question")
 
+# The subtler version of the same trap, and the one that actually shipped: two
+# years of bars clears a flat 252-bar floor while covering two thirds of a
+# 756-bar window, so `max_drawdown_3y` was a 2-year drawdown wearing a 3-year
+# label. The nightly scan carries exactly that much history (`download_period`
+# is 2y), so this was live on the nightly path and not a hypothetical.
+two_years = series(range(100, 100 + 504))
+c.ok("two years of bars cannot answer the 3-year drawdown",
+     price_risk.metrics(two_years)["max_drawdown_3y"] is None,
+     "a mislabelled number is worse than a missing one")
+c.ok("...while the 1-year drawdown from the same series is answered",
+     price_risk.metrics(two_years)["max_drawdown_1y"] is not None)
+five_years = series(range(100, 100 + 1260))
+c.ok("five years of bars does answer it",
+     price_risk.metrics(five_years)["max_drawdown_3y"] is not None)
+
 # The Ulcer index is the RMS of the same drawdown series, so it is bounded by
 # the maximum and strictly positive whenever any drawdown exists.
 ulcer = price_risk.ulcer_index(series(shape))
