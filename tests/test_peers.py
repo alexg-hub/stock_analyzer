@@ -178,6 +178,52 @@ c.ok("a ticker with no sector contributes nothing", 5.0 not in (collected or [])
 c.ok("the good ones are collected and sorted", collected == [2.0, 3.0])
 c.ok("the sector map excludes blanks", "NOSEC" not in (built.get("sector_of") or {}))
 
+# --------------------------------------------------------------------------
+c.section("every production grading call site passes a sector")
+
+# Threading `sector` through `quality` is only half the job: a caller that omits
+# it gets absolute anchors for every `sector_relative` parameter, silently, and
+# returns a perfectly plausible number. That is exactly what happened -- tier 3's
+# `compute_quant_score` and `risk_report` graded on absolute anchors while the
+# plane used peers, so the two disagreed about the same company, and
+# `universe_scan.collect_one` stored a veto count (92) that the rendered table
+# (59) contradicted. Nothing raised, and no output looked wrong on its own.
+#
+# So this is a source check rather than a behavioural one: there is no observable
+# difference to assert without a peer-stats file and a network fetch, and by the
+# time a reader notices two tables disagreeing the number has already been used.
+import ast
+
+_SECTOR_AWARE = {"evaluate", "axis_scores", "score_of", "group_scores",
+                 "veto_failures"}
+_ROOT = Path(__file__).resolve().parent.parent
+_offenders = []
+_checked = 0
+for _name in ("research_report.py", "universe_scan.py", "scanner_common.py",
+              "run_scanners.py"):
+    _path = _ROOT / _name
+    if not _path.exists():
+        continue
+    for _node in ast.walk(ast.parse(_path.read_text(encoding="utf-8"))):
+        if not isinstance(_node, ast.Call):
+            continue
+        _f = _node.func
+        if not (isinstance(_f, ast.Attribute) and _f.attr in _SECTOR_AWARE
+                and isinstance(_f.value, ast.Name) and _f.value.id == "quality"):
+            continue
+        _checked += 1
+        # `sector` is the 4th positional parameter on each of these, or a kwarg.
+        _has = len(_node.args) >= 4 or any(k.arg == "sector"
+                                           for k in _node.keywords)
+        if not _has:
+            _offenders.append(f"{_name}:{_node.lineno} quality.{_f.attr}")
+
+c.ok("the check found the call sites at all", _checked >= 3,
+     f"inspected {_checked} calls -- zero would make this test vacuous")
+c.ok("no production grading call omits the sector", not _offenders,
+     f"absolute anchors would be used silently at: {_offenders}"
+     if _offenders else f"{_checked} call sites all pass it")
+
 shutil.rmtree(tmp, ignore_errors=True)
 peers.reset_cache()
 raise SystemExit(c.finish())

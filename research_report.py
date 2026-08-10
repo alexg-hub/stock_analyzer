@@ -40,6 +40,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 import charts
+import peers
 import quality
 import run_scanners
 import sec
@@ -219,7 +220,7 @@ def list_candidates(hits: dict, cfg: dict, gate: str | None = None,
 # Deterministic quant score (the unified quality engine's scoring half)
 # --------------------------------------------------------------------------
 
-def compute_quant_score(bundle: dict, cfg: dict) -> dict:
+def compute_quant_score(bundle: dict, cfg: dict, ticker: str = "") -> dict:
     """The config-driven 0-100 anchor, from a `quality.collect` bundle.
 
     Thin by design: every metric definition, weight and good/bad anchor now
@@ -231,9 +232,15 @@ def compute_quant_score(bundle: dict, cfg: dict) -> dict:
     The output keys are unchanged -- `score`, `dimensions`, `metrics` -- because
     they are written into `<T>_<date>_facts.json` and tier 4 explodes them into
     the `quant_*` / `qm_*` ledger columns.
+
+    `ticker` is only used to look the sector up. Without it every
+    `sector_relative` parameter falls back to its absolute anchors, so tier 3
+    would grade a company on a different basis than the plane did -- silently,
+    and in the direction the peer layer exists to correct.
     """
     values = quality.resolve(bundle, cfg)
-    result = quality.evaluate(values, cfg)
+    result = quality.evaluate(values, cfg,
+                              sector=peers.sector_of(ticker, cfg) if ticker else "")
     return {
         "score": result.score,
         "dimensions": result.groups,
@@ -432,7 +439,7 @@ def deterministic_verdict(ticker: str, cfg: dict, trigger: dict | None,
     fin_cfg = cfg.get("research", {}).get("financials", {})
     bundle = quality.collect(ticker, cfg, None, close=close)
     yahoo = bundle.get("_yahoo") or {}
-    quant = compute_quant_score(bundle, cfg)
+    quant = compute_quant_score(bundle, cfg, ticker)
     log_step("QUANT", "ok", f"{ticker} score {quant.get('score')}", cfg=cfg)
 
     chart = None
@@ -1396,7 +1403,12 @@ def risk_report(ticker: str, cfg: dict) -> dict:
     """
     bundle = quality.collect(ticker, cfg, None)
     values = quality.resolve(bundle, cfg, None)
-    result = quality.evaluate(values, cfg, None)
+    # The sector has to be threaded in, or every `sector_relative` rule falls back
+    # to its absolute anchor and this report contradicts the plane about the same
+    # company -- including its veto, since the peer conjunction that keeps the
+    # exclusion quiet is simply skipped when the sector is unknown.
+    sector = peers.sector_of(ticker, cfg)
+    result = quality.evaluate(values, cfg, None, sector)
     specs = quality.parameters(cfg, None)
 
     def entry(key: str) -> dict:
@@ -1426,9 +1438,22 @@ def risk_report(ticker: str, cfg: dict) -> dict:
     # group's aggregation auditable: a `worst_k` axis is only as good as the
     # anchors on the metrics it selects, and a metric every company trips shows
     # up here as a 0.0 sitting at the top of the list.
+    def _reading(key: str, value: float) -> float:
+        """The metric's 0-1 score exactly as the axis computed it.
+
+        Must go through the peer layer first: `worst_k` selects the lowest
+        readings, so a list built from absolute anchors would name a different
+        "worst three" than the ones actually driving the number beside it.
+        """
+        spec = specs[key]
+        if peers.is_enabled(cfg) and spec.get("sector_relative"):
+            rel = peers.relative_score(key, spec, sector, value, cfg)
+            if rel is not None:
+                return rel
+        return quality.normalize(value, spec["score"]["good"], spec["score"]["bad"])
+
     normalized = sorted(
-        ((k, quality.normalize(v, specs[k]["score"]["good"],
-                               specs[k]["score"]["bad"]))
+        ((k, _reading(k, v))
          for k in specs
          if specs[k].get("group") == "risk" and specs[k].get("score")
          and (v := quality.scalar(values.get(k), specs[k])) is not None),

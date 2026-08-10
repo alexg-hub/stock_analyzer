@@ -297,16 +297,57 @@ real send.
       `quality.has_values`: not measured is not good news.
     - **`aggregate: {"worst_k": n}` averages the n *lowest* readings** instead
       of all of them, because risk is about the worst thing true of a company,
-      not the average thing. It is deliberately **still `"mean"`** for now:
-      switching it on scored MSFT at risk 77 and KO at 93, because it amplifies
-      miscalibrated anchors that averaging had been hiding. `officer_departure`
-      was the worst (8-K item 5.02 covers routine director elections, so it
-      read 0.00 for MSFT, INTC *and* KO — a 100%-base-rate flag carries no
-      information) and is now `enabled: false`. `shelf_registration` (routine
-      S-3 renewals for large caps) and the `current_ratio`/`quick_ratio` anchors
-      are the same shape of problem and still need the index-wide distribution
-      before anyone picks new numbers by eye. **Fix the anchors before enabling
-      `worst_k`.**
+      not the average thing. **Enabled at `worst_k: 3` on both risk groups since
+      2026-08-10**, after two failed attempts that are the whole reason the rule
+      below exists.
+      Measured: it lifts vetoed-vs-clean separation on the risk axis from an
+      effect size of **+0.91 to +1.09**, and it automatically drops the
+      no-variance metrics (`negative_equity` reads a clean 1.00 for all 503, so
+      averaging let it dilute every company's risk while `worst_k` simply never
+      selects it).
+      **`worst_k` amplifies a miscalibrated anchor into control of the axis**,
+      which is what sank it twice. The failure signature is a metric whose
+      *normalized* reading centres far below 0.5 across the index: it then
+      occupies a worst-k slot for nearly every company, and the axis stops
+      measuring the company at all. The diagnostic is a per-metric median of the
+      normalized value — anything under ~0.25 is marking the whole index bad.
+      Three anchors had to be fixed first, in three different ways:
+      - `officer_departure` — 8-K item 5.02 covers routine director elections, so
+        it read 0.00 for MSFT, INTC *and* KO. A 100%-base-rate flag carries no
+        information; `enabled: false`.
+      - `downside_deviation` — its *implementation* was wrong, not its anchors
+        (see `price_risk.downside_deviation_pct`). It occupied **89%** of all
+        worst-2 slots and no S&P 500 member ever reached its `good: 10` bar.
+      - `current_ratio` / `quick_ratio` — genuinely miscalibrated absolute
+        anchors. Measured over 481 constituents: median current ratio **1.21**
+        against `good: 2.5 / bad: 1.0` normalized to **0.14**, with 59% of the
+        index below 0.25, so these two owned 2 of the 3 deep-stage slots for
+        almost everything. Re-anchored to `1.8 / 0.6` and `1.3 / 0.3` — `bad` at
+        roughly the 10th percentile and `good` set so the *median* company lands
+        near 0.5. The textbook "current ratio above 2" describes 1960s
+        manufacturers; modern large caps run lean working capital on purpose,
+        which is the same argument that makes Altman Z structurally low for
+        financials. MSFT moved 0.15 → 0.52 on that metric alone.
+      Note `shelf_registration` was the *suspected* fourth and turns out to be
+      fine: like the other three `sec_flags` it reads 0 → normalizes to a clean
+      1.00, so it never enters a worst-k slice. Don't disable it on the old
+      suspicion.
+      Two live caveats:
+      - **It shifts the LEVEL of the axis, so `quality.quadrant` must be
+        recalibrated with it** — index median risk went 33 → 60, and leaving
+        `risk_max` at 30 would have collapsed the buy quadrant to 1 name that had
+        not become any safer. `risk_max` was re-anchored at the **same
+        selectivity** (the percentile the old bar sat at, ~40% of the index),
+        giving 30 → 56 and 47 buys across all 11 sectors. Same trap percentile
+        scoring set off; see `peers.py`.
+      - **`worst_k` is per group and therefore per *stage* too.** The `risk`
+        group carries 10 scored metrics at `fast` and 18 at `deep`, so worst-3-of-18
+        is a harsher slice than worst-3-of-10 and a deep-graded company reads
+        riskier than the same company on the plane. Tolerable only because the 8
+        deep additions are mostly binary `sec_flags` that read clean at 1.00 and
+        so never get selected — if a future deep parameter centres low, it will
+        quietly take over every tier-3 risk reading. Check the median normalized
+        value before adding one.
   - **`enabled: false` makes a parameter invisible** — not gated, not scored,
     absent from `Quality Missing` and from the embed fields, and not counted in
     any weight. That is the flag's whole purpose: a company with no dividend
@@ -464,8 +505,23 @@ real send.
     install, a thin sector and a cold cache behaving exactly as before.
   - **Percentile scoring re-centres a metric at 0.5**, so switching it on moves
     the *level* of both axes and invalidates fixed quadrant thresholds. They were
-    recalibrated once (`reward_min` 60→58, `risk_max` 25→30, giving 41 buys across
-    all 11 sectors); expect to do that again if the flagged set changes materially.
+    recalibrated once (`reward_min` 60→58, `risk_max` 25→30) and again when
+    `worst_k` was enabled (`risk_max` 30→56, 47 buys across all 11 sectors);
+    expect to do it every time the scoring changes.
+  - **A caller that forgets to pass `sector` gets absolute anchors, silently.**
+    Every grading entry point takes `sector` as its 4th argument
+    (`evaluate`, `axis_scores`, `score_of`, `group_scores`, `veto_failures`), and
+    omitting it is not an error — it is the documented fallback, so the call
+    returns a plausible number computed on a different basis than the plane used.
+    This shipped broken: `research_report.compute_quant_score` and `risk_report`
+    both omitted it, so **tier 3 graded on absolute anchors while the plane used
+    peers** — MSFT read reward 78.6 / risk 43.8 in a report and 63.0 / 53.6 on the
+    chart — and `universe_scan.collect_one` stored a veto count (92) that its own
+    rendered table (59) contradicted. Worse for the veto than for the score: with
+    no sector the peer *conjunction* is skipped entirely, so tier 3 could exclude
+    a name the plane had cleared, defeating the "peers can only make it quieter"
+    property. `tests/test_peers.py` walks the AST of every production module and
+    fails on any such call, because there is no observable symptom to test for.
   Note the ⭐ gates stay on absolute anchors deliberately — the badge is meant to
   be strict, and moving it would also move tier 3's candidate gate.
 - **`universe_scan.regrade` re-grades cached entries at render time.** The cache's
@@ -492,6 +548,19 @@ real send.
     None correctly while a plausible wrong number gets scored. Every window
     carries its own `min_obs` — `pct_below_52w_high` included, or a young listing
     reads a confident 0% below its high.
+  - **`downside_deviation_pct` divides the squared losses by the TOTAL bar count**,
+    not by the number of losses — the Sortino semideviation. Dividing by the loss
+    count instead yields the RMS of the negative returns, which for an index
+    member is numerically almost identical to total volatility (measured across
+    the S&P 500: median **30.86 vs 30.94**), so the metric silently duplicated
+    `volatility_252d` while its `good: 10 / bad: 40` anchors stayed calibrated for
+    the semideviation they were written for — the index *minimum* was 14.16, so no
+    company ever reached "good", and enabling `worst_k` handed this one metric 89%
+    of the slots on the axis. Fixed 2026-08-10; the median is now 21.58. The
+    consequence worth keeping: **loss frequency counts**, so two names with equally
+    deep losses rank differently when one falls twice as often. A test pins the
+    ratio at volatility/√2 on an evenly-split series, which is what fails if the
+    loss-count divisor ever comes back.
   - **Benchmark series are intersected, not zipped** (`_aligned_returns`), the
     same rule as `derived._aligned`: a beta against a benchmark offset by a day
     returns a plausible number and raises nothing. A test shifts the dates and

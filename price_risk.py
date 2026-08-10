@@ -80,11 +80,25 @@ def volatility_pct(close: pd.Series, days: int, min_obs: int = MIN_OBS):
 
 def downside_deviation_pct(close: pd.Series, days: int = TRADING_DAYS,
                            min_obs: int = MIN_OBS):
-    """Annualized deviation of the *negative* returns only.
+    """Annualized semideviation -- the downside half of volatility.
 
     Volatility punishes a stock for rising sharply; this does not. Kept
     alongside rather than instead of it, because a name whose upside and downside
     volatility diverge is telling you something neither number says alone.
+
+    The squared losses are divided by the **total** observation count, not by the
+    number of losses -- the Sortino convention, and the one that makes this a
+    genuinely different reading. Dividing by the loss count instead yields the
+    RMS of the negative returns, which for an equity index member is numerically
+    almost identical to total volatility (measured across the S&P 500: median
+    30.86 against 30.94), so the metric silently duplicated `volatility_252d`
+    while its `good: 10 / bad: 40` anchors stayed calibrated for the semideviation
+    they were written for -- no company in the index ever reached "good", which
+    handed the metric 89% of every `worst_k` slot on the axis.
+
+    Frequency therefore counts: two names with equally deep losses rank
+    differently when one falls twice as often, which is the distinction a
+    loss-subset RMS throws away.
     """
     window = _tail(_log_returns(close), days)
     if len(window) < min_obs:
@@ -92,7 +106,8 @@ def downside_deviation_pct(close: pd.Series, days: int = TRADING_DAYS,
     losses = window[window < 0]
     if losses.empty:
         return 0.0
-    return float(np.sqrt((losses ** 2).mean()) * np.sqrt(TRADING_DAYS) * 100)
+    semivar = float((losses ** 2).sum()) / len(window)
+    return float(np.sqrt(semivar) * np.sqrt(TRADING_DAYS) * 100)
 
 
 def max_drawdown_pct(close: pd.Series, days: int, min_obs: int = MIN_OBS):

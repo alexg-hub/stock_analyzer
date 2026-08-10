@@ -90,10 +90,37 @@ the worst decile of its peer group. Utilities went from 26 of 31 excluded to 5,
 sector mean risk 38.7 → 28.7, and Financials' share of the buy quadrant from 42%
 to 23% against a 15% index weight.
 
-**This also unblocks `aggregate: worst_k`**, which was disabled because it
-amplified miscalibrated anchors. With the worst offenders now ranked against peers
-rather than absolute bars, revisit that decision — it is the next thing to try on
-the risk axis.
+### B1b. `aggregate: worst_k` on the risk axis — ✅ done
+
+Enabled 2026-08-10 at `worst_k: 3` on both risk groups. Sector-relative scoring is
+what unblocked it: a percentile-ranked metric cannot have a miscalibrated absolute
+anchor, because it re-centres at 0.5 by construction.
+
+Separation of vetoed from clean names on the risk axis improved from an effect size
+of **+0.91 to +1.09**, and the aggregation now automatically ignores the
+no-variance metrics that averaging had been letting dilute every reading
+(`negative_equity` is a clean 1.00 for all 503 constituents).
+
+Getting there required fixing three anchors, and the *diagnostic* is the reusable
+part: **the median normalized reading of every metric on the axis.** One centring
+below ~0.25 is marking the whole index bad, and `worst_k` will then hand it the
+axis for nearly every company. That test found a genuine implementation defect in
+`downside_deviation` (loss-count divisor instead of the total, so it duplicated
+volatility) and two absolute anchors that were describing a different era of
+balance sheet (`current_ratio` median 1.21 against a `good: 2.5` bar). Full detail
+in CLAUDE.md.
+
+Two consequences to carry forward:
+
+- **`worst_k` moves the level of the axis, so quadrant thresholds move with it** —
+  `risk_max` 30 → 56, re-anchored at the same selectivity rather than picked by
+  eye. Third time thresholds have had to be recalibrated after a scoring change;
+  assume it every time.
+- **The `fast`/`deep` slice asymmetry is now live and unmeasured.** `risk` holds 10
+  scored metrics at `fast` and 18 at `deep`, so worst-3-of-18 is harsher and
+  tier 3 reads riskier than the plane for the same company. Safe today only
+  because the 8 deep additions are mostly binary `sec_flags` scoring a clean 1.00.
+  A deep universe pass would let this be measured rather than argued — see B2.
 
 ### B2. SEC XBRL `frames` — the strategic one
 
@@ -198,8 +225,16 @@ computed numbers as findings.
 1. **A2** — eight lines of `deep_metrics` plus config buys FCF yield and
    EV/EBITDA. Best ratio of value to effort in the document.
 2. **A1 Piotroski** — one function, no I/O, a well-validated composite.
-3. **B1 sector-relative percentiles** — unblocks `worst_k` and fixes the whole
-   class of anchor-calibration problems rather than one anchor at a time.
+3. ~~**B1 sector-relative percentiles**~~ — done, and it unblocked ~~B1b~~
+   `worst_k`, also done.
 4. **B3 TTM + quarterly** — removes up to 12 months of staleness from every ratio.
 5. **B2 XBRL frames** — the only route to a point-in-time backtest, and therefore
    the only way to test the exclusion thesis on history rather than forward.
+
+One lesson worth applying to all of the above: **every metric added to an axis
+needs its median normalized reading checked against the index before it is
+trusted.** Three of the anchors in this registry were wrong in the same direction
+— strict enough to mark the whole index bad — and under a plain mean that is
+invisible, because it just shifts the level uniformly. Anchors written from
+textbook values rather than from the observed distribution are the single most
+common defect found here so far.

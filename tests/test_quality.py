@@ -453,6 +453,44 @@ c.ok("worst_k is never kinder than the mean",
 c.ok("worst_k:1 keys the axis off the single worst reading",
      quality.axis_scores(mixed, _wk, None)["risk"] == 100.0)
 
+# `worst_k` >= the number of PARTICIPATING metrics has to degrade to the mean,
+# not raise and not drop members. This is what makes the setting safe to leave on
+# across stages: the same group carries 10 scored metrics at `fast` and 18 at
+# `deep`, and a ticker with only two resolvable values must still be gradeable.
+_big_k = copy.deepcopy(_mean_one)
+_big_k["quality"]["groups"][_risk_group]["aggregate"] = {"worst_k": 999}
+c.ok("worst_k larger than the group degrades to the mean of what is there",
+     quality.axis_scores(mixed, _big_k, None)["risk"]
+     == quality.axis_scores(mixed, _mean_one, None)["risk"],
+     "the most pessimistic read available is already the mean of everything")
+
+_two_only = {k: v for k, v in mixed.items() if k == _one}
+c.ok("a group with fewer values than k is still graded, not skipped",
+     quality.axis_scores(_two_only, _wk, None)["risk"] is not None)
+
+# Enabling `worst_k` makes the ORDER of the readings load-bearing rather than
+# just their average, so pin the selection against a hand-computed number. Two
+# equally-weighted metrics at 0.25 and 0.75: the mean is 0.50 -> risk 50, and
+# worst_k 1 must take the 0.25 -> safety 0.25 -> risk 75.
+_pair = [k for k, s in quality.parameters(cfg, None).items()
+         if s.get("score") and s.get("group") == _risk_group][:2]
+if len(_pair) == 2:
+    _probe = {}
+    for _k, _frac in zip(_pair, (0.25, 0.75)):
+        _a = quality.parameters(cfg, None)[_k]["score"]
+        _probe[_k] = _a["bad"] + _frac * (_a["good"] - _a["bad"])
+    _only_pair = copy.deepcopy(_wk)
+    _mean_pair = copy.deepcopy(_mean_one)
+    # Equal weights, so the hand arithmetic above is the whole story.
+    for _c in (_only_pair, _mean_pair):
+        for _k in _pair:
+            _c["quality"]["parameters"][_k]["weight"] = 1.0
+    _got_wk = quality.axis_scores(_probe, _only_pair, None)["risk"]
+    _got_mean = quality.axis_scores(_probe, _mean_pair, None)["risk"]
+    c.ok("worst_k takes the lowest reading, not the average of the two",
+         abs(_got_mean - 50.0) < 1e-6 and abs(_got_wk - 75.0) < 1e-6,
+         f"mean {_got_mean:.3f} (expect 50), worst_k {_got_wk:.3f} (expect 75)")
+
 c.ok("an unknown axis is caught",
      problems(lambda v: v["quality"]["groups"][first_group].update(
          {"axis": "sideways"})),

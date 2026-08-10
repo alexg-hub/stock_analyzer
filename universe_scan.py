@@ -267,7 +267,13 @@ def collect_one(ticker: str, cfg: dict, retries: int = 2,
             bundle = quality.collect(ticker, cfg, quality.STAGE_FAST,
                                      close=close, benchmark=benchmark)
             values = quality.resolve(bundle, cfg, quality.STAGE_FAST)
-            result = quality.evaluate(values, cfg, quality.STAGE_FAST)
+            # `regrade` recomputes all of this at render time, so the axes stored
+            # here are never what gets plotted -- but they are what a reader of
+            # the cache sees, and grading them without the sector made the stored
+            # veto count disagree with the rendered one (92 against 59). Store the
+            # same answer the table will show.
+            result = quality.evaluate(values, cfg, quality.STAGE_FAST,
+                                      peers.sector_of(ticker, cfg))
             return {
                 "collected_at": datetime.now(timezone.utc).isoformat(
                     timespec="seconds"),

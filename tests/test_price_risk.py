@@ -127,6 +127,40 @@ c.ok("downside deviation never exceeds total volatility",
      mixed_dd is not None and mixed_dd <= got + 1e-9,
      f"downside {mixed_dd:.2f} vs total {got:.2f}")
 
+# The squared losses are divided by the TOTAL observation count (the Sortino
+# semideviation), not by the number of losses. Dividing by the loss count gives
+# the RMS of the negative returns, which on real equities lands within a rounding
+# error of total volatility -- so the metric duplicated `volatility_252d` while
+# its anchors stayed calibrated for the semideviation, and no S&P 500 member ever
+# reached the `good: 10` bar. Two checks, because either one alone passes for the
+# wrong reason: the alternating series is exactly half losses, so the
+# semideviation must be volatility/sqrt(2), and the loss-subset RMS would equal
+# volatility outright.
+# Within 1%, not exactly: `volatility_pct` is a sample std (ddof=1, so n-1) while
+# a semideviation divides by n, which leaves a sqrt((n-1)/n) residue. 1% is far
+# tighter than the ~41% gap between the two divisor conventions this must detect.
+c.ok("an evenly-split series' semideviation is volatility / sqrt(2)",
+     mixed_dd is not None and abs(mixed_dd / (got / math.sqrt(2)) - 1) < 0.01,
+     f"downside {mixed_dd:.4f} vs vol/sqrt(2) {got / math.sqrt(2):.4f}")
+c.ok("...and is therefore strictly BELOW volatility, not equal to it",
+     mixed_dd is not None and mixed_dd < got * 0.99,
+     "equality here means the loss-count divisor is back")
+
+# Frequency has to count, which is the whole reason to divide by the total. Two
+# series with identical loss *magnitudes* but different loss *rates* must score
+# differently; a loss-subset RMS reports them as identical.
+often = [100.0]
+for i in range(240):
+    often.append(often[-1] * math.exp(-0.02 if i % 2 == 0 else 0.02))
+rarely = [100.0]
+for i in range(240):
+    rarely.append(rarely[-1] * math.exp(-0.02 if i % 6 == 0 else 0.004))
+dd_often = price_risk.downside_deviation_pct(series(often))
+dd_rarely = price_risk.downside_deviation_pct(series(rarely))
+c.ok("falling often is worse than falling rarely at the same loss size",
+     dd_often is not None and dd_rarely is not None and dd_often > dd_rarely,
+     f"every other day {dd_often:.2f} vs one day in six {dd_rarely:.2f}")
+
 # --------------------------------------------------------------------------
 c.section("beta -- alignment is the dangerous part")
 
