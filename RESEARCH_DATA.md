@@ -65,7 +65,7 @@ Sentinel to know about: Refinitiv reports "not reported" as **-99999**. Left
 alone it reads as a real, catastrophically bad number in any score that touches
 it; `_number` drops it.
 
-## Tier B2 — IBKR qualitative graph (interactive MCP only — never in the nightly job)
+## Tier B2 — IBKR qualitative graph (the `enrich` skill only — never in the analyzer)
 
 Resolve conid first via `search_contracts` → exact-symbol + US-primary row
 (`country_code=US`, `STK` section). Resolved cleanly: AAPL 265598, MSFT 272093,
@@ -89,7 +89,7 @@ earnings dates/surprise, or a news feed (→ all Yahoo's job).
 - Price history / 52-week range → **Yahoo** for the screens (nightly); IBKR cross-check only.
 - Statements / estimates / earnings / news → **Yahoo only**.
 - Valuation multiples → **Yahoo** (IBKR's are an independent corroboration, not a replacement).
-- Moat / competitors / products / geography / themes/peers → **IBKR MCP only**, and only in the optional narrative pass.
+- Moat / competitors / products / geography / themes/peers → **IBKR MCP only**, and only from the `enrich` skill in a session.
 - Implied volatility → **IBKR TWS API** (raw); the *percentile* is unavailable from either.
 
 Where a metric exists on both sides, Yahoo stays the source of truth and the

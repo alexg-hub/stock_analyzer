@@ -5,13 +5,16 @@ Two read-only tools over `universe_scan`'s cache plus a job to refill it, and
 everything deterministic about one ticker and hands it back for the calling
 session to reason over.
 
-That shape is deliberate. The repo already carries two `claude -p` invocation
-paths (`run_deepdive.bat`, `run_ondemand.bat`) whose IBKR allow-lists have to
-stay byte-identical, and under `--permission-mode dontAsk` an un-allowed tool is
-refused *silently* -- so a third enumerated list would be a third way to lose a
-report section with no error to explain it. A tool that returns a bundle needs no
-subprocess, no allow-list and no new silent-failure mode: the session asking the
-question already has the tools to answer it.
+That shape is deliberate, and it is now the *only* shape. The repo used to carry
+two headless invocation paths whose tool allow-lists had to stay byte-identical,
+and an un-allowed tool was refused *silently* -- so a missing report section had
+no error to explain it. Both are gone (see AI_ROLE.md); a tool that returns a
+bundle needs no subprocess, no allow-list and no new silent-failure mode,
+because the session asking the question already has the tools to answer it.
+
+The reasoning built on this bundle belongs to the `enrich` skill, which records
+its conclusion through `enrichment_record` -- an attribute tier 4 grades, never
+an adjustment to the score assembled here.
 """
 
 from scanner_common import load_config
@@ -150,8 +153,18 @@ def risk_research_impl(ticker: str, peers: int = 6) -> dict:
             "why.\n"
             "  5. What would have to be true for the deterministic read to be "
             "wrong in either direction.\n"
+            "Where to look, since none of it is reachable from Python: IBKR's "
+            "`get_company_connections` for ranked competitors, revenue mix and "
+            "geography (questions 1 and 5); `get_company_themes` / "
+            "`get_theme_details` for secular exposure (question 3); "
+            "`get_option_data` for the market's implied move around a catalyst. "
+            "Never `get_account_*` or `get_pa_*` -- the real book is out of "
+            "scope. Then the 10-K's Item 1 and Risk Factors, and web search for "
+            "the last 30-60 days.\n"
             "Cite sources for every factual claim. Where you cannot find "
-            "evidence, say so rather than inferring."),
+            "evidence, say so rather than inferring. Record the conclusion with "
+            "`enrichment_record` -- it is graded against forward returns, and it "
+            "cannot and must not change the verdict above."),
         "note": ("No model ran to produce this. The numbers are Python; the "
                  "prompt is for the session that called this tool."),
     }

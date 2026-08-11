@@ -22,6 +22,7 @@ import math
 
 import pandas as pd
 
+import enrichment
 from backtest_universe import forward_trades
 from research_report import load_facts
 from scanner_common import (
@@ -47,6 +48,13 @@ from .ledger import (
 # predicted the return -- see research_report._facts.
 QUANT_PREFIX = "quant_"
 QUANT_METRIC_PREFIX = "qm_"
+
+# The enrichment agent's judgment, flattened the same way and for the same
+# reason. It reaches the ledger as an *attribute* rather than as an adjustment
+# to anything: the agent cannot move a conviction, so the only way to find out
+# whether its stance was worth having is to record it and grade it against the
+# forward return, exactly as `vt_*` does for the veto rules.
+ENRICH_PREFIX = "en_"
 
 
 def _period_for(oldest: pd.Timestamp, horizons: list[int],
@@ -130,6 +138,37 @@ def _tier3_columns(ticker: str, scan_date: str, cfg: dict) -> dict:
                         ("days_to_earnings", "Days To Earnings")):
         if facts.get(key) is not None:
             out[column] = facts[key]
+    return out
+
+
+def _enrichment_columns(ticker: str, scan_date: str, cfg: dict) -> dict:
+    """The agent's recorded judgment for this position, flattened for analysis.
+
+    Same shape and same rules as `_tier3_columns`, one deliberate difference:
+    this is read at every mark rather than frozen, because an enrichment is
+    normally written *after* the position opened -- you research a name in the
+    days following the signal, not before it. That is also why the `en_*`
+    columns must stay out of `ledger.mark_columns()`: `protect=` inherits the
+    recorded value and drops the incoming one, so a protected column could
+    never learn about an enrichment that did not exist at open.
+
+    An absent enrichment returns `{}` and therefore writes **no columns at
+    all**. "Never enriched" is a cohort, not a neutral reading -- the same
+    distinction `quality.has_values` draws and the reason `qr_*` is absent
+    rather than False for a signal the quality layer never graded.
+    """
+    row = enrichment.read_one(ticker, scan_date, cfg)
+    if not row:
+        return {}
+    out = {}
+    for field in ("stance", "moat_view", "social_sentiment"):
+        value = row.get(field)
+        if value is not None and str(value) != "":
+            out[f"{ENRICH_PREFIX}{field}"] = str(value)
+    for field in ("sources_n", "concerns_n"):
+        value = row.get(field)
+        if value is not None and not pd.isna(value):
+            out[f"{ENRICH_PREFIX}{field}"] = float(value)
     return out
 
 
@@ -236,7 +275,9 @@ def mark(cfg: dict) -> pd.DataFrame:
 
             row["status"] = STATUS_CLOSED if complete else STATUS_OPEN
             closed += int(complete)
-            row.update(_tier3_columns(ticker, text_of(positions.at[idx, "scan_date"]), cfg))
+            scan_date = text_of(positions.at[idx, "scan_date"])
+            row.update(_tier3_columns(ticker, scan_date, cfg))
+            row.update(_enrichment_columns(ticker, scan_date, cfg))
             updates[idx] = row
 
         # Widen every touched column to object *before* writing into it. A

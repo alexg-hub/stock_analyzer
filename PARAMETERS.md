@@ -21,26 +21,34 @@ thresholds, the tier-3 score, the tier-3 tier, and every sentence in the tier-4
 findings report. Nothing a model writes can move a gate, a veto, an axis
 coordinate or a recorded return.
 
-The model contributes exactly four fields, once per ticker, in the *optional*
-narrative pass (`.claude/skills/deep-dive/SKILL.md`, invoked by
-`run_deepdive.bat`, which is why it is `claude -p` and not a function call):
+Since 2026-08-11 the model contributes **nothing to the analyzer at all** — no
+code path in it can start one, and `tests/test_no_model.py` fails if that
+changes. It used to contribute four fields in an optional narrative pass, of
+which one (`narrative_adj`, bounded at ±15) was numeric; over its whole life
+that number moved nine convictions by at most 5 points and changed no tier, so
+it was removed rather than kept as a clamped exception (`AI_ROLE.md`).
+
+What a model contributes now is a **separate, graded record**. The `enrich`
+skill (`.claude/skills/enrich/SKILL.md`, session-only) writes:
 
 | Field | Kind | Bound |
 |---|---|---|
-| `narrative_adj` | numeric | ±`research.synthesis.narrative_adj_max` (**15**), re-clamped in `research_report.clamp_narrative_adj` |
-| `conviction` | numeric | recomputed in Python from the recorded `quant_score`, not from the model's arithmetic |
-| `tier` | label | re-forced by `record_verdict` when a veto applies; drift otherwise only warned about |
-| `thesis` | prose | narrative only |
+| `stance` | categorical | `bull` / `neutral` / `bear` — rejected if anything else |
+| `moat_view` | categorical | `widening` / `stable` / `eroding` / `unclear` |
+| `social_sentiment` | categorical | `positive` / `mixed` / `negative` / `thin` |
+| `concerns`, `catalysts`, `rule_disputes`, `sources` | lists | free text, JSON-encoded |
+| *(no numeric field)* | — | `enrichment.validate` rejects `conviction`, `tier`, `score` and `narrative_adj` **by name** |
 
 Everything numeric on the Discord card is read back from
-`<TICKER>_<date>_facts.json`, which Python wrote. The batch thesis is
+`<TICKER>_<date>_facts.json`, which Python wrote. The thesis is
 `research_report.deterministic_thesis` — a rendering of the group breakdown, not
-a generated sentence. The model may argue a rule is wrong *in the report*, where
-a human reads it; it cannot relabel the row.
+a generated sentence. The agent may argue a rule is miscalibrated *in its
+report*, where a human reads it and can retune the threshold, and
+`rule_disputes` makes that argument countable across a sector; it cannot
+relabel the row.
 
 `research_report.deterministic_verdict` runs **inside the nightly scan**, so the
-verdict exists before anything is posted and is recorded whether or not the
-narrative pass ever runs.
+verdict exists before anything is posted.
 
 ---
 
@@ -51,7 +59,7 @@ narrative pass ever runs.
 | Tier 1 — screens | `run_scanners.py` → `SCANNERS` registry | 40 screen thresholds | one bulk `yf.download` |
 | Tier 2 — `fast` | `quality.annotate` in `run_scanners.main()` | **43** fast, over tier-1 hits | `info` + statements + cached closes |
 | Tier 3 — all stages | `research_report.deterministic_verdict` (`stage=None`) | **77** — fast *and* deep | + `collect_yahoo`, EDGAR |
-| Tier 3 — narrative | `deep-dive` skill via `run_deepdive.bat` | none — 4 prose/adj fields | web, IBKR MCP |
+| Enrichment | `enrich` skill, in a session | none — a graded categorical record | web, IBKR MCP |
 | The plane | `universe_scan.py` | **43** fast, over all 503 | ~13 min, 4 calls/ticker |
 | Tier 4 — ledger | `portfolio_sim/` | grades recorded attributes | held tickers + SPY |
 
@@ -364,15 +372,12 @@ live, and this file is committed.
 | `research.auto.gate` | `"all"` | research_report.py, sec.py | **loose gate** — `all` means every tier-1 hit is a tier-3 candidate, not just ⭐ passes |
 | `research.auto.max_reports` | `15` | research_report.py, sec.py |  |
 | `research.auto.discord_send` | `true` | research_report.py, sec.py | not writable via MCP config tools, by design |
-| `research.narrative.enabled` | `true` | research_report.py, sec.py |  |
-| `research.narrative.model` | `"opus"` | research_report.py, sec.py |  |
 | `research.history.enabled` | `true` | research_report.py, sec.py |  |
 | `research.history.dir` | `"history"` | research_report.py, sec.py |  |
 | `research.history.csv` | `"signals.csv"` | research_report.py, sec.py |  |
 | `research.history.on_demand_csv` | `"on_demand_scans_results.csv"` | research_report.py, sec.py |  |
 | `research.logging.enabled` | `true` | research_report.py, sec.py |  |
 | `research.logging.dir` | `"logs"` | research_report.py, sec.py |  |
-| `research.logging.manifest` | `"deepdive_runs.csv"` | research_report.py, sec.py |  |
 | `research.logging.keep_runs` | `200` | research_report.py, sec.py |  |
 | `research.financials.years` | `4` | research_report.py, sec.py |  |
 | `research.financials.quarters` | `4` | research_report.py, sec.py |  |
@@ -381,7 +386,6 @@ live, and this file is committed.
 | `research.sec.forms` | `["10-Q", "10-K"]` | research_report.py, sec.py |  |
 | `research.sec.max_section_chars` | `24000` | research_report.py, sec.py |  |
 | `research.sec.xbrl_concepts` | `["RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues"…` | research_report.py, sec.py |  |
-| `research.synthesis.narrative_adj_max` | `15` | research_report.py, sec.py | **the only bound on model influence**; re-clamped in `research_report.clamp_narrative_adj` |
 | `research.synthesis.tiers` | `[{"label": "STRONG", "min": 80, "color": "2E9C6B"}, {"label": "WAT…` | research_report.py, sec.py |  |
 | `research.synthesis.dimensions.valuation.weight` | `0.18` | research_report.py, sec.py |  |
 | `research.synthesis.dimensions.valuation.metrics.pe_percentile_2y.good` | `10` | research_report.py, sec.py |  |
@@ -430,6 +434,9 @@ live, and this file is committed.
 | `portfolio.analysis.bootstrap_iters` | `2000` | portfolio_sim/ |  |
 | `portfolio.analysis.fdr` | `true` | portfolio_sim/ | Benjamini–Hochberg across the whole findings file |
 | `portfolio.analysis.keep_dated_findings` | `true` | portfolio_sim/ |  |
+| `enrichment.enabled` | `true` | enrichment.py | `false` makes `record` a no-op; the agent's judgment is then simply not on the record |
+| `enrichment.dir` | `"enrichment"` | enrichment.py | resolved inside `output/` |
+| `enrichment.csv` | `"enrichment.csv"` | enrichment.py | one row per `(scan_date, ticker)`, rewritten not appended |
 | `ibkr.enabled` | `false` | ibkr.py | **false** — with `reports: []` the 3 `ibkr.*` parameters would resolve to `{}` even if switched on |
 | `ibkr.host` | `"127.0.0.1"` | ibkr.py |  |
 | `ibkr.port` | `4001` | ibkr.py |  |
@@ -616,8 +623,8 @@ of `risk`, where `negative_equity` (1.00), `accruals_ratio` (0.91),
   `migrate_config.py` and one test — and its `quality.rules.debtToEquity` gate
   is **71** against the live registry's **85**. A divergent duplicate of a live
   threshold is the kind of thing that gets read by mistake.
-- **`research.synthesis.dimensions` is dead**; only `narrative_adj_max` and
-  `tiers` are still read from that section.
+- **`research.synthesis.dimensions` is dead**; only `tiers` is still read from
+  that section.
 - **`pullback_strategy.require_reversal_candle` is `false`**, while CLAUDE.md
   describes the default as true. Worth confirming this is the intended live
   value — it is a strict filter, so the screen is currently looser than the docs

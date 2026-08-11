@@ -235,9 +235,8 @@ c.ok("the verdict is written onto the signal row",
 c.ok("...with a conviction beside it",
      graded[scanner_common.CONVICTION_COL].notna().all())
 
-# `research.auto.discord_send` is the switch that used to gate
-# `post-verdicts --send`. It must still withhold the cards -- and must not
-# withhold the *record*, because the record is the point.
+# `research.auto.discord_send` withholds the cards -- and must not withhold the
+# *record*, because the record is the point.
 quiet_cfg = json.loads(json.dumps(base_cfg))
 quiet_cfg["research"]["auto"]["discord_send"] = False
 quiet_cfg["research"]["history"]["dir"] = str(sandbox / "history_quiet")
@@ -256,8 +255,8 @@ c.ok("...and still records the verdict",
 # must exist before the message is built), but the verdict is written after --
 # so without the re-sync in `carry_verdicts_to_ledger` the tier and conviction
 # would only reach the position on tomorrow's run. The verdict is exactly the
-# attribute tier 4 exists to grade, and the trailing `mark` in run_deepdive.bat
-# that used to carry it across is optional now.
+# attribute tier 4 exists to grade, and the trailing `mark` in the old narrative
+# .bat that used to carry it across no longer exists.
 from portfolio_sim import ledger as ledger_mod                 # noqa: E402
 
 book = ledger_mod.load_positions(base_cfg)

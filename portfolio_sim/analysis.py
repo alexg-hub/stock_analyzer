@@ -63,7 +63,7 @@ FINDINGS_COLUMNS = [
 # Tier 3's own scores. Graded as `dimension_impact` (correlation plus a
 # tercile split) rather than lumped in with the recorded fundamentals, because
 # "which deep-dive check was worth anything" is a question in its own right.
-DIMENSION_COLS = {"quant_score", "Conviction", "Narrative Adj"}
+DIMENSION_COLS = {"quant_score", "Conviction"}
 
 NOT_PREDICTORS = {"Close", "SMA", "Range High", "Price", "last_close",
                   "entry_price", "generated_at", "run_at", "opened_at",
@@ -309,12 +309,37 @@ def _roadmap_rows(positions: pd.DataFrame, by_ticker: pd.DataFrame,
     deepest = max(horizons)
     rows = []
 
-    def question(label: str, frame: pd.DataFrame, column: str) -> None:
+    def nothing_yet(label: str, note: str) -> None:
+        """A question with no data at all, still named.
+
+        The early return below is right for an attribute that simply is not on
+        this ledger, but wrong for one nothing has *started* recording: the
+        reader would see no row and could not tell the question from one that
+        was never asked. Callers that know the column is new pass `always=True`.
+        """
+        row = _blank()
+        row.update({
+            "analysis": "roadmap", "dimension": label, "cohort": "none yet",
+            "horizon_days": deepest, "n": 0, "sufficient_n": False,
+            "significant": False,
+            "conclusion": f"{label}: {note}",
+        })
+        rows.append(row)
+
+    def question(label: str, frame: pd.DataFrame, column: str,
+                 always: bool = False) -> None:
         if column not in frame.columns:
+            if always:
+                nothing_yet(label, "nothing recorded yet -- no position "
+                                   "carries this attribute.")
             return
         groups = frame[column].map(text_of)
         recorded = {k: int(v) for k, v in groups.value_counts().items() if k}
         if len(recorded) < 2:
+            if always:
+                nothing_yet(label, "recorded on "
+                                   f"{sum(recorded.values())} position(s) but "
+                                   "only one group so far -- a split needs two.")
             return
         settled = closed(frame, deepest)
         have = ({k: int(v) for k, v in groups.loc[settled.index].value_counts().items() if k}
@@ -352,6 +377,17 @@ def _roadmap_rows(positions: pd.DataFrame, by_ticker: pd.DataFrame,
         question(f"quality rule {column[len(QR_PREFIX):]}", by_ticker, column)
     for column in sorted(c for c in by_ticker.columns if c.startswith(VT_PREFIX)):
         question(f"veto rule {column[len(VT_PREFIX):]}", by_ticker, column)
+
+    # The enrichment agent. Listed even before a single position carries one,
+    # because that is what this section is for: without it "did the agent's
+    # stance predict anything" would simply be *missing* from the report, and
+    # a reader could not tell that from asked-and-came-back-empty.
+    question("did the agent's stance predict returns", by_ticker, "en_stance",
+             always=True)
+    question("did the agent's moat view predict returns", by_ticker,
+             "en_moat_view", always=True)
+    question("did the agent's social read predict returns", by_ticker,
+             "en_social_sentiment", always=True)
 
     # The tier-3 dimensions are continuous, so the bar is "how many positions
     # carry a score", not a group split.
@@ -734,6 +770,21 @@ def analyze(cfg: dict, baseline: bool = True) -> pd.DataFrame:
         rows += _rule_rows(by_ticker, horizons, cfg_an, prefix=VT_PREFIX,
                            a_label="tripped", b_label="clean",
                            phrase="tripping the {rule} veto was worth")
+
+        # -- the enrichment agent: was its judgment worth anything? --
+        # The agent cannot move a score -- there is no adjustment field -- so
+        # recording its stance and grading it here is the only way to find out
+        # whether qualitative research adds anything to the quant read. Same
+        # treatment the tier-3 verdict gets, for the same reason: a categorical
+        # judgment is graded by splitting on it, never by correlating it.
+        # `en_sources_n` / `en_concerns_n` need no wiring -- they are ordinary
+        # numeric attributes and `_predictor_columns` picks them up.
+        for column, label in (("en_stance", "agent stance"),
+                              ("en_moat_view", "agent moat view"),
+                              ("en_social_sentiment", "agent social read")):
+            rows += _cohort_rows(by_ticker, column, horizons, label)
+            rows += _category_split_rows(by_ticker, column, horizons, cfg_an,
+                                         label)
 
         quant_cols = [c for c in by_ticker.columns
                       if c.startswith(QUANT_PREFIX) or c in DIMENSION_COLS]

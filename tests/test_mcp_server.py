@@ -99,7 +99,7 @@ c.section("dry-run defaults")
 # during a test run. The allow-list in .claude/settings.json omits them so they
 # always prompt, but an allow-list that fails to match fails *silently* -- the
 # default value is the guard that does not depend on matching.
-SEND_TOOLS = ["run_nightly_scan", "portfolio_exit_scan", "deepdive_post_verdicts"]
+SEND_TOOLS = ["run_nightly_scan", "portfolio_exit_scan"]
 CONFIRM_TOOLS = ["config_set"]
 
 
@@ -337,8 +337,8 @@ jobs.submit(_stalled_job["job_id"], backtests.run_script,
 c.ok("a stalled job reports 'error', not 'done'",
      _wait(_stalled_job["job_id"], timeout=30) == jobs.ERROR)
 
-# ...but a plain non-zero exit still means the run happened. `auto-prompt`
-# exits 1 to say "nothing to do tonight", and that is not a job failure.
+# ...but a plain non-zero exit still means the run happened. Several scripts
+# here use exit 1 to mean something specific, and that is not a job failure.
 _rc1 = jobs.reserve("test")
 jobs.submit(_rc1["job_id"], backtests.run_script,
             ["-c", "print('bye'); raise SystemExit(1)"],

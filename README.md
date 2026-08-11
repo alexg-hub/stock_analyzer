@@ -22,7 +22,7 @@ the market actually did:
 |---|---|---|---|
 | **1 — technical** | Is the chart set up? | `breakout_scanner` / `sma_pullback` / `sma_reclaim`, nightly over all 503 names | `Setup` (`full`/`partial`) + `Missing` |
 | **2 — quality** | Are the fundamentals sound? | the `fast` half of the `quality` registry over the tier-1 hits only, one Yahoo pass | `Quality` (the ⭐ badge) + `Quality Missing` |
-| **3 — verdict** | How does the *business* grade out? | the `deep` half of the same registry, weighted to 0-100 → a tier and a conviction. Deterministic, inside the nightly scan. An **optional** narrative pass (the `deep-dive` skill over IBKR + SEC + live web) writes the report and may revise the conviction | a tier/conviction verdict + `_facts.json` + the financials chart |
+| **3 — verdict** | How does the *business* grade out? | the `deep` half of the same registry, weighted to 0-100 → a tier and a conviction. Deterministic, inside the nightly scan, and nothing revises it | a tier/conviction verdict + `_facts.json` + the financials chart |
 | **4 — portfolio** | Was any of it *right*? | `portfolio_sim`: buy every recorded signal at the next open, grade every recorded attribute against the realized return, and watch the book for a double-top exit | `output/portfolio/positions.csv` + `findings.csv` + `exits.csv` |
 
 **All four tiers run in `run_scanners.py`, in one process, and produce ONE
@@ -34,8 +34,13 @@ its own section of the message and nothing else.
 
 Tier 3 is still the only tier that costs real time per name, which is why the
 first two exist — the gate (`research.auto.gate` / `max_reports`) caps how many
-names reach it. The optional narrative pass runs afterwards from
-`run_deepdive.bat`.
+names reach it. Nothing is chained after it, and no code path in the analyzer
+can invoke a model — `tests/test_no_model.py` is the guard.
+
+Qualitative research is the **`enrich` skill**, run from a Claude Code session
+over the MCP tools, IBKR's connection graph and web search. It records to
+`output/enrichment/`, where tier 4 grades it like any other recorded attribute,
+and it cannot change a verdict. See `AI_ROLE.md`.
 
 One honest caveat: Discord caps a message at 10 embeds / 10 attachments /
 ~6000 embed chars, and `send_discord_alert` batches on exactly that. This is one
@@ -73,15 +78,25 @@ Current screens:
 | `research_report.py` | Tier 3: the candidate gate, the deterministic verdict, report archive, Discord verdict cards |
 | `research_collect.py` | Tier 3 data collection: everything Yahoo has on one ticker (valuation, estimates, analyst, earnings, ownership, news) |
 | `sec.py` | Tier 3 filings: EDGAR 10-Q/10-K MD&A / Risk Factors / Business sections + curated XBRL |
-| `.claude/skills/deep-dive/` | The tier-3 procedure itself — synthesis is Claude's reasoning, not a function |
+| `.claude/skills/enrich/` | Qualitative research over the analyzer's output — Claude's reasoning, in a session, recorded as a graded attribute |
 | `portfolio_sim/` | Tier 4: the virtual portfolio (`ledger` → `marking` → `analysis`, on `stats`) |
 | `portfolio_sim/exits.py` | Tier 4's exit side: the double-top detector, the sell record, the Discord warning |
-| `run_scanner.bat` / `run_deepdive.bat` | Task Scheduler entry point (all four tiers, one message), and the optional narrative pass it chains to |
+| `run_scanner.bat` | Task Scheduler entry point — one command, all four tiers, one message |
+| `enrichment.py` | The agent's record: what the `enrich` skill concluded, keyed (scan_date, ticker), graded by tier 4 and unable to touch a score |
 | `tests/` | Invariant test suite + `run_all.py` runner (no test dependency; plain scripts) |
 
 Adding a new scanner = new module exposing `CONFIG_KEY`, `scan()`,
 `EMBED_COLOR` + `describe_hit()`, `plot_hit()` + one entry in
 `run_scanners.SCANNERS` + a config section with an `enabled` flag.
+
+Four companion documents cover what this README does not:
+
+| Document | Answers |
+|---|---|
+| `PARAMETERS.md` | Every tunable value, with a measured status per parameter |
+| `RESEARCH_DATA.md` | What each **source** can and cannot supply (Yahoo, IBKR, SEC) |
+| `DETERMINISTIC_GAPS.md` | What the registry is **not yet computing**, ordered by what it costs to get |
+| `AI_ROLE.md` | **Who computes what** — where a model runs, what it may author, and what it has measurably contributed |
 
 ## Screen 1: breakout from consolidation
 
@@ -201,7 +216,7 @@ There is one signal list per screen. `Setup` grades it:
 | `partial` | exactly 3 of 4 (+ proximity guard when the breakout leg failed) | — never; this screen stays strict | fresh cross out of a downtrend, 1–2 confirmations failing |
 
 Both tiers are alerted together, sorted full-first, and both are carried into
-`output/latest_hits.json` for the deep-dive. A partial card uses the grey side bar and
+`output/latest_hits.json` for tier 3. A partial card uses the grey side bar and
 appends a **Missing:** line naming what failed.
 
 Why: the universe backtest measured the tiers separately and the *partial*
@@ -375,9 +390,10 @@ already fetches, so they cost no extra network round trip and grade **every**
 tier-1 hit.
 
 The qualitative side — switching costs, network effects, brand, regulatory
-licence — stays in the deep-dive report's prose and moves only the bounded
-narrative adjustment. Same rule as everywhere else here: a sentence a model
-wrote is a sentence you cannot check.
+licence — stays prose, in the `enrich` skill's report, and reaches the record
+only as the categorical `moat_view`. Same rule as everywhere else here: a
+sentence a model wrote is a sentence you cannot check, so what gets recorded is
+a judgment tier 4 can grade rather than a number it has to trust.
 
 ### The score (the anchor half)
 
@@ -409,11 +425,12 @@ python run_scanners.py            # tiers 1+2: full S&P 500 scan + Discord alert
 python run_scanners.py --no-send  # the same scan, cards printed instead of posted
 python universe_scan.py           # the whole index on the risk/reward plane (~13 min)
 python universe_scan.py --no-fetch                   # re-render from cache, no network
-python research_report.py candidates                 # tier 3: who to deep-dive
+python research_report.py candidates                 # tier 3: who is worth researching
 python research_report.py risk INTC MSFT             # every risk rule beside its threshold
 python research_report.py scan PGR                   # on-demand: tiers 1+2 for one ticker
-run_ondemand.bat PGR                                 # on-demand: all three tiers
-type output\logs\<run_id>.log                        # what that deep-dive actually did
+python research_report.py verdicts PGR               # ...and the graded verdict
+python enrichment.py show PGR                        # what the enrich skill concluded
+type output\logs\<run_id>.log                        # what that run actually did
 python backtest_breakout.py       # historical validation, breakout screen
 python backtest_pullback.py       # historical validation, pullback screen
 python backtest_reclaim.py        # historical validation, reclaim screen
@@ -459,7 +476,7 @@ do: run something, run it safely, or run it without blocking.
 | `job_status` / `job_result` / `list_jobs` | poll the long runs |
 
 Anything that takes minutes — the nightly scan, the universe backtest, tuning,
-marking, deep-dive context — returns a **`job_id`** immediately rather than
+marking, the tier-3 context bundle — returns a **`job_id`** immediately rather than
 blocking the session. Poll `job_status(job_id)`; it returns the tail of that
 run's step log, which is the only progress these runs emit.
 
@@ -510,11 +527,11 @@ enabled screen whose lookback no longer fits inside `data.download_period`.
 Writes are surgical text edits — only the bytes that must change do, so
 `git diff` shows your change and not a reformatted file.
 
-The three skills (`deep-dive`, `tune-thresholds`, `universe-backtest`) still
-drive the CLI rather than these tools. That is intentional: the unattended
-nightly run executes those same skill bodies through `claude -p` behind a
-`Bash(python research_report.py *)` allow-list, and a mis-specified allow-list
-there fails silently. Interactively you can use either.
+`tune-thresholds` and `universe-backtest` drive the CLI rather than these
+tools; interactively you can use either. `enrich` is the exception — it is
+session-only by design and uses the MCP tools throughout, including
+`enrichment_record`, which is the one tool here that records a judgment rather
+than a measurement.
 
 ### Backtests
 
@@ -542,8 +559,9 @@ price panel, and every backtest table and chart. The project root holds only
 inputs — code, `config.json`, docs. `config.json` keeps storing bare filenames
 (`backtest_universe_cache.pkl`, …) and `scanner_common.output_dir()` resolves
 them; an absolute path in config still overrides. There are **no exceptions** —
-the tier-3 reports (`output/reports/`), the signal history (`output/history/`)
-and the deep-dive step logs (`output/logs/`) live there too.
+the tier-3 chart and facts (`output/reports/`), the signal history
+(`output/history/`), the agent's record (`output/enrichment/`) and the step logs
+(`output/logs/`) live there too.
 
 ### Universe backtest — did the screens make money?
 
@@ -649,6 +667,8 @@ Plain scripts, no test dependency — each prints `OK`/`FAIL` per check and exit
 | `test_signal_contract.py` | cached panel | `fires_mask` is `signal` or exactly `signal \| partial`; tiers disjoint; `Setup`/`Missing` agree; one card per signal with the grey bar + **Missing** line on partials; hand-off is a single list; `find_ticker` resolves either tier; an empty day doesn't crash. Then with stubbed fundamentals: the tier-2 verdict survives the JSON round trip, the ⭐ badge is exactly that verdict, the archive accumulates without duplicating a re-run, and the gate ranks/filters candidates |
 | `test_research_output.py` | nothing | Tier-3 output: the margin falls back to pretax exactly when Operating Income is absent and names its basis; an empty trailing period doesn't consume a slot; the chart renders for complete/bank/single-period/all-missing/no-data input without raising; `quality._statement_metrics` stays untouched by the fallback; verdict cards bind their chart, read figures from the facts file, and fit the embed budget |
 | `test_portfolio_sim.py` | nothing | Tier 4 on a synthetic panel and synthetic history: the entry price is `Open[t+1]` and agrees with `forward_trades` cell for cell; a re-`open` refreshes attributes but never erases a mark or re-freezes the recorded quality rule set; a signal whose entry bar has not traded stays `pending` and is in no statistic; `qr_*` distinguishes failed from not-evaluated; Mann-Whitney/Spearman/BH match hand-computed values; nothing under `min_n` is ever called significant, and every section (including `roadmap`) is present |
+| `test_enrichment.py` | nothing | The agent's record: no field can move a score (`conviction`/`tier`/`score`/`narrative_adj` rejected by name); an invalid row raises instead of recording; the table de-duplicates on `(scan_date, ticker)`; lists survive the CSV round trip; **absent enrichment yields no `en_*` columns at all**, and `en_*` is never protected by `mark_columns()` |
+| `test_no_model.py` | nothing | The analyzer cannot invoke a model: no production `.py` or `.bat` runs `claude -p`, names it as a command, or passes `--allowedTools`/`--permission-mode`/`--session-id`; no config key selects a model; no model-authored number reaches a scored column |
 | `test_backtest_stats.py` | cached panel | `cohort_values` == the `collect_trades` path at several (wait, hold) cells; real rows re-derive from the panel at a nonzero delay; the trades CSV reconciles with the summary grid |
 | `test_path_equivalence.py` | **network** | Screening out of the bulk panel gives the same dates as the single-ticker download, plus the documented JNJ/MSFT/META cases |
 
@@ -684,17 +704,16 @@ in Python (`deterministic_thesis`, a rendering of the group breakdown) — same
 rule as tier 4's conclusions: a sentence a model wrote is a sentence you cannot
 check.
 
-**The narrative pass is optional and revises rather than originates.**
-`run_deepdive.bat` runs the `deep-dive` skill afterwards over SEC filings,
-IBKR's competitive graph and live web research; it writes the full report and
-may move the conviction by a bounded `narrative_adj` (±`research.synthesis.
-narrative_adj_max`). Switch it off with `research.narrative.enabled` and nothing
-downstream is missing — the verdict already exists, was already recorded and
-already went out.
+**Nothing revises it.** A narrative pass used to run afterwards and move the
+conviction by a bounded `narrative_adj`. Measured over its whole life it changed
+nine convictions by at most 5 points against a ±15 bound and **no** tier at all,
+while costing ~$6 a night and making the one score in the system unverifiable;
+it was removed on 2026-08-11 (`AI_ROLE.md` has the measurement).
 
-Why it was split: the verdict used to arrive hours after the signal, from an
-LLM, and only if that LLM ran to completion. A run killed mid-flight (result
-`3221225786`, usually a PC shutdown) left the night with no verdict at all.
+Why the verdict was made deterministic in the first place: it used to arrive
+hours after the signal, from an LLM, and only if that LLM ran to completion. A
+run killed mid-flight (result `3221225786`, usually a PC shutdown) left the
+night with no verdict at all.
 
 ### The hand-off
 
@@ -742,7 +761,7 @@ python research_report.py verdicts MSFT JNJ   # ...or these names
 `verdicts` is the same call the nightly scan makes: it records tier and
 conviction to `output/history/` and prints them. Posting is the scan's job.
 
-A ticker you name explicitly needs none of this — `scan` and `/deep-dive` run
+A ticker you name explicitly needs none of this — `scan` and `/enrich` run
 tiers 1 and 2 for it on the spot (see *On-demand* below), so the candidate list
 is only about who the *nightly* run should pick.
 
@@ -762,35 +781,53 @@ evaluated" rather than failing every rule.
 
 ### Running it
 
-The deterministic verdict needs no invocation — it happens inside the nightly
-scan. What follows is the **optional narrative pass**.
+The verdict needs no invocation — it happens inside the nightly scan, and there
+is nothing else to run. On demand:
 
-On demand, ask for a deep-dive and the `deep-dive` skill takes over. Nightly it
-is automatic: `run_scanner.bat` chains to `run_deepdive.bat`, which asks
-`research_report.py auto-prompt` what to do (exiting quietly if the gate is
-empty or `research.narrative.enabled` is false) and then runs the skill through
-headless Claude Code:
-
-```
-claude -p --model <research.narrative.model> --permission-mode dontAsk
-        --allowedTools "... mcp__claude_ai_Interactive_Brokers_IBKR__*"
+```powershell
+python research_report.py verdicts MSFT JNJ   # grade named tickers, recorded now
+python research_report.py candidates          # who the tier-2 gate surfaced
+python research_report.py risk INTC           # every rule beside its threshold
 ```
 
-The IBKR MCP tools **must** be in the allow-list: under `dontAsk` an un-allowed
-tool is refused silently, which would drop the moat/competitor section with no
-error to explain it. Don't add `--bare` (forces an API key, dropping the OAuth
-credential the IBKR server is bound to) or `--strict-mcp-config` (ignores
-registered servers).
+`research.auto.{enabled, gate, max_reports, discord_send}` governs the verdict
+run inside the scan — despite the name, it has nothing to do with a model.
 
-Each report is written to `output/reports/<TICKER>_<scan_date>.md`. If the pass
-revises a conviction, that revision is recorded through the same
-`post-verdicts` path the scan used, and `run_deepdive.bat`'s trailing
-`portfolio_sim mark` carries it onto the position.
+### Enriching a verdict
 
-Two independent switches: `research.auto.{enabled, gate, max_reports,
-discord_send}` governs the **deterministic** verdict inside the scan;
-`research.narrative.{enabled, model}` governs this pass. The common case is
-wanting a graded verdict every night and a written report only sometimes.
+The qualitative half is the **`enrich` skill**, invoked from a Claude Code
+session: `/enrich TJX`. It reads the deterministic bundle through the
+`risk_research` and `deepdive_context` MCP tools, adds IBKR's connection graph,
+the filings and live web/social search, writes a report to
+`output/enrichment/<TICKER>_<scan_date>.md`, and records a categorical judgment:
+
+| Field | Values |
+|---|---|
+| `stance` | `bull` · `neutral` · `bear` |
+| `moat_view` | `widening` · `stable` · `eroding` · `unclear` |
+| `social_sentiment` | `positive` · `mixed` · `negative` · `thin` |
+
+plus `concerns`, `catalysts`, `sources` and `rule_disputes` (the veto keys it
+judges to be sector artifacts). Tier 4 then grades every one of them against
+forward returns, exactly as it grades `qr_*` and `vt_*`.
+
+**It cannot change a verdict.** There is no numeric field to change one with,
+and `enrichment.validate` rejects `conviction`, `tier`, `score` and
+`narrative_adj` by name — an invalid row raises instead of being recorded, which
+inverts this project's usual fail-open rule on purpose: a missing measurement is
+honest, a wrong categorical value is a cohort of one that `analyze` will
+faithfully report on.
+
+There is deliberately **no headless mode**. Two `claude -p` paths used to exist,
+each carrying an enumerated IBKR allow-list that had to stay byte-identical with
+the other; under `--permission-mode dontAsk` an un-allowed tool is refused
+*silently*, so a drift between them cost a whole report section with no error to
+explain it. A session governs its own tools, and that failure mode is gone.
+
+```powershell
+python enrichment.py show TJX          # what was recorded
+python enrichment.py record row.json   # the CLI equivalent of the MCP tool
+```
 
 ### The financial trend chart
 
@@ -819,7 +856,7 @@ The model supplies only the tier, conviction, adjustment and thesis. Sizing:
 
 One card per ticker rather than one line for all of them: a tier-coloured side
 bar (colours from `research.synthesis.tiers`), the thesis, the financials chart,
-and six decision fields — quant score with the narrative adjustment, the trigger
+and six decision fields — the quant score, the trigger
 (screen + full/partial), the tier-2 quality result with the failing rules named,
 price vs analyst target, P/E with its 2-year percentile, and next earnings.
 `send_discord_alert` batches them under Discord's caps, so a five-report night
@@ -873,65 +910,44 @@ leaves everything up to that point:
 | 3 | `CONTEXT`, `HANDOFF`, `SCAN`, `YAHOO`, `QUANT`, `CHART`, `FACTS`, `SEC`, `RECORD`, `REPORT`, `VERDICT`, `DISCORD` |
 | 4 | `LEDGER`, `MARK`, `EXIT` (the double-top scan, plus its `DISCORD`), `ANALYZE` |
 
-The **model half** (`BASH`, `READ`, `WRITE`, `GREP`, `SEARCH`, `FETCH`, `MCP`,
-and anything `DENIED`) is not collected at runtime — Claude Code already records
-it in the session transcript, and `log-session` renders one short line per tool
-call and merges the two halves by timestamp when the run ends. Nothing else from
-the transcript is kept; the point is which steps ran, when, and whether they
-worked.
+Two things this surfaces that were previously silent: an **SEC section that came
+back `n-a`**, which is what makes a verdict thinner without saying so; and the
+**unsettled-bar drop**, which is the first thing to check when a night reports a
+confident zero. The enrichment record adds `ENRICH`.
 
-Three things this surfaces that were previously silent: a **refused tool** (the
-run still exits 0 — CLAUDE.md used to tell you to grep the JSON for
-`permission_denials`); an **SEC section that came back `n-a`**, which is what
-makes a report thinner without saying so; and the **unsettled-bar drop**, which
-is the first thing to check when a night reports a confident zero.
-
-`output/scanner_log.txt` is unchanged as tiers 1+2's transcript — the step log
+`output/scanner_log.txt` is the same transcript from the outside — the step log
 writes to **stderr** and `run_scanner.bat` already redirects `2>&1`, so it
 captures every step alongside the hits tables. Keep that `2>&1`.
 
-**`output/logs/deepdive_runs.csv`** is one row per run — `run_id`, `started`,
-`finished`, `mode`, `tickers`, `model`, `session_id`, `exit_code`, `turns`,
-`duration_s`, `cost_usd`, `web_searches`, `web_fetches`, `denials`, `errors`,
-`reports`, `verdicts`:
+`research.logging`: `enabled`, `dir`, `keep_runs` (oldest run logs pruned beyond
+that count, by `run_scanners.main()` at the *start* of a run — the scan has
+several exit paths and an exception has one more, so pruning first is the only
+placement that runs unconditionally).
 
-```python
-runs = pd.read_csv("output/logs/deepdive_runs.csv")
-runs.groupby("mode")[["cost_usd", "duration_s"]].sum()   # what tier 3 costs
-runs[runs.denials > 0]                                   # runs that were refused something
-```
+`STOCK_ANALYZER_RUN_ID` is minted in `run_scanner.bat` and exported, so anything
+the scan starts writes to the same file. Unset — a `context`/`scan`/`enrichment`
+call you run yourself — simply mints its own.
 
-`output/deepdive_log.txt` keeps only the start/finish banners; the raw
-`--output-format json` blob now goes to `output/logs/<run_id>_result.json` so
-what you read stays readable. `research.logging`: `enabled`, `dir`, `manifest`,
-`keep_runs` (oldest run logs pruned beyond that count).
-
-Two wiring details worth knowing if you edit the batch files:
-
-- `--session-id` **must stay** on both. It is what makes the transcript findable
-  *before* the run starts, so a run killed mid-flight (result `3221225786`, a PC
-  shutdown) can still have its log completed by hand:
-  `python research_report.py log-session <run_id> <session_id>`. Drop the flag
-  and the model half goes missing with no error.
-- `STOCK_ANALYZER_RUN_ID` is minted in `run_scanner.bat`, exported, and
-  inherited all the way through `claude` into the `context` subprocess — that is
-  how four processes write one log. `run_deepdive.bat`'s `run-id` *inherits* it
-  rather than minting, which is what joins tier 3 to the same night. Unset (a
-  `context`/`scan`/`run_ondemand.bat` you run yourself) simply mints its own.
+There used to be a **model half** to this log (`BASH`, `READ`, `WRITE`, `MCP`,
+and anything `DENIED`), rendered out of Claude Code's session transcript by
+`log-session` and merged in by timestamp, plus a `deepdive_runs.csv` manifest of
+cost and turns per run. Both went with the headless narrative pass on
+2026-08-11. One process now, one log.
 
 
-## On-demand: one ticker, all three tiers
+## On-demand: one ticker, every tier
 
 The nightly run analyses what the screens surface. To ask about a ticker
 yourself — whether or not it signalled — name it:
 
 ```powershell
 python research_report.py scan PGR          # tiers 1 + 2, printed and recorded
-run_ondemand.bat PGR                        # + the tier-3 deep dive and Discord card
+python research_report.py verdicts PGR      # tier 3, recorded
 ```
 
-Interactively, `/deep-dive PGR` does the same thing: `assemble_context` looks
-the ticker up in tonight's hand-off and, finding nothing, runs
+Then `/enrich PGR` in a session if you want the qualitative half. All three read
+the same path: `assemble_context` looks the ticker up in tonight's hand-off and,
+finding nothing, runs
 `run_scanners.scan_ticker` for it — the same registry loop, the same screens,
 the same fundamentals grading, on a one-ticker universe. Two differences from
 the nightly path, both deliberate:
@@ -957,15 +973,21 @@ past (`research.history`):
   **`Verdict` and `Conviction`** once tier 3 has judged that ticker
 - `output/history/on_demand_scans_results.csv` — one row per
   `(scan_date, ticker)` you asked about yourself: the same fundamentals columns,
-  plus the verdict and the figures behind it (`Narrative Adj`, `Quant Score`,
-  `Price`, `Upside %`, `P/E Pctile 2y`, `Report`, `Thesis`)
+  plus the verdict and the figures behind it (`Quant Score`, `Price`,
+  `Upside %`, `P/E Pctile 2y`, `Report`, `Thesis`)
+- `output/enrichment/enrichment.csv` — one row per `(scan_date, ticker)` the
+  `enrich` skill researched: its stance, moat view, social read, concerns,
+  catalysts, disputed rules and sources. Written by nothing else, and joined by
+  tier 4 on the same key
 
 Two tables split by provenance, not by content. An ad-hoc look has no signal row
 to annotate, so folding it into `signals.csv` would silently drop it; a
 `(scan_date, ticker)` is therefore recorded in **exactly one** of them, and
-`post-verdicts` routes on the `source` key `assemble_context` wrote into the
-facts file. Recording happens with or without `--send` — the record is the
-point, the notification is not.
+`record_verdict` routes on the `source` key `assemble_context` wrote into the
+facts file. The enrichment table is a third file on the same key, but it is not
+routed by provenance: it is written by the agent rather than by any scan, so it
+simply names the pair it is about and logs an `ENRICH warn` when no scan row
+matches — a row nothing can join to is an enrichment tier 4 will never grade.
 
 Both CSVs are rewritten rather than appended, because the fundamentals columns
 are *config-driven display labels* — retuning the config changes the schema, and
@@ -1004,8 +1026,8 @@ python -m portfolio_sim analyze    # -> output/portfolio/findings.csv
 python -m portfolio_sim status     # what is on the book, what can be asked yet
 ```
 
-`open`, `mark` and `exit-scan` run in the nightly chain (`run_scanner.bat`, and
-`mark` again at the end of `run_deepdive.bat`). `analyze` is on demand.
+`open`, `mark` and `exit-scan` run inside the nightly scan. `analyze` is on
+demand.
 `exit-scan` is the **only** command here that touches Discord — `open`, `mark`
 and `analyze` never do and must not start.
 
@@ -1044,8 +1066,10 @@ plus:
 | `bench_ret_<h>d_%`, `excess_<h>d_%` | the benchmark over the same bars |
 | `open_ret_%`, `last_close`, `days_held` | the live mark |
 | `qr_<rule>` | per quality rule: `True` = passed that night |
-| `Quality Rules` | the rule set in force when the signal was graded |
+| `vt_<key>` | per veto rule: `True` = **tripped** (the inverse polarity of `qr_`) |
+| `Quality Rules` / `Veto Rules` | the rule sets in force when the signal was graded |
 | `quant_score`, `quant_<dimension>`, `qm_<metric>` | tier 3's breakdown |
+| `en_stance`, `en_moat_view`, `en_social_sentiment`, `en_sources_n`, `en_concerns_n` | what the `enrich` skill concluded, if anything |
 | `dt_*` | the double-top exit's verdict — see below |
 
 `qr_*` is exploded from the recorded `Quality Missing` list against the rule set
@@ -1053,6 +1077,13 @@ plus:
 cannot rewrite past findings, and a rule invented after a signal was recorded
 never reads as "passed" on it. A row the scan never graded gets no `qr_*`
 columns at all — *not evaluated* is not *failed*.
+
+`en_*` follows the same rule and is read fresh on every `mark`, because an
+enrichment is normally written *days after* the position opened — you research a
+name in the days following its signal, not before it. A position nobody
+researched carries no `en_*` columns, which is a cohort rather than a neutral
+reading, and none of them may be protected by `mark_columns()` or they would
+inherit "never enriched" and never learn otherwise.
 
 ### The exit strategy: double top
 
@@ -1143,9 +1174,9 @@ A red Discord card goes out for each newly flagged position, with a chart under
 | `portfolio` | what the whole book returned, per horizon, versus the benchmark |
 | `roadmap` | every question this file will answer, and what each is still short of |
 | `cohort` | grouped stats by screen, setup tier, quality badge, verdict, source |
-| `split` | **which signals were better** — full vs partial, quality pass vs fail, deep-dived vs not, verdict tiers |
+| `split` | **which signals were better** — full vs partial, quality pass vs fail, deep-dived vs not, verdict tiers, and the agent's stance / moat view / social read |
 | `rule_impact` | **which quality rule mattered** — per rule, the tickers that passed it against those that failed |
-| `dimension_impact` | **which deep-dive check was worth anything** — per quant dimension, rank correlation plus a top-vs-bottom-tercile split |
+| `dimension_impact` | **which tier-3 check was worth anything** — per quant dimension, rank correlation plus a top-vs-bottom-tercile split |
 | `metric_corr` | every recorded fundamental and technical against the return |
 | `baseline` | the random-entry bar from `backtest_universe`'s cached panel |
 | `ranking` | the direct answer: everything ranked, most significant first |
@@ -1300,24 +1331,22 @@ small differences as noise.
 | `ibkr.market_data` | `true` | Also request the snapshot ticks (52w range, volatility, average volume) alongside the ratios |
 | `ibkr.reports` | `["ReportSnapshot"]` | Which `reqFundamentalData` reports to pull and flatten |
 | `research.latest_hits_path` | `latest_hits.json` | The tiers 1+2 → tier 3 hand-off, resolved inside `output/` |
-| `research.report_subdir` | `reports` | Where deep-dive reports are written, resolved inside `output/` |
+| `research.report_subdir` | `reports` | Where the tier-3 chart and facts file are written, resolved inside `output/` |
 | `research.auto.enabled` | `true` | Compute the **deterministic** tier-3 verdict inside the nightly scan |
 | `research.auto.gate` | `all` | `quality_pass` (only tier-2 passers) or `all` (every tier-1 hit) |
 | `research.auto.max_reports` | `3` | Cap on how many names tier 3 grades, taken off the top of the ranking |
 | `research.auto.discord_send` | `true` | Include the verdict cards in the alert. **`false` still records them** — the record is the point, the notification is not. Not writable through the MCP tools |
-| `research.narrative.enabled` | `true` | Also run the **optional** LLM pass (`run_deepdive.bat`) for the written report and a bounded conviction revision. Independent of `research.auto.enabled` |
-| `research.narrative.model` | `opus` | Model that headless pass uses |
 | `research.history.enabled` | `true` | Archive every scan under `output/history/` |
 | `research.history.dir` / `.csv` | `history` / `signals.csv` | Archive location and the signal table's name |
 | `research.history.on_demand_csv` | `on_demand_scans_results.csv` | The on-demand scan table, in the same directory |
 | `research.logging.enabled` | `true` | Write the tier-3 step log; `false` makes every log call a no-op |
 | `research.logging.dir` | `logs` | Where run logs live, resolved inside `output/` |
-| `research.logging.manifest` | `deepdive_runs.csv` | One row per deep-dive run, in the same directory |
-| `research.logging.keep_runs` | `200` | Oldest run logs (and their result JSON) pruned beyond this count |
+| `research.logging.keep_runs` | `200` | Oldest run logs pruned beyond this count, at the start of each scan |
 | `research.financials.years` / `.quarters` | `4` / `4` | Periods on the financial-trend chart and table |
 | `research.financials.chart_dpi` | `120` | Resolution of that chart |
 | `research.sec.*` | — | EDGAR user agent (must carry an email), forms, section size cap, XBRL concepts |
-| `research.synthesis.narrative_adj_max` | `15` | How far the optional narrative pass may move the conviction, either way |
+| `enrichment.enabled` | `true` | Record what the `enrich` skill concludes; `false` makes `enrichment.record` a no-op |
+| `enrichment.dir` / `.csv` | `enrichment` / `enrichment.csv` | The agent's record and its table, resolved inside `output/` |
 | `portfolio.enabled` | `true` | Run tier 4 at all; `false` makes every subcommand a no-op |
 | `portfolio.dir` | `portfolio` | Ledger + findings directory, resolved inside `output/` |
 | `portfolio.positions_csv` / `.findings_csv` / `.exits_csv` | `positions.csv` / `findings.csv` / `exits.csv` | The three tables, in that directory |
@@ -1350,10 +1379,8 @@ market close) via the task **"SP500 Breakout Scanner"**, which executes
 
 `run_scanners.py` now does all four tiers itself — the screens, the quality
 check, the ledger (`open` → `mark` → exit scan) and the graded verdict — and
-issues **one** Discord message carrying all of them. The batch file then chains
-to `run_deepdive.bat` for the optional narrative pass
-(→ `output/deepdive_log.txt`, ending with a tier-4 `mark` so any conviction
-revision lands on tonight's position).
+issues **one** Discord message carrying all of them. Nothing is chained after
+it, and nothing in it can invoke a model.
 
 Ordering inside the run, all of it load-bearing: the archive is written before
 the ledger opens positions from it; `exit-scan` comes after `mark` because it
@@ -1365,11 +1392,11 @@ The exit scan needs no separate schedule: detection searches every bar since
 entry, so a night the task did not run is picked up by the next one rather than
 lost.
 
-> **`ExecutionTimeLimit` must cover the whole chain.** The screens alone finish
-> in about a minute, but the verdict pass adds ~9 Yahoo round-trips per
-> candidate and the optional narrative pass takes considerably longer still;
-> Task Scheduler kills the chain at the limit. The original task was registered
-> with `PT30M`; raise it:
+> **`ExecutionTimeLimit` must cover the verdict pass.** The screens alone
+> finish in about a minute, but the verdict pass adds ~9 Yahoo round-trips per
+> candidate; Task Scheduler kills the run at the limit. The original task was
+> registered with `PT30M`; it is now `PT3H`, which is far more headroom than the
+> run needs since the narrative pass was removed. To set it:
 >
 > ```powershell
 > Set-ScheduledTask -TaskName "SP500 Breakout Scanner" -Settings (
@@ -1383,7 +1410,7 @@ To (re)create the task from scratch, run in PowerShell:
 $action   = New-ScheduledTaskAction -Execute "C:\Users\Lenovo\CC\stock_analyzer\run_scanner.bat" -WorkingDirectory "C:\Users\Lenovo\CC\stock_analyzer"
 $trigger  = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At 23:30
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -WakeToRun -ExecutionTimeLimit (New-TimeSpan -Hours 3)
-Register-ScheduledTask -TaskName "SP500 Breakout Scanner" -Action $action -Trigger $trigger -Settings $settings -Description "Scans S&P 500 for breakouts from consolidation ~30 min after US market close, alerts via Discord webhook, then runs the tier-3 deep-dive on the gated candidates."
+Register-ScheduledTask -TaskName "SP500 Breakout Scanner" -Action $action -Trigger $trigger -Settings $settings -Description "Scans S&P 500 for breakouts from consolidation ~30 min after US market close, grades and alerts via Discord webhook."
 ```
 
 A second, **weekly** task puts the week's signals on the risk/reward plane
@@ -1410,7 +1437,6 @@ Useful commands:
 Get-ScheduledTaskInfo -TaskName "SP500 Breakout Scanner"   # last/next run + result code
 Start-ScheduledTask   -TaskName "SP500 Breakout Scanner"   # trigger a run right now
 Get-Content output\scanner_log.txt  -Tail 40               # all four tiers
-Get-Content output\deepdive_log.txt -Tail 40               # the narrative pass
 Get-ScheduledTaskInfo -TaskName "SP500 Universe Plane"     # the weekly plane pass
 Get-Content output\universe_log.txt -Tail 20               # its progress lines
 ```
@@ -1421,13 +1447,13 @@ Notes:
   and `WakeToRun` wakes it from sleep — but a run that *started* and was then
   interrupted (e.g. shutting the PC down at ~23:31) is **not** retried, and
   that night's alert is lost. Avoid shutting down between ~23:25 and ~23:35.
-  With tier 3 chained on, the window is longer; the signals themselves are
-  archived before the deep-dive starts, so only the reports are lost.
+  The verdict pass extends that window; the signals themselves are archived
+  before it starts, so only the verdicts are lost.
 - A result code of `0` in `Get-ScheduledTaskInfo` means success;
   `3221225786` (0xC000013A) means the run was terminated mid-scan.
-- Tier 3 needs Claude Code authenticated for this Windows user. If a nightly
-  report is missing its **Business & moat** section, the IBKR MCP login has
-  expired — run `/mcp` in an interactive session to renew it.
+- The nightly run needs no Claude Code authentication at all — it invokes no
+  model. If an `enrich` session's **Business & moat** section comes back empty,
+  the IBKR MCP login has expired; run `/mcp` to renew it.
 
 ## Notes
 

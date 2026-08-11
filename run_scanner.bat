@@ -5,12 +5,10 @@ rem cmd expands the >> redirect before Python runs, so the output directory has
 rem to exist first -- scanner_common.output_dir() would create it too late.
 if not exist output md output
 
-rem One run id for the whole night, minted here and exported: tiers 1+2 below and
-rem tier 3 in run_deepdive.bat (whose `run-id` inherits it rather than minting)
-rem then write to the SAME output\logs\<run_id>.log, so one file holds everything
-rem that happened tonight. Run either .bat on its own and it mints its own id.
-rem Handed over through a file, like auto-model: cmd's `for /f` mangles a quoted
-rem interpreter path inside backticks.
+rem One run id for the whole night, minted here and exported so everything the
+rem scan starts writes to the SAME output\logs\<run_id>.log. Run run_scanners.py
+rem on its own and it mints its own id. Handed over through a file because cmd's
+rem `for /f` mangles a quoted interpreter path inside backticks.
 "C:\Users\Lenovo\AppData\Local\Microsoft\WindowsApps\python.exe" -c "import scanner_common; print(scanner_common.new_run_id())" > output\run_id.txt
 set /p STOCK_ANALYZER_RUN_ID=<output\run_id.txt
 
@@ -19,17 +17,17 @@ rem 2>&1 matters: the step log writes to stderr, so scanner_log.txt keeps it.
 "C:\Users\Lenovo\AppData\Local\Microsoft\WindowsApps\python.exe" run_scanners.py >> output\scanner_log.txt 2>&1
 echo ==== Scan finished %date% %time% (exit %errorlevel%) ==== >> output\scanner_log.txt
 
-rem Tiers 3 and 4 now run INSIDE run_scanners.py, not as separate lines here.
-rem Everything deterministic -- the screens, the quality check, the ledger, the
-rem exit scan and the graded verdict -- happens in that one process so it can go
-rem out in ONE Discord message: the signal, what it graded out at, and what to
-rem sell, together instead of three posts at three different times. Each step is
-rem still individually fail-safe (see run_ledger / run_verdicts): a broken ledger
-rem or a failed verdict costs its own section of the alert and nothing more.
-
-rem Tier 3's NARRATIVE half is what is left out here, and it is optional: the
-rem verdict is already computed, recorded and posted by the line above. This
-rem adds the written report (moat, news, filings) and may revise the conviction
-rem within its bounded adjustment. It logs separately, skips itself when nothing
-rem qualifies, and is switched off with research.narrative.enabled.
-call "C:\Users\Lenovo\CC\stock_analyzer\run_deepdive.bat"
+rem That ONE line is the whole night. All four tiers run inside run_scanners.py
+rem -- the screens, the quality check, the veto, the graded verdict, the ledger
+rem and the exit scan -- so they can go out in ONE Discord message: the signal,
+rem what it graded out at, and what to sell, together instead of three posts at
+rem three different times. Each step is individually fail-safe (see run_ledger /
+rem run_verdicts): a broken ledger or a failed verdict costs its own section of
+rem the alert and nothing more.
+rem
+rem Nothing is chained after it, and nothing here invokes a model. Every number
+rem the scan produces is computed in Python, which is what makes a re-run
+rem reproducible and every figure checkable -- `tests/test_no_model.py` asserts
+rem no code path can start one. Qualitative research is the `enrich` skill, run
+rem from a Claude Code session on the tickers you choose; it records to
+rem output/enrichment/ and cannot alter a verdict. See AI_ROLE.md.

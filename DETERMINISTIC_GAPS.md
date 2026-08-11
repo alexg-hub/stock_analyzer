@@ -6,8 +6,10 @@ rather than by how useful it is.
 
 The governing rule: **anything derivable is computed in Python.** A number a model
 wrote is a number you cannot check, which is why tier 3's thesis, tier 4's
-`conclusion` and the whole verdict are already deterministic. The AI's territory
-is section D, and nothing else.
+`conclusion` and the whole verdict are deterministic. Since 2026-08-11 that is a
+property of the code rather than a convention: no path in the analyzer can invoke
+a model at all, and `tests/test_no_model.py` fails if one reappears. The AI's
+territory is section D, and nothing else.
 
 Status legend — ⬜ not started · 🟨 data in hand, no parameter · ✅ done
 
@@ -203,9 +205,14 @@ reaches them:
 - Whether MD&A tone shifted against last year, and whether a disclosed risk
   factor is boilerplate or newly serious.
 
-`mcp_tools/universe.risk_research` is the only entry point, it runs no model
-itself, and its prompt names exactly these questions and forbids restating the
-computed numbers as findings.
+`mcp_tools/universe.risk_research` is the entry point and it runs no model
+itself: it assembles the deterministic bundle, names exactly these questions,
+points at the IBKR tools that can answer them, and forbids restating the computed
+numbers as findings. The reasoning is the `enrich` skill, in a Claude Code
+session, and its conclusion is recorded by `enrichment.py` as categorical
+attributes that tier 4 grades against forward returns — never as an adjustment to
+a score. A judgment on the record is a hypothesis you can measure; a judgment
+inside the score is a number nobody can check.
 
 ---
 
@@ -216,7 +223,7 @@ computed numbers as findings.
 | Credit ratings (S&P/Moody's) | Paid. Proxy with Altman Z + interest coverage, both already present. |
 | Short borrow fee / utilization | Paid (Ortex, S3). The genuinely predictive short-side data. |
 | **Earnings-call transcripts** | `RESEARCH_DATA.md` already identifies this as the one gap with no source at all. |
-| Supply-chain / customer graphs | Was Reflexivity on the old claude.ai IBKR connector; no public-API equivalent. |
+| Supply-chain / customer graphs | Reflexivity, via the claude.ai IBKR connector — reachable from the `enrich` skill, but with no public-API equivalent, so nothing deterministic can consume it. |
 
 ---
 

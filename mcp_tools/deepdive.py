@@ -1,8 +1,10 @@
-"""Tier 3: the deep-dive's deterministic half.
+"""Tier 3: the graded verdict, for a session to read.
 
-The synthesis itself is the `deep-dive` skill -- Claude reasoning, not a
-function -- so what lives here is only what feeds it and what records its
-verdict.
+The verdict itself is computed inside the nightly scan and recorded there;
+nothing here decides anything. These two tools exist so a session can see
+*who* was worth researching and *what the analyzer already concluded* before
+adding the qualitative half -- which is the `enrich` skill, and which records
+to its own table rather than to a verdict. See AI_ROLE.md.
 """
 
 from scanner_common import load_config
@@ -63,45 +65,3 @@ def register(mcp) -> None:
         # (CONTEXT/QUANT/SEC/FACTS lines) rather than a job file.
         return jobs.start("deepdive_context", research_report.assemble_context,
                           ticker.upper(), log_path=jobs.server_step_log())
-
-    @mcp.tool()
-    def deepdive_complete_log(run_id: str, session_id: str,
-                              mode: str = "") -> dict:
-        """Finish the step log of a deep-dive run that died before logging out.
-
-        Merges the model's half of the run (from Claude Code's own session
-        transcript) into `output/logs/<run_id>.log` and records the run in the
-        manifest. Safe to re-run -- the log is rebuilt and the manifest
-        de-duplicates on run_id. Both ids are in the 'Deep-dive started' banner
-        in `output/deepdive_log.txt`; a run killed mid-flight (Task Scheduler
-        result 3221225786) is exactly what this recovers.
-        """
-        import research_report
-        path = research_report.complete_run_log(run_id, session_id,
-                                                load_config(), mode)
-        return {"run_id": run_id, "log": str(path)}
-
-    @mcp.tool()
-    def deepdive_post_verdicts(verdicts: list[dict], send: bool = False) -> dict:
-        """Record deep-dive verdicts, and optionally post the Discord cards.
-
-        Each verdict is {ticker, scan_date, tier, conviction, narrative_adj,
-        thesis}. Recording always happens -- that is the point; `send` only
-        controls the Discord message and is double-gated by
-        `research.auto.discord_send` in config, exactly as the CLI is.
-
-        The verdict lands in signals.csv or on_demand_scans_results.csv by
-        provenance, decided by the `source` in the ticker's facts JSON.
-        """
-        import research_report
-        cfg = load_config()
-        allowed = cfg.get("research", {}).get("auto", {}).get("discord_send", False)
-        effective = bool(send and allowed)
-        research_report.post_summary(verdicts, cfg, send=effective)
-        research_report.record_verdicts(verdicts, cfg)
-        return {
-            "recorded": [v.get("ticker") for v in verdicts],
-            "sent": effective,
-            "note": ("" if effective or not send else
-                     "research.auto.discord_send is false -- printed, not sent"),
-        }

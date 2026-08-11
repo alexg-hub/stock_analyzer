@@ -5,7 +5,6 @@
       "mcp__stock_analyzer__scan_tickers",
       "mcp__stock_analyzer__deepdive_candidates",
       "mcp__stock_analyzer__deepdive_context",
-      "mcp__stock_analyzer__deepdive_complete_log",
       "mcp__stock_analyzer__portfolio_status",
       "mcp__stock_analyzer__portfolio_open",
       "mcp__stock_analyzer__portfolio_mark",
@@ -21,7 +20,9 @@
       "mcp__stock_analyzer__list_jobs",
       "mcp__stock_analyzer__universe_quadrant",
       "mcp__stock_analyzer__universe_scan",
-      "mcp__stock_analyzer__risk_research"
+      "mcp__stock_analyzer__risk_research",
+      "mcp__stock_analyzer__enrichment_read",
+      "mcp__stock_analyzer__enrichment_record"
     ]
   }
 }

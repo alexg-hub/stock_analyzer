@@ -1234,10 +1234,6 @@
             "max_reports": 15,
             "discord_send": true
         },
-        "narrative": {
-            "enabled": true,
-            "model": "opus"
-        },
         "history": {
             "enabled": true,
             "dir": "history",
@@ -1247,7 +1243,6 @@
         "logging": {
             "enabled": true,
             "dir": "logs",
-            "manifest": "deepdive_runs.csv",
             "keep_runs": 200
         },
         "financials": {
@@ -1274,7 +1269,6 @@
             ]
         },
         "synthesis": {
-            "narrative_adj_max": 15,
             "tiers": [
                 {"label": "STRONG", "min": 80, "color": "2E9C6B"},
                 {"label": "WATCH", "min": 45, "color": "2A78D6"},
@@ -1345,5 +1339,10 @@
             "fdr": true,
             "keep_dated_findings": true
         }
+    },
+    "enrichment": {
+        "enabled": true,
+        "dir": "enrichment",
+        "csv": "enrichment.csv"
     }
 }

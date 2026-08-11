@@ -1,41 +1,43 @@
 """
 Tier 3 -- the graded investment case.
 
-**The verdict is deterministic.** `deterministic_verdict` collects the `deep`
-half of the quality registry, scores it, renders the financials chart and sets
-`conviction = score`, `tier = tier_for(score)`. It runs inside the nightly scan,
-so tonight's verdict travels in the same Discord message as the signal that
-produced it and is recorded whether or not anything else runs:
+**The verdict is deterministic, full stop.** `deterministic_verdict` collects
+the `deep` half of the quality registry, scores it, renders the financials chart
+and sets `conviction = score`, `tier = tier_for(score)`. It runs inside the
+nightly scan, so tonight's verdict travels in the same Discord message as the
+signal that produced it:
 
   * resolve_trigger(ticker, cfg)  -> the trigger, scanning on demand if the
       nightly scan never surfaced this ticker
   * deterministic_verdict(...)    -> score, tier, conviction, facts file, chart
+  * deterministic_thesis(facts)   -> the sentence explaining it, built in Python
   * verdicts_for(tickers, cfg)    -> a batch, recorded to output/history/
-  * list_candidates(hits, cfg)    -> who is worth the deep pass, gated by tier 2
-  * report_dir / write_report     -> archive a full report under output/
-  * post_summary / post_verdict   -> deliver to Discord (send_discord_alert)
+  * list_candidates(hits, cfg)    -> who is worth researching, gated by tier 2
+  * risk_report(ticker, cfg)      -> every rule beside the threshold it met
   * record_verdicts               -> the permanent record of tier + conviction
 
-**The narrative pass is optional and revises rather than originates.**
-`.claude/skills/deep-dive` reads `assemble_context` (the same numbers plus the
-SEC filings), adds IBKR's qualitative graph and live web research, and may move
-the conviction by a bounded `narrative_adj`. When it does not run -- because it
-is switched off, or the model was unavailable -- the verdict already exists and
-nothing downstream is missing.
+There is no model anywhere in this file, and no way to reach one from it. A
+model *did* used to revise the conviction here by a bounded `narrative_adj`;
+measured over its whole life it moved nine verdicts by at most 5 points and
+changed no tier, while making the one score in the system unverifiable. It was
+removed on 2026-08-11 -- see AI_ROLE.md for the measurement.
+
+Qualitative research still happens, in the `enrich` skill, from a Claude Code
+session. It reads `assemble_context` (these same numbers plus the SEC filings)
+and records to `output/enrichment/` where tier 4 grades it. It cannot alter a
+verdict, because there is no field here for it to alter.
 
 CLI:
-    python research_report.py candidates [--all] [--json]   # who to deep-dive
+    python research_report.py candidates [--all] [--json]   # who to research
     python research_report.py verdicts [TICKER ...]         # deterministic, now
-    python research_report.py auto-prompt                   # the narrative prompt
+    python research_report.py risk TICKER [TICKER ...]      # every rule, valued
     python research_report.py scan PGR [RL ...]             # on-demand tiers 1+2
     python research_report.py context MSFT [JNJ ...]        # the data bundle
 """
 
 import json
-import re
 import sys
 import time
-import uuid
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -49,31 +51,22 @@ from scanner_common import (
     CONVICTION_COL,
     DEEP_VETO_COL,
     DEEP_VETO_REASONS_COL,
-    DISCLAIMER,
     ON_DEMAND_KEYS,
     QUALITY_COL,
     QUALITY_MISSING_COL,
-    RUN_KEYS,
     VERDICT_COL,
     VETO_COLOR,
     count_csv_rows,
     enable_utf8_output,
     fmt_bytes,
     fmt_compact,
-    format_step,
     history_rows,
     load_config,
     log_step,
-    manifest_csv_path,
     merge_history_csv,
-    new_run_id,
     on_demand_csv_path,
     output_dir,
-    prune_run_logs,
     run_id,
-    run_log_path,
-    run_result_path,
-    send_discord_alert,
     signals_csv_path,
     stdout_to_stderr,
     step,
@@ -99,7 +92,7 @@ def load_hits(cfg: dict) -> dict:
     if not path.is_absolute():
         path = output_dir() / path
     if not path.exists():
-        # stderr, so `candidates --json` and `auto-prompt` stay pipeable.
+        # stderr, so `candidates --json` stays pipeable.
         print(f"(no hand-off file at {path} -- run run_scanners.py first)",
               file=sys.stderr)
         return {}
@@ -360,10 +353,9 @@ def _facts(ticker: str, scan_date: str, yahoo: dict, quant: dict,
         "quant_score": score,
         "quant_dimensions": quant.get("dimensions"),
         "quant_metrics": quant.get("metrics"),
-        # The verdict as the deterministic pipeline sets it, before any
-        # narrative pass: conviction *is* the score until something bounded and
-        # justified moves it. Recorded here so a night the narrative pass never
-        # runs still has a tier and a conviction for tier 4 to grade.
+        # Conviction *is* the score. Nothing revises it: the agent that adds
+        # qualitative research records to its own table and has no field that
+        # could reach this one.
         "tier": tier,
         "conviction": score,
         "screen": (trigger or {}).get("screen"),
@@ -428,13 +420,12 @@ def deterministic_verdict(ticker: str, cfg: dict, trigger: dict | None,
     heaviest group at weight 0.24, ran on 3 of its 8 metrics.
 
     This is the whole point of the deterministic pipeline. The verdict exists
-    the moment the scan finishes, so it can go out in the same Discord message
-    as the signal that produced it and be recorded whether or not a narrative
-    pass ever runs. A later narrative pass may *revise* the conviction within
-    the bounded adjustment; it no longer originates it.
+    the moment the scan finishes, so it goes out in the same Discord message as
+    the signal that produced it, and every figure behind it can be recomputed
+    from the config that produced it.
 
     The chart and the facts file are written here, before this returns, so a
-    model that reads the bundle later can never generate either.
+    session that reads the bundle later can never generate either.
     """
     fin_cfg = cfg.get("research", {}).get("financials", {})
     bundle = quality.collect(ticker, cfg, None, close=close)
@@ -470,7 +461,6 @@ def deterministic_verdict(ticker: str, cfg: dict, trigger: dict | None,
         "quant": quant,
         "tier": facts.get("tier"),
         "conviction": facts.get("conviction"),
-        "narrative_adj": 0,
         "facts": facts,
         "facts_path": str(facts_path),
         "financials_chart": str(chart) if chart else None,
@@ -528,11 +518,10 @@ def deterministic_thesis(facts: dict) -> str:
 def verdicts_for(tickers: list[str], cfg: dict, close=None) -> list[dict]:
     """Deterministic verdicts for a list of tickers, recorded as they are made.
 
-    Each entry is the same `{ticker, scan_date, tier, conviction, narrative_adj,
-    thesis}` shape `post_summary` and `record_verdicts` already consume, so a
-    later narrative pass revising one of them writes through exactly the same
-    path. One ticker failing is logged and skipped -- an alert missing a card is
-    better than an alert that never went out.
+    Each entry is the `{ticker, scan_date, tier, conviction, thesis}` shape
+    `build_verdict_embeds` and `record_verdicts` consume. One ticker failing is
+    logged and skipped -- an alert missing a card is better than an alert that
+    never went out.
     """
     out = []
     for ticker in tickers:
@@ -548,8 +537,7 @@ def verdicts_for(tickers: list[str], cfg: dict, close=None) -> list[dict]:
             "scan_date": verdict["scan_date"],
             "tier": verdict["tier"],
             "conviction": verdict["conviction"],
-            "narrative_adj": 0,
-            "thesis": deterministic_thesis(verdict["facts"]),
+                "thesis": deterministic_thesis(verdict["facts"]),
         })
     if out:
         record_verdicts(out, cfg)
@@ -557,10 +545,11 @@ def verdicts_for(tickers: list[str], cfg: dict, close=None) -> list[dict]:
 
 
 def assemble_context(ticker: str, cfg: dict | None = None) -> dict:
-    """The deterministic bundle the deep-dive skill reasons over.
+    """The deterministic bundle the `enrich` skill reasons over.
 
     `deterministic_verdict` plus the SEC filings -- i.e. the same numbers the
-    nightly alert already posted, with the filing text a narrative pass needs.
+    nightly alert already posted, with the filing text qualitative research
+    needs.
     Keeping the two separate is what lets the nightly run produce a verdict
     without paying for EDGAR, and lets the skill get the filings without
     recomputing the verdict.
@@ -659,11 +648,7 @@ def _verdict_fields(f: dict, v: dict) -> list[dict]:
     def field(name, value):
         return {"name": name, "value": value or "n/a", "inline": True}
 
-    adj = v.get("narrative_adj")
     quant = _num_or_na(f.get("quant_score"))
-    if isinstance(adj, (int, float)):
-        quant += f"  ({adj:+g} narrative)"
-
     setup = f.get("setup")
     screen = f.get("screen") or "ad-hoc"
     trigger = f"{screen}\n{setup}" if setup else screen
@@ -706,11 +691,11 @@ def _verdict_fields(f: dict, v: dict) -> list[dict]:
 
 def build_verdict_embeds(verdicts: list[dict], cfg: dict
                          ) -> tuple[list[dict], list[Path]]:
-    """One card per ticker: the model's judgment plus the recorded facts.
+    """One card per ticker, entirely from the recorded facts.
 
     Everything numeric comes from the ticker's `_facts.json`, so the card can
     never disagree with what the collector actually measured; the verdict dict
-    supplies only `tier`, `conviction`, `narrative_adj` and `thesis`.
+    supplies only `tier`, `conviction` and `thesis`, all three deterministic.
     """
     embeds, images = [], []
     for v in sorted(verdicts, key=lambda x: -(x.get("conviction") or 0)):
@@ -736,44 +721,6 @@ def build_verdict_embeds(verdicts: list[dict], cfg: dict
     return embeds, images
 
 
-def post_summary(verdicts: list[dict], cfg: dict, send: bool = False) -> None:
-    """The nightly deep-dive message: one card per ticker, chart attached.
-
-    `send_discord_alert` batches these under Discord's 10-embed / 10-file /
-    ~5500-char caps, so this scales from one verdict to five without tuning.
-    """
-    embeds, images = build_verdict_embeds(verdicts, cfg)
-    scan_date = next((v.get("scan_date") for v in verdicts if v.get("scan_date")), "")
-    header = f"**Deep-dive verdicts{f' -- {scan_date}' if scan_date else ''}** "
-    header += f"({len(embeds)} report(s))\n{DISCLAIMER}"
-    tickers = ", ".join(str(v.get("ticker")) for v in verdicts if v.get("ticker"))
-    if send:
-        send_discord_alert(header, cfg["discord"], embeds, images)
-        log_step("DISCORD", "sent",
-                 f"{tickers}  {len(embeds)} card(s), {len(images)} chart(s)",
-                 cfg=cfg)
-    else:
-        log_step("DISCORD", "dry-run",
-                 f"{tickers}  {len(embeds)} card(s), {len(images)} chart(s)",
-                 cfg=cfg)
-        print("\n--- Discord summary (dry-run, not sent) ---")
-        print(header)
-        for e in embeds:
-            print(f"\n[{e['title']}]  color=0x{e['color']:06X}")
-            print(e["description"])
-            for f in e["fields"]:
-                print(f"  - {f['name']}: {f['value']}")
-            if "image" in e:
-                print(f"  image: {e['image']['url']}")
-
-
-def post_verdict(ticker: str, headline: str, short_md: str, cfg: dict,
-                 send: bool = False) -> None:
-    """Post (or dry-run print) a single verdict, using the same card shape."""
-    post_summary([{"ticker": ticker, "tier": headline, "thesis": short_md}],
-                 cfg, send=send)
-
-
 # --------------------------------------------------------------------------
 # The permanent record: every verdict, in the table that fits its provenance
 # --------------------------------------------------------------------------
@@ -785,8 +732,7 @@ def post_verdict(ticker: str, headline: str, short_md: str, cfg: dict,
 
 # Columns only tier 3 fills in, long after the scan row was written -- so every
 # rewrite of the on-demand table has to carry them forward.
-ON_DEMAND_VERDICT_COLS = [VERDICT_COL, CONVICTION_COL, "Narrative Adj",
-                          "Quant Score", "Price", "Upside %", "P/E Pctile 2y",
+ON_DEMAND_VERDICT_COLS = [VERDICT_COL, CONVICTION_COL, "Quant Score", "Price", "Upside %", "P/E Pctile 2y",
                           "Report", "Thesis",
                           DEEP_VETO_COL, DEEP_VETO_REASONS_COL]
 
@@ -876,7 +822,6 @@ def _verdict_values(verdict: dict, facts: dict, full: bool) -> dict:
         return values
     scan_date = verdict.get("scan_date") or ""
     values.update({
-        "Narrative Adj": verdict.get("narrative_adj"),
         "Quant Score": facts.get("quant_score"),
         "Price": facts.get("price"),
         "Upside %": facts.get("upside_pct"),
@@ -887,61 +832,21 @@ def _verdict_values(verdict: dict, facts: dict, full: bool) -> dict:
     return values
 
 
-def clamp_narrative_adj(verdict: dict, cfg: dict) -> dict:
-    """Hold the narrative adjustment inside its configured bound, in code.
-
-    `research.synthesis.narrative_adj_max` has always been documented as the
-    limit and was, until now, enforced only by the skill file asking the model
-    to respect it -- i.e. by the model's own compliance. Everything else about
-    tier 3 is deterministic precisely so a model cannot originate a verdict;
-    leaving the one number it *does* contribute unbounded made that guarantee
-    rest on good behaviour.
-
-    Out-of-range values are clamped rather than rejected, and the conviction is
-    recomputed from the recorded quant score so the tier stays consistent with
-    it. Mutates and returns `verdict`.
-    """
-    limit = cfg.get("research", {}).get("synthesis", {}).get("narrative_adj_max")
-    adj = verdict.get("narrative_adj")
-    if not isinstance(limit, (int, float)) or not isinstance(adj, (int, float)) \
-            or isinstance(adj, bool) or abs(adj) <= limit:
-        return verdict
-
-    capped = max(-limit, min(limit, adj))
-    log_step("VERDICT", "warn",
-             f"{verdict.get('ticker')} narrative_adj {adj:+g} exceeds "
-             f"+/-{limit} -- clamped to {capped:+g}", cfg=cfg)
-    print(f"  WARNING: {verdict.get('ticker')} narrative_adj {adj:+g} is "
-          f"outside the configured +/-{limit}; clamped to {capped:+g}.",
-          file=sys.stderr)
-    verdict["narrative_adj"] = capped
-
-    base = load_facts(verdict.get("ticker"), verdict.get("scan_date"),
-                      cfg).get("quant_score")
-    if isinstance(base, (int, float)):
-        conviction = max(0, min(100, round(base + capped)))
-        verdict["conviction"] = conviction
-        verdict["tier"] = tier_for(conviction, cfg)
-    return verdict
-
-
 def enforce_veto(verdict: dict, facts: dict, cfg: dict) -> dict:
     """A recorded verdict on a vetoed ticker keeps the veto tier, whatever it says.
 
-    The skill may override a tier "with an explicit written justification", and
-    that latitude is deliberate for the score bands. It does **not** extend to
-    the exclusion: a veto is a deterministic rule over collected values, and the
-    one thing a narrative pass must never do is talk the pipeline out of one.
-    It can argue the rule is wrong -- in the report, where a human reads it and
-    can retune the threshold -- but not by relabelling this row.
+    Nothing in the nightly path can now report a tier that disagrees with the
+    exclusion, so on that path this is a tautology. It stays because it is the
+    guard for every *other* way a verdict can be recorded -- a hand-written one,
+    a re-record after `quality.parameters` was retuned -- and because the rule it
+    enforces is the one that must never quietly lapse: a veto is a deterministic
+    rule over collected values, and no caller may relabel a row out of one.
 
     The conviction is left exactly as it stands, so the record still says what
     the company scored and tier 4 can measure what the exclusion cost.
 
     Gated on `quality.veto_enforced`: with the veto demoted to a label there is
-    no forced tier to protect, and the narrative pass's own tier stands. What
-    the model still cannot do is edit `facts["veto"]` -- the flag and its reasons
-    are written by Python before this runs.
+    no forced tier to protect and the recorded tier stands.
     """
     if not facts.get("veto") or not quality.veto_enforced(cfg):
         return verdict
@@ -992,7 +897,6 @@ def record_verdict(verdict: dict, cfg: dict) -> str | None:
         print(f"  cannot record a verdict without ticker and scan_date: "
               f"{verdict.get('ticker') or verdict}", file=sys.stderr)
         return None
-    clamp_narrative_adj(verdict, cfg)
     _warn_tier_drift(verdict, cfg)
 
     facts = load_facts(ticker, scan_date, cfg)
@@ -1048,330 +952,19 @@ def record_verdicts(verdicts: list[dict], cfg: dict) -> None:
 
 
 # --------------------------------------------------------------------------
-# The run log's other half: what the *model* did
-# --------------------------------------------------------------------------
-# The Python half of a deep-dive logs itself (above). The rest -- the web
-# research, the IBKR calls, the report write -- happens inside a headless
-# `claude` run, and Claude Code already records every bit of it in its session
-# transcript. So none of this collects anything: it reads a record that exists
-# and renders one short line per tool call, then merges the two halves into the
-# single timeline you actually read.
-#
-# Why render rather than archive: the transcript is ~1 MB per run of message
-# bodies and tool output. The question a log has to answer is "which steps ran,
-# when, and did they work", and that is a few dozen lines.
-
-def transcript_path(session_id: str) -> Path | None:
-    """Locate a session transcript by id.
-
-    Globbed rather than composed from the cwd: Claude Code derives the folder
-    name by substituting the project path, and a session id is a UUID -- unique
-    across every project -- so a glob keeps working if that mapping ever
-    changes.
-    """
-    base = Path.home() / ".claude" / "projects"
-    if not base.exists():
-        return None
-    return next(iter(sorted(base.glob(f"*/{session_id}.jsonl"))), None)
-
-
-def _local_stamp(iso: str) -> datetime | None:
-    """Transcript stamps are UTC (`...Z`); the step log is local wall-clock.
-
-    Converting is not cosmetic -- unconverted, every model step would sort
-    hours away from the Python steps it actually interleaves with.
-    """
-    try:
-        return (datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
-                .astimezone().replace(tzinfo=None))
-    except (TypeError, ValueError):
-        return None
-
-
-def _short(text, limit: int = 90) -> str:
-    # ASCII "..." rather than a real ellipsis: this line is printed to a Windows
-    # console whose codepage is cp1255 here, and that is the same class of bug
-    # `enable_utf8_output` exists for. A log must never be the thing that raises.
-    text = " ".join(str(text or "").split())
-    return text if len(text) <= limit else text[:limit - 3] + "..."
-
-
-def _short_url(url: str, limit: int = 60) -> str:
-    """Drop the scheme and trim the middle -- host and path tail is the useful part."""
-    trimmed = re.sub(r"^https?://(www\.)?", "", str(url or ""))
-    if len(trimmed) <= limit:
-        return trimmed
-    return f"{trimmed[:limit // 2]}...{trimmed[-(limit // 2 - 3):]}"
-
-
-# Every Bash call the skill makes starts by cd-ing into the project, which is
-# the same 40 characters on every line and tells you nothing.
-_CD_PREFIX = re.compile(r'^cd\s+(".*?"|\S+)\s*&&\s*')
-
-
-# Tool name -> the phase column it logs under. Anything unlisted falls back to
-# the tool's own name, so a new tool shows up rather than silently vanishing.
-TOOL_PHASE = {"Bash": "BASH", "Read": "READ", "Write": "WRITE", "Edit": "EDIT",
-              "Glob": "GREP", "Grep": "GREP", "WebSearch": "SEARCH",
-              "WebFetch": "FETCH", "Task": "AGENT", "Skill": "SKILL"}
-
-# Plumbing the model does to reach its tools -- real calls, no research value.
-TOOL_SKIP = {"ToolSearch", "TodoWrite", "TaskCreate", "TaskUpdate", "TaskList"}
-
-
-def _tool_detail(name: str, tool_input: dict, result) -> str:
-    """The short description column for one tool call."""
-    tool_input = tool_input if isinstance(tool_input, dict) else {}
-    res = result if isinstance(result, dict) else {}
-    if name == "Bash":
-        return _short(_CD_PREFIX.sub("", " ".join(
-            str(tool_input.get("command") or "").split())))
-    if name in ("Read", "Write", "Edit"):
-        path = Path(str(tool_input.get("file_path", ""))).name
-        body = tool_input.get("content")
-        size = f"  {fmt_bytes(len(body.encode()))}" if isinstance(body, str) else ""
-        return f"{path}{size}"
-    if name in ("Glob", "Grep"):
-        return _short(tool_input.get("pattern"), 60)
-    if name == "WebSearch":
-        hits = res.get("results")
-        n = sum(len(r.get("content", [])) for r in hits
-                if isinstance(r, dict)) if isinstance(hits, list) else None
-        return (f'"{_short(tool_input.get("query"), 55)}"'
-                + (f"  {n} hits" if n else ""))
-    if name == "WebFetch":
-        return (f"{_short_url(tool_input.get('url'))}  "
-                f"{res.get('code', '?')}  {fmt_bytes(res.get('bytes'))}")
-    if name.startswith("mcp__"):
-        return _short(name.rsplit("__", 1)[-1], 60)
-    return _short(next((str(v) for v in tool_input.values() if v), ""), 60)
-
-
-def render_session(session_id: str) -> tuple[list[str], dict]:
-    """One log line per tool call in a session, plus a small tally.
-
-    Degrades rather than fails: an unreadable or restructured transcript costs
-    the model half of the timeline, never the run or the Python half.
-    """
-    tally = {"steps": 0, "searches": 0, "fetches": 0, "denials": 0, "errors": 0}
-    path = transcript_path(session_id)
-    if path is None:
-        return [], tally
-
-    calls, lines = {}, []
-    try:
-        with open(path, encoding="utf-8") as fh:
-            for raw in fh:
-                try:
-                    entry = json.loads(raw)
-                except json.JSONDecodeError:
-                    continue
-                content = (entry.get("message") or {}).get("content")
-                if not isinstance(content, list):
-                    continue
-                when = _local_stamp(entry.get("timestamp"))
-                for block in content:
-                    if not isinstance(block, dict):
-                        continue
-                    if block.get("type") == "tool_use":
-                        calls[block.get("id")] = {
-                            "name": block.get("name") or "?",
-                            "input": block.get("input") or {}, "at": when}
-                    elif block.get("type") == "tool_result":
-                        call = calls.get(block.get("tool_use_id"))
-                        if call is None:
-                            continue
-                        call["done"] = when
-                        call["error"] = bool(block.get("is_error"))
-                        call["denied"] = entry.get("toolDenialKind")
-                        call["result"] = entry.get("toolUseResult")
-    except OSError:
-        return [], tally
-
-    for call in calls.values():
-        name = call["name"]
-        if name in TOOL_SKIP or call["at"] is None:
-            continue
-        status = ("DENIED" if call.get("denied")
-                  else "error" if call.get("error") else "ok")
-        ms = None
-        if call.get("done"):
-            ms = (call["done"] - call["at"]).total_seconds() * 1000
-        detail = _tool_detail(name, call["input"], call.get("result"))
-        if call.get("denied"):
-            detail = f"{detail} ({call['denied']})"
-        phase = TOOL_PHASE.get(name, "MCP" if name.startswith("mcp__")
-                               else name.upper())
-        lines.append(format_step(phase, status, detail, ms, when=call["at"]))
-        tally["steps"] += 1
-        tally["searches"] += name == "WebSearch"
-        tally["fetches"] += name == "WebFetch"
-        tally["denials"] += bool(call.get("denied"))
-        tally["errors"] += bool(call.get("error"))
-    return lines, tally
-
-
-def _read_result(rid: str, cfg: dict) -> dict:
-    """The headless run's `--output-format json` blob, or {} if it never landed.
-
-    Missing is a real state, not an error: a run killed mid-flight (result
-    3221225786 -- a PC shutdown, which the nightly chain sees) never writes it,
-    and the log for that run should still be completed.
-    """
-    path = run_result_path(cfg, rid, create=False)
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-
-
-def _log_field(lines: list[str], phase: str) -> list[str]:
-    """Pull the detail column off every line of one phase (for the manifest).
-
-    A line is `<date> <time>  <phase> <status> <detail>`, and the stamp holds a
-    space, so the detail is the 5th field -- splitting any shallower hands back
-    the status glued to the front of it.
-    """
-    out = []
-    for line in lines:
-        parts = line.split(None, 4)
-        if len(parts) >= 4 and parts[2] == phase:
-            out.append(parts[4] if len(parts) > 4 else "")
-    return out
-
-
-def complete_run_log(rid: str, session_id: str, cfg: dict,
-                     mode: str = "") -> Path:
-    """Merge the model's steps into the run log, close it out, record the run.
-
-    Safe to re-run: the log is rebuilt from the Python lines already on disk
-    plus a fresh render, and the manifest de-duplicates on `run_id`.
-    """
-    log = run_log_path(cfg, rid)
-    existing = (log.read_text(encoding="utf-8").splitlines()
-                if log.exists() else [])
-    # Drop any END from a previous pass so re-running cannot stack them up.
-    own = [ln for ln in existing if ln and " END " not in ln]
-    rendered, tally = render_session(session_id)
-
-    # Both halves are `TS_FMT`-prefixed and the model's are now local, so a
-    # plain lexicographic sort is a chronological one.
-    merged = sorted(own + rendered)
-
-    result = _read_result(rid, cfg)
-    denials = len(result.get("permission_denials") or []) or tally["denials"]
-    duration_s = (result.get("duration_ms") or 0) / 1000
-    exit_code = ("killed" if not result
-                 else "error" if result.get("is_error") else "ok")
-    end = format_step(
-        "END", exit_code,
-        f"{result.get('num_turns', '?')} turns  {duration_s:.0f}s  "
-        f"${result.get('total_cost_usd', 0):.2f}  {tally['steps']} model step(s)"
-        + (f"  {denials} DENIAL(S)" if denials else "")
-        + (f"  {tally['errors']} tool error(s)" if tally["errors"] else "")
-        + ("" if rendered else "  (no transcript found)"))
-    log.write_text("\n".join(merged + [end]) + "\n", encoding="utf-8")
-
-    reports = _log_field(merged, "REPORT")
-    verdicts = _log_field(merged, "VERDICT")
-    tickers = sorted({d.split()[0] for d in _log_field(merged, "CONTEXT")
-                      if d and d.split()[0].isupper()})
-    merge_history_csv(manifest_csv_path(cfg), [{
-        "run_id": rid,
-        "started": merged[0][:19] if merged else "",
-        "finished": end[:19],
-        "mode": mode,
-        "tickers": " ".join(tickers),
-        "model": result.get("modelUsage") and next(iter(result["modelUsage"]), ""),
-        "session_id": session_id,
-        "exit_code": exit_code,
-        "turns": result.get("num_turns"),
-        "duration_s": round(duration_s, 1),
-        "cost_usd": result.get("total_cost_usd"),
-        "web_searches": tally["searches"],
-        "web_fetches": tally["fetches"],
-        "denials": denials,
-        "errors": tally["errors"],
-        "reports": "; ".join(r.split()[0] for r in reports if r),
-        "verdicts": "; ".join(_short(v, 40) for v in verdicts if v),
-    }], RUN_KEYS)
-    prune_run_logs(cfg)
-    return log
-
-
-# --------------------------------------------------------------------------
-# The nightly unattended prompt
-# --------------------------------------------------------------------------
-
-AUTO_PROMPT = """/deep-dive {tickers}
-
-Unattended nightly run for the {scan_date} scan -- nobody is watching, so do not
-ask questions; follow the skill's "Unattended (nightly) mode" section.
-Gate: {gate} ({n} of {total} of tonight's signals).
-
-The deterministic verdict is already computed, recorded and posted: each ticker
-has a tier and a conviction equal to its quant score, written to
-output/history/ and included in tonight's scan alert. Your job is the narrative
-half -- moat, growth runway, earnings/management, catalysts and risks -- and a
-bounded `narrative_adj` that *revises* that conviction. Do not treat a ticker as
-ungraded, and do not re-derive the score.
-Post the combined Discord summary at the end with send={send}.
-"""
-
-
-def narrative_cfg(cfg: dict) -> dict:
-    """Settings for the optional LLM pass.
-
-    Separate from `research.auto` (which now governs the *deterministic* verdict
-    run inside the nightly scan) so the two can be switched independently: the
-    common case is wanting a graded verdict every night and a written report
-    only sometimes.
-    """
-    research = cfg.get("research", {})
-    return research.get("narrative") or {}
-
-
-def auto_prompt(cfg: dict) -> str | None:
-    """The prompt for the nightly headless deep-dive, or None if it should not run.
-
-    Returning None (rather than an empty prompt) is what lets `run_deepdive.bat`
-    stay free of config logic: no candidates, or the narrative pass switched
-    off, simply exits non-zero and the batch skips the Claude invocation.
-    """
-    auto_cfg = cfg.get("research", {}).get("auto", {})
-    if not narrative_cfg(cfg).get("enabled", False):
-        return None
-    hits = load_hits(cfg)
-    if not hits:
-        return None
-    gate = auto_cfg.get("gate", "quality_pass")
-    everything = list_candidates(hits, cfg, gate="all")
-    chosen = list_candidates(hits, cfg, gate=gate,
-                             limit=auto_cfg.get("max_reports"))
-    if not chosen:
-        return None
-    return AUTO_PROMPT.format(
-        tickers=" ".join(dict.fromkeys(c["ticker"] for c in chosen)),
-        scan_date=hits.get("scan_date", "latest"),
-        gate=gate, n=len(chosen), total=len(everything),
-        send=str(bool(auto_cfg.get("discord_send", False))).lower())
-
-
-# --------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------
 
 USAGE = """usage:
-  python research_report.py candidates [--all] [--json]   who to deep-dive tonight
+  python research_report.py candidates [--all] [--json]   who is worth researching
   python research_report.py verdicts [TICKER ...]         deterministic verdicts, recorded now
-  python research_report.py auto-prompt                   the narrative prompt (exit 1 if none)
-  python research_report.py auto-model                    the model the narrative pass should use
   python research_report.py scan TICKER [TICKER ...]      on-demand tiers 1 + 2 for a ticker
   python research_report.py risk TICKER [TICKER ...]      disaster symptoms + moat, every rule
-  python research_report.py post-verdicts F.json [--send] deliver the batch's verdict cards
   python research_report.py context TICKER [TICKER ...]   the data bundle for one ticker
-  python research_report.py run-id                        mint "<run_id> <session_uuid>"
-  python research_report.py log-session ID UUID [--mode M]  merge the model's steps into the run log"""
+
+Qualitative research is the `enrich` skill, run from a Claude Code session --
+nothing here starts a model. It records to output/enrichment/ (enrichment.py)
+and cannot change a verdict."""
 
 
 def _print_candidates(rows: list[dict], held_back: int, gate: str) -> None:
@@ -1574,10 +1167,9 @@ def main() -> int:
                   f"{row['thesis']}")
         return 0 if rows else 1
 
-    # A subcommand rather than something the skill could assemble itself: under
-    # `--permission-mode dontAsk` only documented `research_report.py`
-    # subcommands are allowed, and a refused tool is refused *silently*. If the
-    # narrative pass needs to see the veto detail, it has to be reachable here.
+    # Every rule beside the value it was compared against, split into tripped /
+    # clean / unknown. The `enrich` skill reads the same thing through the MCP
+    # `risk_research` tool, which adds the sector peer group.
     if args[0] == "risk":
         cfg = load_config()
         tickers = [a.upper() for a in args[1:] if not a.startswith("-")]
@@ -1593,51 +1185,6 @@ def main() -> int:
             _print_risk(report, cfg)
         return 0
 
-    if args[0] == "auto-prompt":
-        prompt = auto_prompt(load_config())
-        if prompt is None:
-            return 1
-        print(prompt)
-        return 0
-
-    # A subcommand rather than an inline `python -c` in the batch file: cmd's
-    # `for /f` mangles a quoted interpreter path inside backticks, so the model
-    # is handed over through a file instead.
-    if args[0] == "auto-model":
-        print(narrative_cfg(load_config()).get("model", "opus"))
-        return 0
-
-    # Everything the .bat needs to start a run, on one line for `for /f` to
-    # split: the run id, the session UUID, and where to put the result JSON.
-    # The session UUID is passed to `claude --session-id`, which is what makes
-    # the transcript findable *before* the run starts -- so even a run killed
-    # mid-flight can have its log completed afterwards. The path is resolved
-    # here rather than hardcoded in cmd so `research.logging.dir` stays a real
-    # setting: hardcode it there and moving the directory silently orphans
-    # every result file from the run log it belongs to.
-    # `run_id()`, not `new_run_id()`: run_scanner.bat mints and exports the id
-    # before chaining here, so the whole nightly chain -- tiers 1, 2 and 3 --
-    # lands in one log for the night. Standalone (env unset) this still mints
-    # its own, so an ad-hoc deep dive gets its own file.
-    if args[0] == "run-id":
-        rid = run_id()
-        print(f"{rid} {uuid.uuid4()} {run_result_path(load_config(), rid)}")
-        return 0
-
-    # Closes out a run: merges the model's steps into the run log, writes the
-    # END line, appends the manifest row. Separate from the run itself so it
-    # can be re-run by hand over a run that died before reaching it.
-    if args[0] == "log-session":
-        if len(args) < 3:
-            print("usage: log-session <run_id> <session_id> [--mode M]",
-                  file=sys.stderr)
-            return 1
-        cfg = load_config()
-        mode = args[args.index("--mode") + 1] if "--mode" in args else ""
-        log = complete_run_log(args[1], args[2], cfg, mode)
-        print(f"Run log: {log}")
-        return 0
-
     # On-demand: tiers 1 + 2 for a ticker you name, whether or not the nightly
     # scan surfaced it. Recorded immediately, so a look you never deep-dive is
     # still on the record.
@@ -1650,29 +1197,6 @@ def main() -> int:
                 s.detail = f"{ticker} {payload.get('scan_date')} (on-demand scan)"
             _print_scan(payload, ticker, cfg)
             record_on_demand(payload, ticker, cfg)
-        return 0
-
-    # A first-class subcommand rather than leaving the skill to reach for
-    # `python -c`: the unattended run's allow-list is deliberately narrow, and
-    # Claude Code requires *every* segment of a compound command to be allowed,
-    # so an inline one-liner (or one with a `; echo` tail) gets refused. The
-    # 2026-07-26 shakedown wrote a full report and then silently failed to post
-    # the verdict for exactly that reason.
-    if args[0] == "post-verdicts":
-        if len(args) < 2:
-            print("usage: post-verdicts <verdicts.json> [--send]", file=sys.stderr)
-            return 1
-        cfg = load_config()
-        verdicts = json.loads(Path(args[1]).read_text(encoding="utf-8"))
-        if isinstance(verdicts, dict):
-            verdicts = [verdicts]
-        authorized = cfg.get("research", {}).get("auto", {}).get("discord_send", False)
-        send = "--send" in args and authorized
-        if "--send" in args and not authorized:
-            print("research.auto.discord_send is false -- printing instead of sending.",
-                  file=sys.stderr)
-        post_summary(verdicts, cfg, send=send)
-        record_verdicts(verdicts, cfg)
         return 0
 
     # stdout here is *structured* -- the skill parses it. Everything the

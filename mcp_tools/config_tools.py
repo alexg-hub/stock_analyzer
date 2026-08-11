@@ -44,7 +44,7 @@ REDACTED = "<redacted -- pass reveal=True>"
 # every screen unable to fire while reporting zero signals rather than an error
 # -- the precise failure this file exists to prevent. It stays a hand edit.
 WRITABLE = ("quality", "ibkr", "research", "backtest", "tuning", "charts",
-            "portfolio")
+            "portfolio", "enrichment")
 WRITABLE_SUFFIX = "_strategy"
 
 # Refused even though a prefix above would otherwise allow them.
@@ -472,7 +472,8 @@ def params_list_impl(section: str | None = None) -> dict:
         if name in ("quality", "discord") or not isinstance(block, dict):
             continue
         if not (name.endswith(WRITABLE_SUFFIX)
-                or name in ("charts", "backtest", "portfolio", "ibkr", "data")):
+                or name in ("charts", "backtest", "portfolio", "ibkr", "data",
+                            "enrichment")):
             continue
         if not want(name):
             continue
@@ -534,7 +535,8 @@ def register(mcp) -> None:
         nothing reads.
 
         Writable: the strategy sections (anything named `*_strategy`), plus
-        quality, ibkr, research, backtest, tuning, charts, portfolio and data.
+        quality, ibkr, research, backtest, tuning, charts, portfolio,
+        enrichment and data.
         `discord.*` and `research.auto.discord_send` are refused outright --
         the webhook is live, and the latter is what gates every Discord send.
 

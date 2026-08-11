@@ -124,8 +124,8 @@ def enable_utf8_output() -> None:
     Windows picks the locale codepage when output is redirected (cp1255 on this
     box), and the quality badge -- a real character in the Discord payload --
     has no mapping there, so a dry-run print of a passing ticker raises
-    UnicodeEncodeError. That would take down `run_deepdive.bat` in exactly the
-    `discord_send: false` configuration used to shake the nightly run down.
+    UnicodeEncodeError. That took down the nightly chain in exactly the
+    `discord_send: false` configuration used to shake it down.
     `errors="replace"` keeps it non-fatal even if reconfigure is unavailable.
 
     Called from entry-point `__main__` blocks rather than at import, so
@@ -143,7 +143,7 @@ def stdout_to_stderr():
     """Run a block with stdout aliased to stderr; yield the real stdout.
 
     For a command whose stdout *is* its output -- `research_report.py context`
-    prints a JSON bundle the deep-dive skill parses. That bundle is assembled by
+    prints a JSON bundle the `enrich` skill parses. That bundle is assembled by
     calling straight through tiers 1 and 2, whose progress lines
     ("Downloading 2y of 1d data...", the unsettled-bar WARNING, the per-screen
     counts) are written to stdout because for `run_scanners.py` stdout is the
@@ -165,23 +165,21 @@ def stdout_to_stderr():
 
 
 # --------------------------------------------------------------------------
-# Step log (tier 3's record of what a deep-dive actually did)
+# Step log (every tier's record of what a run actually did)
 # --------------------------------------------------------------------------
 # One line per step -- timestamp, phase, status, a very short description --
-# appended live to `output/logs/<run_id>.log`. Tier 3 spans three processes
-# (this one, the headless `claude` run, and the `context` subprocess it
-# spawns), so a run needs an id they can all agree on: RUN_ID_ENV, exported by
-# the .bat and inherited straight through. Unset means "standalone" -- a
-# terminal `context`/`scan` mints its own id and gets its own log rather than
-# going unrecorded.
+# appended live to `output/logs/<run_id>.log`. The nightly run is one process
+# now, but anything it starts still needs an id they agree on: RUN_ID_ENV,
+# exported by the .bat and inherited straight through. Unset means "standalone"
+# -- a terminal `context`/`scan`/`enrichment` call mints its own id and gets its
+# own log rather than going unrecorded.
 #
 # Two rules this layer must never break:
 #   1. It writes to **stderr**, never stdout. `research_report.py context`
-#      prints its JSON bundle to stdout and the skill reads it; a diagnostic
+#      prints its JSON bundle to stdout and a session reads it; a diagnostic
 #      landing in the middle of that JSON is exactly the bug this replaced.
-#   2. It never raises. A log write failing must not take down a deep-dive, so
-#      every call is wrapped -- a broken logger costs you the record, not the
-#      report.
+#   2. It never raises. A log write failing must not take down a run, so every
+#      call is wrapped -- a broken logger costs you the record, not the report.
 
 RUN_ID_ENV = "STOCK_ANALYZER_RUN_ID"
 
@@ -189,7 +187,7 @@ _LOG_STATE = {"cfg": None, "run_id": None}
 
 
 def new_run_id() -> str:
-    """A short id for one deep-dive run (8 hex chars is plenty at ~1/day)."""
+    """A short id for one run (8 hex chars is plenty at ~1/day)."""
     return uuid.uuid4().hex[:8]
 
 
@@ -243,32 +241,10 @@ def run_log_path(cfg: dict | None = None, rid: str | None = None,
     return logs_dir(cfg, create) / f"{rid or run_id()}.log"
 
 
-def run_result_path(cfg: dict | None = None, rid: str | None = None,
-                    create: bool = True) -> Path:
-    """Where the headless run's `--output-format json` blob is captured.
-
-    It used to be appended to `deepdive_log.txt`, which buried a readable log
-    under ~6 KB of JSON per run. Kept as its own file so the closing narrative
-    and the usage/cost figures survive without cluttering what you read.
-    """
-    return logs_dir(cfg, create) / f"{rid or run_id()}_result.json"
-
-
-# One row per deep-dive run. Keyed on run_id, so re-running `log-session` for
-# a run updates its row instead of adding a second one.
-RUN_KEYS = ["run_id"]
-
-
-def manifest_csv_path(cfg: dict | None = None, create: bool = True) -> Path:
-    """The run manifest -- what tier 3 did, how long it took, what it cost."""
-    path = Path(logging_cfg(cfg).get("manifest", "deepdive_runs.csv"))
-    return path if path.is_absolute() else logs_dir(cfg, create) / path
-
-
 TS_FMT = "%Y-%m-%d %H:%M:%S"
-# The date is part of every line on purpose: the nightly chain starts at 23:30
-# and a deep-dive routinely crosses midnight, so a bare clock time would sort
-# the run's own steps out of order when log-session merges them.
+# The date is part of every line on purpose: the nightly run starts at 23:30 and
+# can cross midnight, so a bare clock time would sort a run's own steps out of
+# order.
 
 
 def format_step(phase: str, status: str = "ok", detail: str = "",
@@ -336,7 +312,13 @@ def prune_run_logs(cfg: dict | None = None) -> int:
     """Keep the newest `research.logging.keep_runs` runs, drop the rest.
 
     `deepdive_log.txt` grew without bound; per-run files would too. Called once
-    per run from `log-session`, never on the hot path.
+    per run, at the *start* of the nightly scan rather than at the end: the scan
+    has several exit paths (a quiet night returns early) and an exception has
+    one more, so pruning first is the only placement that runs unconditionally.
+
+    It used to be called from `log-session`, i.e. from the optional narrative
+    pass -- which meant the one job responsible for bounding this directory was
+    the one job allowed not to run at all.
     """
     try:
         keep = int(logging_cfg(cfg).get("keep_runs", 200))

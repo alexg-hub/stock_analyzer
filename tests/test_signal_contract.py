@@ -742,41 +742,6 @@ c.ok("a hand-off with no recorded verdict is recomputed, not dropped",
      == [(r["ticker"], r["quality"]) for r in every])
 
 # --------------------------------------------------------------------------
-c.section("the optional narrative pass's prompt")
-# `research.auto` governs the *deterministic* verdict run inside the scan;
-# `research.narrative` governs this pass. They are separate switches because the
-# common case is wanting a graded verdict every night and a written report only
-# sometimes -- so auto-prompt must follow the narrative flag, not the auto one.
-q_cfg["research"]["auto"].update(enabled=True, gate="all", max_reports=2,
-                                 discord_send=False)
-q_cfg["research"]["narrative"] = {"enabled": True, "model": "opus"}
-research_report.load_config = lambda: q_cfg
-prompt = research_report.auto_prompt(q_cfg)
-c.ok("auto-prompt invokes the skill", bool(prompt) and prompt.startswith("/deep-dive"))
-c.ok("auto-prompt names exactly the capped candidates",
-     prompt.splitlines()[0].split()[1:] ==
-     list(dict.fromkeys(r["ticker"] for r in every))[:2],
-     prompt.splitlines()[0])
-c.ok("auto-prompt passes the configured send authorization",
-     "send=false" in prompt)
-c.ok("the prompt tells the model the verdict already exists",
-     "already computed" in prompt and "narrative" in prompt,
-     "a pass that re-derives the score would defeat the whole point")
-q_cfg["research"]["narrative"]["enabled"] = False
-c.ok("auto-prompt declines when the narrative pass is switched off",
-     research_report.auto_prompt(q_cfg) is None)
-q_cfg["research"]["narrative"]["enabled"] = True
-c.ok("...and the deterministic verdict switch does not gate it",
-     research_report.auto_prompt(
-         {**q_cfg, "research": {**q_cfg["research"],
-                                "auto": {**q_cfg["research"]["auto"],
-                                         "enabled": False}}}) is not None,
-     "the two switches are independent")
-q_cfg["research"]["auto"].update(enabled=True, gate="quality_pass")
-if not passers:
-    c.ok("auto-prompt declines when the gate holds everything back",
-         research_report.auto_prompt(q_cfg) is None)
-
 c.ok("load_hits reads the same payload the run wrote",
      research_report.load_hits(q_cfg) == gate_payload)
 

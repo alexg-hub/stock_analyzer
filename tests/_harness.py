@@ -37,7 +37,6 @@ enable_utf8_output()
 # `research.logging`, which each test file sets on the config it copies from.
 LOG_DIR = Path(tempfile.mkdtemp(prefix="test_logs_"))
 configure_logging({"research": {"logging": {"enabled": True, "dir": str(LOG_DIR),
-                                            "manifest": "runs.csv",
                                             "keep_runs": 50}}},
                   rid="tests")
 
@@ -50,8 +49,7 @@ def redirect_logging(cfg: dict) -> dict:
     can escape into the real `output/logs`.
     """
     cfg.setdefault("research", {})["logging"] = {
-        "enabled": True, "dir": str(LOG_DIR), "manifest": "runs.csv",
-        "keep_runs": 50}
+        "enabled": True, "dir": str(LOG_DIR), "keep_runs": 50}
     return cfg
 
 

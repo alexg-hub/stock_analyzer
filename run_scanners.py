@@ -49,6 +49,7 @@ from scanner_common import (
     load_config,
     log_step,
     output_dir,
+    prune_run_logs,
     run_id,
     send_discord_alert,
     write_latest_hits,
@@ -260,9 +261,9 @@ def carry_verdicts_to_ledger(cfg: dict) -> None:
     the exit scan needs filled entry prices), but the verdict is written to
     `signals.csv` after that -- so without this the tier and conviction would
     sit on the position only from tomorrow's run. The verdict is exactly the
-    attribute tier 4 exists to grade, and it used to be the trailing `mark` in
-    `run_deepdive.bat` that carried it across; that pass is optional now, so it
-    can no longer be relied on.
+    attribute tier 4 exists to grade. A trailing `mark` in the old narrative
+    `.bat` used to carry it across; that file is gone, so this is the only thing
+    that does.
 
     `sync` alone, not `mark`: it copies the source row verbatim (verdict
     columns included) and needs no network, which the prices already had.
@@ -285,7 +286,7 @@ def run_verdicts(payload: dict, cfg: dict) -> tuple[list, list, list]:
     finishes and can travel in the same message as the signal. It is recorded to
     `output/history/` either way -- the record is the point, the notification is
     not -- and the cards are withheld when `research.auto.discord_send` is
-    false, which is the same switch that used to gate `post-verdicts --send`.
+    false -- the same switch, whichever surface asks.
 
     A failure here costs the verdict section and nothing else: the signals, the
     charts and the exits have already been built.
@@ -331,6 +332,11 @@ def main(argv: list[str] | None = None) -> int:
         cfg["discord"] = {**cfg.get("discord", {}), "webhook_url": ""}
     t0 = time.perf_counter()
     log_step("SCAN", "start", f"nightly scan (tiers 1+2)  run={run_id()}", cfg=cfg)
+    # Before anything else, so it happens on every exit path including a quiet
+    # night and a crash. Never raises; a pruning failure must not cost a scan.
+    pruned = prune_run_logs(cfg)
+    if pruned:
+        log_step("SCAN", "ok", f"pruned {pruned} old run log(s)", cfg=cfg)
 
     tickers = get_sp500_tickers(cfg["data"]["sp500_source_url"])
     data = download_price_data(
