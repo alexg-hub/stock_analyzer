@@ -265,6 +265,33 @@ c.ok("a flat company earns no incremental-ROIC reading",
 c.ok("...and no growth-consistency reading beyond a flat count",
      derived.moat_metrics(flat, INFO, 5)["revenue_growth_years"] == 0.0)
 
+# A base that merely *moved* is not a base that grew. The denominator is a
+# difference of two large numbers, so a 1% shift turns an ordinary EBIT change
+# into a ratio in the hundreds -- measured across the S&P 500, every reading
+# beyond +/-800 came from a base that grew under 4% (EL -2159 on 1.6%, ZTS
+# +1102 on 0.5%). The guard is on the denominator rather than on the output
+# because this parameter is `sector_relative`: clamping would keep the artifacts
+# and pile them into a tie cluster at the cap, which is precisely the failure
+# `peers.percentile` documents for `fcf_negative_years`.
+barely = frames(income={"Total Revenue": [100, 110, 120, 130, 140],
+                        "EBIT": [10, 12, 14, 16, 18]},
+                cashflow={"Free Cash Flow": [8, 9, 11, 12, 14]},
+                balance={"Total Assets": [200] * 5,
+                         "Invested Capital": [100, 100, 100, 100, 101]})
+c.ok("a base that grew 1% earns no incremental-ROIC reading",
+     derived.moat_metrics(barely, INFO, 5)["incremental_roic"] is None,
+     "1% growth would report 100*(18-10)/1 = 800, which is an artifact of the "
+     "denominator, not a reinvestment return")
+c.close("...while the same company clears the guard once the bar is lowered",
+        derived.moat_metrics(barely, INFO, 5,
+                             incremental_min_base_growth_pct=0.5
+                             )["incremental_roic"],
+        100 * (18 - 10) / (101 - 100), tol=1e-9)
+c.ok("the guard is a floor on growth, not on the reading -- a genuinely large "
+     "reading off a materially grown base survives",
+     derived.moat_metrics(HEALTHY, INFO, 5)["incremental_roic"] == 40.0,
+     "IC grew 120->140 (16.7%), so 40.0 is a real reinvestment return")
+
 c.close("slope is the least-squares trend per step",
         derived.slope([1.0, 2.0, 3.0, 4.0]), 1.0, tol=1e-9)
 c.ok("slope needs two points", derived.slope([1.0]) is None)

@@ -466,7 +466,8 @@ def distress_metrics(frames: dict, info: dict, years: int = 5) -> dict:
 # --------------------------------------------------------------------------
 
 def moat_metrics(frames: dict, info: dict, years: int = 5,
-                 roic_hurdle_pct: float = 12.0) -> dict:
+                 roic_hurdle_pct: float = 12.0,
+                 incremental_min_base_growth_pct: float = 5.0) -> dict:
     """Every `moat.*` value for one ticker, keyed by parameter key.
 
     The unifying idea is **persistence**: a moat is not a good year, it is the
@@ -502,7 +503,26 @@ def moat_metrics(frames: dict, info: dict, years: int = 5,
 
     # Incremental ROIC: what the *marginal* capital earned over the window, which
     # is the reinvestment question a headline ROIC cannot answer. Only meaningful
-    # when the invested-capital base actually grew.
+    # when the invested-capital base actually grew -- and grew by enough to
+    # divide by.
+    #
+    # The growth has to be *material*, not merely positive, because the
+    # denominator is a difference of two large numbers: a base that moved 0.5%
+    # while EBIT moved normally yields a ratio in the hundreds or thousands that
+    # says nothing about reinvestment. Measured across the S&P 500, every reading
+    # beyond +/-800 came from a base that grew under 4% (ZTS +1102 on 0.5%, CHD
+    # +1001 on 0.7%, EL -2159 on 1.6%), while genuinely large readings like CAH
+    # +259 came from 24.8% growth. So the guard is on the denominator, not on the
+    # output.
+    #
+    # Deliberately **not** winsorization. Clamping the output would keep the
+    # artifacts and merely move them to the boundary, and because this parameter
+    # is `sector_relative` its score is a peer *percentile* -- where a clamp
+    # manufactures a tie cluster at exactly the cap, which is the failure
+    # `peers.percentile` documents for `fcf_negative_years`. Returning None
+    # instead says "not measurable for this company", which every consumer
+    # already handles: the score skips it and the veto never fires on a missing
+    # value.
     incremental = None
     if len(cols) >= 2:
         ebit_first = _first(frames, "income", "ebit", cols[0])
@@ -510,8 +530,10 @@ def moat_metrics(frames: dict, info: dict, years: int = 5,
         ic_first = _first(frames, "balance", "invested_capital", cols[0])
         ic_last = _first(frames, "balance", "invested_capital", cols[-1])
         if all(_is_num(v) for v in (ebit_first, ebit_last, ic_first, ic_last)) \
-                and ic_last > ic_first:
-            incremental = 100 * (ebit_last - ebit_first) / (ic_last - ic_first)
+                and ic_last > ic_first and ic_first:
+            growth_pct = 100 * (ic_last - ic_first) / abs(ic_first)
+            if growth_pct >= incremental_min_base_growth_pct:
+                incremental = 100 * (ebit_last - ebit_first) / (ic_last - ic_first)
 
     return {
         "roic_years_above": float(sum(1 for r in roic if r > roic_hurdle_pct)) if roic else None,

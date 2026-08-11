@@ -1195,7 +1195,8 @@
             "path": "universe/peer_stats.json",
             "min_peers": 12,
             "veto_percentile": 0.10
-        }
+        },
+        "moat_incremental_min_base_growth_pct": 5
     },
     "universe": {
         "dir": "universe",

@@ -1119,7 +1119,9 @@ def collect(ticker: str, cfg: dict, stage: str | None = STAGE_FAST,
         if "moat" in wanted:
             bundle["moat"] = derived.moat_metrics(
                 frames, info, years,
-                float(section(cfg).get("moat_roic_hurdle_pct", 12.0)))
+                float(section(cfg).get("moat_roic_hurdle_pct", 12.0)),
+                float(section(cfg).get(
+                    "moat_incremental_min_base_growth_pct", 5.0)))
 
     if "sec_flags" in wanted:
         import sec
