@@ -88,6 +88,34 @@ c.ok("...so it is NOT in the worst 10% of its sector",
 c.ok("the genuinely worst value in a spread metric IS in the tail",
      peers.in_sector_tail("altman_z", {"gate": {"min": 1.1}},
                           "Utilities", 0.45, cfg) is True)
+
+# --------------------------------------------------------------------------
+c.section("explaining a score reads it the same way the score did")
+
+# The reporting counterpart of the rule above. A utility near the *top* of its
+# sector's Altman Z still sits below the absolute `bad` anchor, because the
+# anchors describe a manufacturer and not a rate base. Whoever explains the risk
+# axis has to say 0.9-ish, not 0.09, or the column contradicts its own row --
+# which is exactly what `universe_scan._worst_risk` did for NEE: "Altman Z 0.00"
+# printed beside a risk of 35.2 that had scored the same number 0.82.
+_spec = {"score": {"good": 4, "bad": 1.8}, "sector_relative": True}
+_strong_utility = 2.19                       # 30th of the 31 fixture values
+_absolute = quality.normalize(_strong_utility, 4, 1.8)
+_peer = quality.normalized_of("altman_z", _spec, _strong_utility, cfg, "Utilities")
+c.ok("a near-best utility reads badly against the absolute anchors",
+     _absolute < 0.2, f"absolute {_absolute:.2f} -- the anchors suit a manufacturer")
+c.ok("...but normalized_of reports where it actually sits among peers",
+     _peer is not None and _peer > 0.85,
+     f"peer-aware {_peer} vs absolute {_absolute:.2f}")
+c.ok("normalized_of falls back to the anchors without a sector",
+     quality.normalized_of("altman_z", _spec, _strong_utility, cfg, "") == _absolute,
+     "an unknown sector is the documented fallback, not an error")
+c.ok("a non-sector_relative parameter is unaffected by the peer path",
+     quality.normalized_of("altman_z", {"score": {"good": 4, "bad": 1.8}},
+                           _strong_utility, cfg, "Utilities") == _absolute)
+c.ok("a missing value has no reading at all, rather than a zero one",
+     quality.normalized_of("altman_z", _spec, None, cfg, "Utilities") is None,
+     "not measured must never render as the worst possible reading")
 c.ok("...and the sector median is not",
      peers.in_sector_tail("altman_z", {"gate": {"min": 1.1}},
                           "Utilities", 1.35, cfg) is False)
@@ -196,8 +224,22 @@ import ast
 
 _SECTOR_AWARE = {"evaluate", "axis_scores", "score_of", "group_scores",
                  "veto_failures"}
+# `normalized_of` is the per-parameter reading, and takes `sector` 5th.
+_SECTOR_POS = {"evaluate": 4, "axis_scores": 4, "score_of": 4,
+               "group_scores": 4, "veto_failures": 4, "normalized_of": 5}
+_SECTOR_AWARE |= {"normalized_of"}
+
+# Checking the entry points is not enough on its own: `quality.normalize` is the
+# raw two-anchor primitive, and calling it from production *bypasses the peer
+# path by construction* -- there is no sector argument to forget. That is how
+# `universe_scan._worst_risk` came to report NEE's Altman Z as 0.00 next to a
+# risk score that had read it as 0.82. Production explains scores through
+# `quality.normalized_of`; only `quality.py` itself may use the primitive.
+_RAW_PRIMITIVE = "normalize"
+
 _ROOT = Path(__file__).resolve().parent.parent
 _offenders = []
+_raw_calls = []
 _checked = 0
 for _name in ("research_report.py", "universe_scan.py", "scanner_common.py",
               "run_scanners.py"):
@@ -208,13 +250,17 @@ for _name in ("research_report.py", "universe_scan.py", "scanner_common.py",
         if not isinstance(_node, ast.Call):
             continue
         _f = _node.func
-        if not (isinstance(_f, ast.Attribute) and _f.attr in _SECTOR_AWARE
+        if not (isinstance(_f, ast.Attribute)
                 and isinstance(_f.value, ast.Name) and _f.value.id == "quality"):
             continue
+        if _f.attr == _RAW_PRIMITIVE:
+            _raw_calls.append(f"{_name}:{_node.lineno}")
+            continue
+        if _f.attr not in _SECTOR_AWARE:
+            continue
         _checked += 1
-        # `sector` is the 4th positional parameter on each of these, or a kwarg.
-        _has = len(_node.args) >= 4 or any(k.arg == "sector"
-                                           for k in _node.keywords)
+        _has = (len(_node.args) >= _SECTOR_POS[_f.attr]
+                or any(k.arg == "sector" for k in _node.keywords))
         if not _has:
             _offenders.append(f"{_name}:{_node.lineno} quality.{_f.attr}")
 
@@ -223,6 +269,11 @@ c.ok("the check found the call sites at all", _checked >= 3,
 c.ok("no production grading call omits the sector", not _offenders,
      f"absolute anchors would be used silently at: {_offenders}"
      if _offenders else f"{_checked} call sites all pass it")
+c.ok("no production module normalizes against the raw anchors itself",
+     not _raw_calls,
+     f"quality.normalize bypasses the peer path -- use quality.normalized_of "
+     f"at: {_raw_calls}" if _raw_calls
+     else "explanations go through normalized_of, same basis as the score")
 
 shutil.rmtree(tmp, ignore_errors=True)
 peers.reset_cache()

@@ -522,6 +522,20 @@ real send.
     a name the plane had cleared, defeating the "peers can only make it quieter"
     property. `tests/test_peers.py` walks the AST of every production module and
     fails on any such call, because there is no observable symptom to test for.
+  - **Explaining a score goes through `quality.normalized_of`, never
+    `quality.normalize`.** Checking the entry points is not enough on its own:
+    `normalize` is the raw two-anchor primitive, so calling it from production
+    **bypasses the peer path by construction** — there is no `sector` argument to
+    forget, and the AST check above has nothing to match. That is how
+    `universe_scan._worst_risk` came to print "Altman Z 0.00; Int coverage 0.00;
+    ST debt/cash 0.00" for NEE beside a risk of 35.2 that had scored those same
+    numbers 0.82, 0.11 and 0.73 — a utility's absolute Altman Z is structurally
+    low, so the column resurrected the exact sector bias `peers.py` removes from
+    the score, and **62% of the 503 rows named the wrong worst-three**. A wrong
+    explanation is worse than none: it aims tuning at metrics that are already
+    fine. `normalized_of` is now the one definition of "what did this metric
+    read", shared by `group_scores`, `_worst_risk` and `risk_report`; the AST
+    check fails any direct `quality.normalize` outside `quality.py`.
   Note the ⭐ gates stay on absolute anchors deliberately — the badge is meant to
   be strict, and moving it would also move tier 3's candidate gate.
 - **`universe_scan.regrade` re-grades cached entries at render time.** The cache's

@@ -433,6 +433,36 @@ def normalize(value: float, good: float, bad: float) -> float:
     return max(0.0, min(1.0, (value - bad) / (good - bad)))
 
 
+def normalized_of(key: str, spec: dict, value, cfg: dict,
+                  sector: str = "") -> float | None:
+    """One parameter's 0-1 reading, peer-aware -- good->1, the way it is *scored*.
+
+    The single definition of "what did this metric read for this company", used
+    by `group_scores` and by anything that has to explain a score afterwards.
+    It exists because explaining a score by calling `normalize` directly is a
+    silent lie for the 30 `sector_relative` parameters: NEE's Altman Z of 1.17
+    clamps to **0.00** against the absolute anchors while the axis actually
+    scored it **0.82**, because a utility financing a rate base is being ranked
+    against other utilities. A reader of that explanation would go tuning the
+    wrong metric -- which is the very sector bias `peers.py` was written to
+    remove, leaking back in through the reporting path.
+
+    Returns None when the value is missing, exactly as the score does, so
+    "not measured" never renders as a reading.
+    """
+    anchors = spec.get("score")
+    if not anchors:
+        return None
+    scalar_value = scalar(value, spec)
+    if scalar_value is None:
+        return None
+    relative = (peers.relative_score(key, spec, sector, scalar_value, cfg)
+                if peers.is_enabled(cfg) and spec.get("sector_relative")
+                else None)
+    return (relative if relative is not None
+            else normalize(scalar_value, anchors["good"], anchors["bad"]))
+
+
 def axis_of(gspec: dict) -> str:
     """Which axis a group scores on. Unmarked groups are reward.
 
@@ -490,10 +520,6 @@ def group_scores(values: dict, cfg: dict, stage: str | None = None,
             continue                      # nothing to be neutral about
         parts, pw = [], []
         for key, spec in members.items():
-            value = scalar(values.get(key), spec)
-            if value is None:
-                continue
-            anchors = spec["score"]
             weight = float(spec.get("weight", 1.0) or 0.0)
             if weight <= 0:
                 continue
@@ -502,13 +528,14 @@ def group_scores(values: dict, cfg: dict, stage: str | None = None,
             # absolute number is dominated by the sector: a 1.2 current ratio is
             # prudent for Microsoft and alarming for a miner, and a utility's
             # Altman Z says more about rate-base financing than about distress.
-            # Falls back to the anchors whenever the peer group is too thin to
-            # rank against.
-            relative = (peers.relative_score(key, spec, sector, value, cfg)
-                        if peers.is_enabled(cfg) and spec.get("sector_relative")
-                        else None)
-            parts.append(relative if relative is not None
-                         else normalize(value, anchors["good"], anchors["bad"]))
+            # `normalized_of` falls back to the anchors whenever the peer group
+            # is too thin to rank against -- and is shared with every caller
+            # that has to *explain* a score, so an explanation can never be
+            # computed on a different basis than the score itself.
+            reading = normalized_of(key, spec, values.get(key), cfg, sector)
+            if reading is None:
+                continue
+            parts.append(reading)
             pw.append(weight)
         gscore = _combine(parts, pw, gspec) if parts else 0.5
         breakdown[name] = {"score": round(gscore, 3),

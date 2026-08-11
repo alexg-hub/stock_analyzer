@@ -368,27 +368,36 @@ def _axis_counts(entry: dict, axis: str) -> tuple[int, int]:
     return used, total
 
 
-def _worst_risk(entry: dict, cfg: dict, top: int = 3) -> str:
+def _worst_risk(entry: dict, cfg: dict, sector: str = "", top: int = 3) -> str:
     """The lowest-scoring risk readings, named. What actually drove the axis.
 
     Selected by **axis**, not by group name: accounting distress and market risk
     are two groups on one axis, and naming only one of them would hide the very
     readings most likely to be driving a high risk score.
+
+    `sector` is not optional in practice. This column exists to explain the
+    `risk` number beside it, so it has to read each metric on the same basis the
+    axis did -- via `quality.normalized_of`, which consults the peer
+    distribution for the 30 `sector_relative` parameters. Normalizing against
+    the absolute anchors here instead made the column contradict its own row:
+    NEE reported "Altman Z 0.00; Int coverage 0.00; ST debt/cash 0.00" beside a
+    risk of 35.2, when peer-aware those read 0.82, 0.11 and 0.73 and two of the
+    three were not among the worst three at all. Utilities finance a rate base,
+    so their absolute Altman Z is structurally low -- the exact bias `peers.py`
+    removes from the score, leaking back in through the explanation.
     """
     specs = quality.parameters(cfg, quality.STAGE_FAST)
     groups = quality.groups(cfg)
     values = entry.get("values") or {}
     scored = []
     for key, spec in specs.items():
-        anchors = spec.get("score")
         group = groups.get(spec.get("group")) or {}
-        if not anchors or quality.axis_of(group) != quality.AXIS_RISK:
+        if quality.axis_of(group) != quality.AXIS_RISK:
             continue
-        value = quality.scalar(values.get(key), spec)
-        if value is None:
+        reading = quality.normalized_of(key, spec, values.get(key), cfg, sector)
+        if reading is None:
             continue
-        scored.append((quality.normalize(value, anchors["good"], anchors["bad"]),
-                       quality.label_of(key, spec)))
+        scored.append((reading, quality.label_of(key, spec)))
     scored.sort()
     return "; ".join(f"{label} {score:.2f}" for score, label in scored[:top])
 
@@ -458,7 +467,7 @@ def build_table(cfg: dict, cache: dict, constituents: pd.DataFrame
             "risk_metrics_total": r_total,
             "reward_metrics_used": w_used,
             "reward_metrics_total": w_total,
-            "worst_risk": _worst_risk(entry, cfg),
+            "worst_risk": _worst_risk(entry, cfg, sector),
             "collected_at": entry.get("collected_at"),
             "error": entry.get("error"),
         })

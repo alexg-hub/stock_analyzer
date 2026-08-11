@@ -1438,25 +1438,16 @@ def risk_report(ticker: str, cfg: dict) -> dict:
     # group's aggregation auditable: a `worst_k` axis is only as good as the
     # anchors on the metrics it selects, and a metric every company trips shows
     # up here as a 0.0 sitting at the top of the list.
-    def _reading(key: str, value: float) -> float:
-        """The metric's 0-1 score exactly as the axis computed it.
-
-        Must go through the peer layer first: `worst_k` selects the lowest
-        readings, so a list built from absolute anchors would name a different
-        "worst three" than the ones actually driving the number beside it.
-        """
-        spec = specs[key]
-        if peers.is_enabled(cfg) and spec.get("sector_relative"):
-            rel = peers.relative_score(key, spec, sector, value, cfg)
-            if rel is not None:
-                return rel
-        return quality.normalize(value, spec["score"]["good"], spec["score"]["bad"])
-
+    #
+    # `quality.normalized_of` is the one definition, shared with `group_scores`
+    # itself: `worst_k` selects the lowest readings, so a list built from the
+    # absolute anchors would name a different "worst three" than the ones
+    # actually driving the number beside it.
     normalized = sorted(
-        ((k, _reading(k, v))
-         for k in specs
-         if specs[k].get("group") == "risk" and specs[k].get("score")
-         and (v := quality.scalar(values.get(k), specs[k])) is not None),
+        ((k, r) for k in specs
+         if specs[k].get("group") == "risk"
+         and (r := quality.normalized_of(k, specs[k], values.get(k), cfg,
+                                         sector)) is not None),
         key=lambda kv: kv[1])
     return {
         "ticker": ticker,
