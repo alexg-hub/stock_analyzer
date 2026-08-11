@@ -41,6 +41,19 @@ costs its own section of the message and nothing else. **Nothing is chained
 after it**, and no code path in the analyzer can start a model —
 `tests/test_no_model.py` is the guard.
 
+**`combined_report.py` is the one page that shows both halves.** The two are
+recorded in separate tables precisely so neither can move the other, which
+leaves no artifact you can read end to end -- this is it. Per ticker: the
+trigger, the ⭐ gate, the 🚫 exclusion, both plane coordinates, the recorded tier
+and conviction with its group breakdown, then the agent's stance / moat view /
+social read, then the tier-4 position. It **renders and never computes**: every
+figure is copied from a recorded file, every sentence is generated in Python,
+the agent's prose is quoted verbatim (inlined for one ticker, linked for many),
+and a test asserts it never calls `axis_scores`, `quality.evaluate`,
+`compute_quant_score` or `download`. A ticker nobody researched still gets a
+page saying so -- coverage is a finding. The one place enrichment may appear
+outside its own section is the header's coverage count, and a test pins that too.
+
 **The fifth surface is not a tier: the `enrich` skill.** Qualitative research —
 competitive position, whether a tripped rule is a sector artifact, what the
 filings and the tape say — runs from a Claude Code session over the MCP tools,
@@ -122,6 +135,13 @@ python research_report.py verdicts PGR RL
 # not a missing measurement, it is a cohort of one that `analyze` then grades.
 python enrichment.py record row.json
 python enrichment.py show TJX
+
+# The combined dossier: the graded half and the researched half on one page.
+# Reads recorded files only -- no network, no grading, nothing recomputed.
+# Scope decides the filename, so a subset run can never overwrite a wider one.
+python combined_report.py TJX                # -> TJX_<date>_combined.md
+python combined_report.py TJX GOOG           # -> subset_combined_<date>.md
+python combined_report.py --from-signals 7   # -> signals_combined_<date>.md
 
 # The risk/reward plane. Cached per ticker, so a re-run is instant. No Discord.
 # Each scope writes its OWN table/PNG/HTML -- a subset can never overwrite the

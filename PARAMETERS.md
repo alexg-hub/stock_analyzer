@@ -60,6 +60,7 @@ verdict exists before anything is posted.
 | Tier 2 — `fast` | `quality.annotate` in `run_scanners.main()` | **43** fast, over tier-1 hits | `info` + statements + cached closes |
 | Tier 3 — all stages | `research_report.deterministic_verdict` (`stage=None`) | **77** — fast *and* deep | + `collect_yahoo`, EDGAR |
 | Enrichment | `enrich` skill, in a session | none — a graded categorical record | web, IBKR MCP |
+| Combined dossier | `combined_report.py` / MCP `combined_report` | none — renders recorded files | **none** |
 | The plane | `universe_scan.py` | **43** fast, over all 503 | ~13 min, 4 calls/ticker |
 | Tier 4 — ledger | `portfolio_sim/` | grades recorded attributes | held tickers + SPY |
 
@@ -437,6 +438,7 @@ live, and this file is committed.
 | `enrichment.enabled` | `true` | enrichment.py | `false` makes `record` a no-op; the agent's judgment is then simply not on the record |
 | `enrichment.dir` | `"enrichment"` | enrichment.py | resolved inside `output/` |
 | `enrichment.csv` | `"enrichment.csv"` | enrichment.py | one row per `(scan_date, ticker)`, rewritten not appended |
+| `combined.dir` | `"combined"` | combined_report.py | dossiers; the filename carries the scope so a subset cannot overwrite a wider run |
 | `ibkr.enabled` | `false` | ibkr.py | **false** — with `reports: []` the 3 `ibkr.*` parameters would resolve to `{}` even if switched on |
 | `ibkr.host` | `"127.0.0.1"` | ibkr.py |  |
 | `ibkr.port` | `4001` | ibkr.py |  |

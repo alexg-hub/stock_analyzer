@@ -29,6 +29,7 @@ table, plus a prose report beside it that nothing in the pipeline reads.
 """
 
 import json
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
@@ -106,9 +107,20 @@ def enrichment_dir(cfg: dict, create: bool = True) -> Path:
 
 
 def enrichment_csv_path(cfg: dict, create: bool = True) -> Path:
-    """The enrichment table -- one row per (scan_date, ticker)."""
+    """The enrichment table -- one row per (scan_date, ticker).
+
+    An absolute path in config overrides the directory, as everywhere else here.
+    Unlike everywhere else here, its parent is created too: `create=True` means
+    "this path is about to be written", and an absolute override pointing at a
+    directory that does not exist yet otherwise fails deep inside `to_csv` with
+    an OSError naming pandas rather than the setting that caused it.
+    """
     path = Path(section(cfg).get("csv", "enrichment.csv"))
-    return path if path.is_absolute() else enrichment_dir(cfg, create) / path
+    if not path.is_absolute():
+        return enrichment_dir(cfg, create) / path
+    if create:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def report_path(ticker: str, scan_date: str, cfg: dict,
@@ -182,6 +194,12 @@ def normalize(row: dict) -> dict:
 
     out.setdefault("sources_n", len(row.get("sources") or []))
     out.setdefault("concerns_n", len(row.get("concerns") or []))
+    # Stamped here rather than asked for: provenance is the one field the caller
+    # has no reason to think about and every reason to want later -- "when was
+    # this judgment formed" is what separates a stale read from a current one,
+    # and `scan_date` cannot answer it (a name researched weeks after it fired
+    # shares the signal's date, not the research's).
+    out.setdefault("agent_date", date.today().isoformat())
     out["ticker"] = str(out.get("ticker", "")).upper()
     out["scan_date"] = str(out.get("scan_date", ""))
     return {c: out.get(c) for c in COLUMNS if c in out or c in REQUIRED}

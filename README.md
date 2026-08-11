@@ -83,6 +83,7 @@ Current screens:
 | `portfolio_sim/exits.py` | Tier 4's exit side: the double-top detector, the sell record, the Discord warning |
 | `run_scanner.bat` | Task Scheduler entry point — one command, all four tiers, one message |
 | `enrichment.py` | The agent's record: what the `enrich` skill concluded, keyed (scan_date, ticker), graded by tier 4 and unable to touch a score |
+| `combined_report.py` | The dossier: the graded half and the researched half on one page. Renders recorded files; computes nothing |
 | `tests/` | Invariant test suite + `run_all.py` runner (no test dependency; plain scripts) |
 
 Adding a new scanner = new module exposing `CONFIG_KEY`, `scan()`,
@@ -668,6 +669,7 @@ Plain scripts, no test dependency — each prints `OK`/`FAIL` per check and exit
 | `test_research_output.py` | nothing | Tier-3 output: the margin falls back to pretax exactly when Operating Income is absent and names its basis; an empty trailing period doesn't consume a slot; the chart renders for complete/bank/single-period/all-missing/no-data input without raising; `quality._statement_metrics` stays untouched by the fallback; verdict cards bind their chart, read figures from the facts file, and fit the embed budget |
 | `test_portfolio_sim.py` | nothing | Tier 4 on a synthetic panel and synthetic history: the entry price is `Open[t+1]` and agrees with `forward_trades` cell for cell; a re-`open` refreshes attributes but never erases a mark or re-freezes the recorded quality rule set; a signal whose entry bar has not traded stays `pending` and is in no statistic; `qr_*` distinguishes failed from not-evaluated; Mann-Whitney/Spearman/BH match hand-computed values; nothing under `min_n` is ever called significant, and every section (including `roadmap`) is present |
 | `test_enrichment.py` | nothing | The agent's record: no field can move a score (`conviction`/`tier`/`score`/`narrative_adj` rejected by name); an invalid row raises instead of recording; the table de-duplicates on `(scan_date, ticker)`; lists survive the CSV round trip; **absent enrichment yields no `en_*` columns at all**, and `en_*` is never protected by `mark_columns()` |
+| `test_combined_report.py` | nothing | The dossier renders and never computes: it calls no grading function and no download; a maximally bearish enrichment changes the graded block by **zero bytes** (the only line it may move is the header's coverage count); a missing half is marked rather than filled in; the three scopes cannot collide; re-running produces identical bytes |
 | `test_no_model.py` | nothing | The analyzer cannot invoke a model: no production `.py` or `.bat` runs `claude -p`, names it as a command, or passes `--allowedTools`/`--permission-mode`/`--session-id`; no config key selects a model; no model-authored number reaches a scored column |
 | `test_backtest_stats.py` | cached panel | `cohort_values` == the `collect_trades` path at several (wait, hold) cells; real rows re-derive from the panel at a nonzero delay; the trades CSV reconciles with the summary grid |
 | `test_path_equivalence.py` | **network** | Screening out of the bulk panel gives the same dates as the single-ticker download, plus the documented JNJ/MSFT/META cases |
@@ -828,6 +830,30 @@ explain it. A session governs its own tools, and that failure mode is gone.
 python enrichment.py show TJX          # what was recorded
 python enrichment.py record row.json   # the CLI equivalent of the MCP tool
 ```
+
+### The combined dossier
+
+The graded half and the researched half live in separate tables so that neither
+can move the other — which leaves nothing you can open and read end to end.
+`combined_report.py` is that page, and the MCP tool `combined_report` is the
+same thing from a session:
+
+```powershell
+python combined_report.py TJX                # one dossier, prose inlined
+python combined_report.py TJX GOOG           # several, prose linked
+python combined_report.py --from-signals 7   # the week's signals
+```
+
+Per ticker: the trigger and setup, the ⭐ quality result, the 🚫 exclusion, both
+plane coordinates and the quadrant, the recorded tier and conviction with its
+group breakdown, then the agent's stance / moat view / social read with its
+concerns, catalysts, disputed rules and sources, then what tier 4 has done with
+the position since.
+
+It **renders and never computes** — no network, no grading, every figure copied
+from a recorded file and every sentence generated in Python. Scope decides the
+filename, so a two-ticker run can never overwrite a whole-week one. A ticker
+nobody has researched is included and marked as such: coverage is worth seeing.
 
 ### The financial trend chart
 
@@ -1347,6 +1373,7 @@ small differences as noise.
 | `research.sec.*` | — | EDGAR user agent (must carry an email), forms, section size cap, XBRL concepts |
 | `enrichment.enabled` | `true` | Record what the `enrich` skill concludes; `false` makes `enrichment.record` a no-op |
 | `enrichment.dir` / `.csv` | `enrichment` / `enrichment.csv` | The agent's record and its table, resolved inside `output/` |
+| `combined.dir` | `combined` | Where combined dossiers are written, resolved inside `output/` |
 | `portfolio.enabled` | `true` | Run tier 4 at all; `false` makes every subcommand a no-op |
 | `portfolio.dir` | `portfolio` | Ledger + findings directory, resolved inside `output/` |
 | `portfolio.positions_csv` / `.findings_csv` / `.exits_csv` | `positions.csv` / `findings.csv` / `exits.csv` | The three tables, in that directory |

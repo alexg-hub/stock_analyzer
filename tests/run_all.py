@@ -29,6 +29,7 @@ TESTS = [
     ("test_portfolio_sim.py", "offline -- tier-4 ledger, marking, attribution"),
     ("test_enrichment.py", "offline -- the agent's record: graded, never a score"),
     ("test_no_model.py", "offline -- the analyzer cannot invoke a model"),
+    ("test_combined_report.py", "offline -- the dossier renders, never computes"),
     ("test_signal_contract.py", "cached panel -- signal tiers, alert, hand-off"),
     ("test_combined_alert.py", "cached panel -- all four tiers in one message"),
     ("test_backtest_stats.py", "cached panel -- statistics and trade rows"),
