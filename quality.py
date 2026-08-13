@@ -848,6 +848,29 @@ def format_value(value, spec: dict) -> str:
     return formatter(scalar(value, spec))
 
 
+# A series parameter reduced to the one number that was actually gated and
+# scored. `format_value` renders the whole `[(year, value)]` list, which is what
+# the hits frame and the Discord card hold -- but `_facts` stores `quant_metrics`
+# already flattened to scalars, so handing one of those to `_fmt_series` yields
+# "n/a" for a value that is present and was scored. Anything reading a facts
+# file wants this instead.
+_SCALAR_FORMATS = {"pct_series": "pct", "money_series": "money"}
+
+
+def format_scalar(value, spec: dict) -> str:
+    """Render an already-flattened parameter value, per its registry format.
+
+    Only the two *series* formats are remapped; every other format is passed
+    through unchanged. Defaulting the lookup to "number" instead would silently
+    strip the "%" from every plain `pct` parameter.
+    """
+    raw = spec.get("format", "number")
+    kind = _SCALAR_FORMATS.get(raw, raw)
+    if kind == "money":
+        return fmt_compact(value) if _is_num(value) else "n/a"
+    return _FORMATTERS.get(kind, _FORMATTERS["number"])(scalar(value, spec))
+
+
 def embed_fields(row, cfg: dict) -> list[dict]:
     """The displayable parameters as Discord embed fields (inline = a grid).
 

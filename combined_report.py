@@ -16,9 +16,22 @@ It therefore does **no network I/O and no grading at all**. It reads:
 
   * `signals.csv` / `on_demand_scans_results.csv` -- the trigger, tier 2, the
     plane coordinates, and the recorded verdict
-  * `<TICKER>_<scan_date>_facts.json` -- the quant score and its group breakdown
+  * `<TICKER>_<scan_date>_facts.json` -- the quant score, its group breakdown,
+    and `quant_metrics`: every parameter value the score was computed from
   * `enrichment.csv` + `<TICKER>_<scan_date>.md` -- the agent's judgment
   * `positions.csv` -- what tier 4 has done with it since
+
+The parameter table is the reason this page can be read on its own. A group
+score of 0.34 is not checkable -- P/E 17.96 against a `max 37` gate is. So every
+recorded value is printed beside the threshold it was compared against, which is
+the same discipline `research_report.risk_report` and the `risk_research` MCP
+bundle already follow. The *values* come from the facts file; only the label,
+group, gate and number format are resolved from `quality.parameters`, which is
+config lookup rather than grading -- pass/fail is read back from the recorded
+`quality_missing` and veto reason lists, never recomputed. A parameter the
+registry knows but the scan never resolved prints `n/a — not evaluated`, because
+that is a different statement from "failed" and the distinction is load-bearing
+everywhere else in this project.
 
 A missing half is reported as missing rather than filled in. A ticker nobody
 enriched still gets a page, saying so: coverage is itself worth seeing, and
@@ -34,8 +47,11 @@ from pathlib import Path
 import pandas as pd
 
 import enrichment
+import quality
 from scanner_common import (
     CONVICTION_COL,
+    DEEP_VETO_COL,
+    DEEP_VETO_REASONS_COL,
     QUADRANT_COL,
     QUALITY_COL,
     QUALITY_MISSING_COL,
@@ -237,11 +253,21 @@ def _deterministic_block(entry: dict) -> list[str]:
         quality = (f"failed {len(missing)} rule(s)"
                    + (f": {', '.join(missing)}" if missing else ""))
 
-    vetoed = str(row.get(VETO_COL)).lower() == "true"
-    reasons = _listed(row.get(VETO_REASONS_COL))
-    exclusion = (f"🚫 excluded — {', '.join(reasons)}" if vetoed
-                 else "clean" if row.get(VETO_COL) is not None
-                 else "not evaluated")
+    # Both pairs, because they are written at different times and either alone
+    # is a wrong answer. `Veto` comes from the scan; `Deep Veto` is written
+    # hours later by tier 3 over the `deep` stage, which is where
+    # dilution_veto, eps_collapse_veto and every SEC filing flag live. Reading
+    # only the fast pair reported a name excluded on two deep rules as "clean",
+    # while the parameter table below it correctly showed both as 🚫.
+    flags = [row.get(VETO_COL), row.get(DEEP_VETO_COL)]
+    reasons = list(dict.fromkeys(_listed(row.get(VETO_REASONS_COL))
+                                 + _listed(row.get(DEEP_VETO_REASONS_COL))))
+    if any(str(f).lower() == "true" for f in flags):
+        exclusion = "🚫 excluded" + (f" — {', '.join(reasons)}" if reasons else "")
+    elif any(f is not None for f in flags):
+        exclusion = "clean"
+    else:
+        exclusion = "not evaluated"
 
     out += ["",
             f"- **Quality gate**: {quality}",
@@ -267,6 +293,94 @@ def _deterministic_block(entry: dict) -> list[str]:
     if facts.get("chart"):
         out.append(f"- **Financials chart**: `{facts['chart']}`")
     return out
+
+
+def _gate_text(gate: dict | None) -> str:
+    """The threshold a parameter was compared against, as the config states it."""
+    if not gate:
+        return "—"
+    parts = []
+    for key in ("min", "max"):
+        if gate.get(key) is not None:
+            parts.append(f"{key} {_clean(gate[key])}")
+    if gate.get("increasing"):
+        parts.append("increasing")
+    return ", ".join(parts) or "—"
+
+
+def _parameter_rows(entry: dict, cfg: dict) -> list[tuple]:
+    """One row per registry parameter: label, value, gate, verdict, group.
+
+    Values are read from the recorded `quant_metrics`; the label, gate and
+    number format come from the registry. Nothing is graded here -- the verdict
+    column is reconstructed from the gate-failure and veto-reason lists the scan
+    already recorded, so a parameter reads exactly as it read on the night.
+    """
+    facts, row = entry["facts"], entry["scan_row"]
+    values = facts.get("quant_metrics") or {}
+    if not values:
+        return []
+
+    failed = set(_listed(facts.get("quality_missing"))
+                 or _listed(row.get(QUALITY_MISSING_COL)))
+    vetoed = set(_listed(facts.get("veto_reasons"))
+                 + _listed(row.get(VETO_REASONS_COL))
+                 + _listed(row.get(DEEP_VETO_REASONS_COL)))
+
+    rows = []
+    for key, spec in quality.parameters(cfg).items():
+        present = key in values and values[key] is not None
+        value = quality.format_scalar(values[key], spec) if present else "n/a"
+        gate = spec.get("gate")
+        if not present:
+            verdict = "not evaluated"
+        elif key in vetoed:
+            verdict = "🚫 veto"
+        elif spec.get("veto"):
+            verdict = "clean"
+        elif key in failed:
+            verdict = "✗ fail"
+        elif gate:
+            verdict = "ok"
+        else:
+            verdict = "—"
+        rows.append((quality.label_of(key, spec), value, _gate_text(gate),
+                     verdict, spec.get("group") or "—"))
+    return rows
+
+
+def _parameters_block(entry: dict, cfg: dict, inline: bool) -> list[str]:
+    """Every recorded parameter beside the threshold it was compared against.
+
+    Grouped in registry order, which is also the order the Discord card uses, so
+    a reader moving between the two sees the same sequence.
+    """
+    rows = _parameter_rows(entry, cfg)
+    if not rows:
+        return ["", "_No parameter values recorded for this scan, so there is "
+                    "nothing to show beneath the score._"]
+
+    body = []
+    for group in dict.fromkeys(r[4] for r in rows):
+        body += ["", f"**{group.replace('_', ' ')}**", "",
+                 "| Parameter | Value | Gate | |", "|---|---|---|---|"]
+        body += [f"| {label} | {value} | {gate} | {verdict} |"
+                 for label, value, gate, verdict, g in rows if g == group]
+
+    # Deliberately phrased against *today's* registry rather than the scan's.
+    # The score breakdown above counts what was scored on the night; this counts
+    # what the registry asks for now, and the two differ whenever a parameter has
+    # been added since. Saying so is more useful than hiding it -- a large gap is
+    # the signal that a recorded verdict predates the current shape and should
+    # not be compared with a fresh one.
+    evaluated = sum(1 for r in rows if r[3] != "not evaluated")
+    head = (f"**Parameters** — {evaluated} of the {len(rows)} parameters in "
+            f"today's registry carry a value on this scan")
+    if inline:
+        return ["", head] + body
+    return ["", head, "",
+            "<details><summary>All parameter values</summary>"] + body + [
+            "", "</details>"]
 
 
 def _enrichment_block(entry: dict, inline_prose: bool) -> list[str]:
@@ -350,6 +464,7 @@ def render(entries: list[dict], cfg: dict, scope: str) -> str:
     inline = len(entries) == 1
     for entry in entries:
         lines += _deterministic_block(entry)
+        lines += _parameters_block(entry, cfg, inline)
         lines += _enrichment_block(entry, inline)
         lines += _position_block(entry)
         lines += ["", "---"]

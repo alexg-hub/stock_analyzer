@@ -34,6 +34,7 @@ from _harness import Checks, config
 
 import combined_report
 import enrichment
+import quality
 
 c = Checks("combined report")
 
@@ -69,6 +70,18 @@ pd.DataFrame([{
         "growth": {"score": 0.81, "metrics_used": 3, "metrics_total": 3},
         "risk": {"score": 0.29, "metrics_used": 10, "metrics_total": 12},
     },
+    # `_facts` stores these already flattened to scalars, even for the
+    # parameters whose registry format is a *_series -- that mismatch is what
+    # the rendering checks below exist for. `cash_runway_quarters` is
+    # deliberately absent: "not evaluated" must not read as "failed".
+    "quant_metrics": {
+        "trailingPE": 21.5,
+        "roe": 18.25,
+        "operating_margin": 22.0,
+        "fcf": 4200000000.0,
+        "altman_z": 4.1,
+    },
+    "quality_missing": ["operating_margin"],
     "source": "signal",
 }), encoding="utf-8")
 
@@ -103,6 +116,79 @@ c.ok("a ticker with no scan record collects nothing", not unknown["scan_row"])
 c.ok("...and renders as 'never screened' rather than blank",
      "never been screened" in combined_report.render(
          [unknown], cfg, combined_report.SCOPE_TICKER))
+
+
+# --------------------------------------------------------------------------
+c.section("the parameter values behind the score")
+
+# A group score of 0.29 is not checkable; the value beside its threshold is.
+# Everything here is keyed through `quality.label_of` rather than a literal
+# label, so retuning a label in config cannot fail these.
+specs = quality.parameters(cfg)
+by_label = {r[0]: r for r in combined_report._parameter_rows(entry, cfg)}
+
+
+def prow(key):
+    """The rendered row for one registry key: (label, value, gate, verdict)."""
+    return by_label.get(quality.label_of(key, specs[key]))
+
+
+c.ok("every parameter the score used appears with its value",
+     all(prow(k) and prow(k)[1] != "n/a"
+         for k in ("trailingPE", "roe", "operating_margin", "fcf")))
+c.ok("the threshold it was compared against is printed beside it",
+     all(str(v) in prow("roe")[2]
+         for v in (specs["roe"].get("gate") or {}).values()),
+     "a value without its gate is not checkable")
+
+# The two rendering bugs this table shipped with, pinned so they cannot return.
+c.ok("a *_series parameter renders its flattened scalar, not n/a",
+     prow("operating_margin")[1] != "n/a",
+     "_facts stores a scalar; feeding it to the series formatter yielded n/a "
+     "for a value that was present and scored")
+c.ok("a plain pct parameter keeps its unit",
+     "%" in prow("roe")[1],
+     "defaulting the scalar-format lookup to 'number' silently stripped it")
+
+c.ok("a parameter with no recorded value reads 'not evaluated', not a failure",
+     prow("cash_runway_quarters")[3] == "not evaluated",
+     "missing is not failing -- the distinction the whole registry rests on")
+
+# The load-bearing one: pass/fail is read back from the recorded lists, never
+# recomputed. Move the value to either extreme and the verdict must not budge,
+# because the record -- not today's arithmetic -- is what the page reports.
+moved = copy.deepcopy(entry)
+verdicts = set()
+for value in (-999.0, 999.0):
+    moved["facts"]["quant_metrics"]["operating_margin"] = value
+    verdicts.add({r[0]: r for r in combined_report._parameter_rows(moved, cfg)}
+                 [quality.label_of("operating_margin", specs["operating_margin"])][3])
+c.ok("the verdict comes from the recorded result, not from the value",
+     verdicts == {prow("operating_margin")[3]} and len(verdicts) == 1,
+     "re-deriving pass/fail here would silently re-grade an old verdict")
+
+c.ok("the table reaches the rendered page", "| Parameter | Value | Gate |" in body)
+
+# A deep-stage veto is written by tier 3 hours after the scan row, into its own
+# column pair. Reading only the fast pair reported VTR -- excluded on
+# dilution_veto and eps_collapse_veto -- as "Exclusion: clean", while the
+# parameter table two lines below correctly marked both 🚫.
+deep = copy.deepcopy(entry)
+deep["scan_row"].update({"Veto": False, "Veto Reasons": json.dumps([]),
+                         "Deep Veto": True,
+                         "Deep Veto Reasons": json.dumps(["altman_z"])})
+deep_body = combined_report.render([deep], cfg, combined_report.SCOPE_TICKER)
+c.ok("a deep-stage veto is not reported as clean",
+     "excluded" in deep_body and "altman_z" in deep_body,
+     "the fast pair alone says False; the exclusion happened at the deep stage")
+c.ok("...and the summary agrees with the parameter table",
+     ("clean" not in deep_body.split("**Parameters**")[0].split("Exclusion")[1]
+      .splitlines()[0]),
+     "the headline contradicting its own table is worse than either alone")
+c.ok("a multi-ticker report collapses the table instead of inlining it",
+     "<details><summary>All parameter values</summary>" in combined_report.render(
+         [entry, copy.deepcopy(entry)], cfg, combined_report.SCOPE_SUBSET),
+     "73 rows per ticker would bury the comparison a subset report exists for")
 
 
 # --------------------------------------------------------------------------

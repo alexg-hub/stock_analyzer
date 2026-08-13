@@ -54,6 +54,46 @@ and a test asserts it never calls `axis_scores`, `quality.evaluate`,
 page saying so -- coverage is a finding. The one place enrichment may appear
 outside its own section is the header's coverage count, and a test pins that too.
 
+**It prints every parameter beside the threshold it was compared against.** A
+group score of 0.34 is not checkable; `P/E 17.96` against a `max 37` gate is. So
+`_parameters_block` renders the whole registry per ticker, grouped in registry
+order -- values from the facts file's `quant_metrics`, and only the label, group,
+gate and number format resolved from `quality.parameters`, which is config lookup
+rather than grading. **Pass/fail is read back from the recorded
+`quality_missing` and veto-reason lists, never re-derived**, so moving a value
+cannot change the verdict the page reports; a test moves one to both extremes and
+asserts the verdict does not budge. A parameter the registry knows but the scan
+never resolved prints `not evaluated`, which is how a verdict predating a
+parameter announces itself -- CVX 2026-08-07 shows all nine `market_risk`
+parameters that way. Inline for one ticker, collapsed in `<details>` for many,
+the same rule the prose already follows. Two rendering traps, both pinned:
+`quant_metrics` stores series parameters **already flattened to scalars**, so
+`format_value` hands them to the series formatter and yields `n/a` for a value
+that was present and scored -- `quality.format_scalar` is the one to use; and its
+format lookup must default to *the format itself*, not to `"number"`, or every
+plain `pct` parameter silently loses its unit.
+
+**The exclusion line reads both veto column pairs.** `Veto` is written by the
+scan, `Deep Veto` hours later by tier 3 over the `deep` stage -- where
+`dilution_veto`, `eps_collapse_veto` and every SEC filing flag live. Reading only
+the fast pair reported VTR, excluded on two deep rules, as `Exclusion: clean`
+while the parameter table directly beneath it marked both 🚫. A headline that
+contradicts its own table is worse than either error alone; a test pins it.
+
+**It writes into `output/reports/`, which is the one report directory.** That
+directory holds tier 3's recorded computation per ticker -- `_facts.json` and
+`_financials.png` -- and the dossier that renders them, so a page sits beside its
+own inputs. `combined.dir` was pointed there on 2026-08-12; it had been its own
+`output/combined/`, which meant the only readable artifact in the project lived
+apart from everything it quoted. Nothing globs either path, so the move was a
+config value. Note `output/reports/` is *not* a place anything writes prose
+directly: the narrative deep-dive used to write `<T>_<date>.md` there, that pass
+was removed on 2026-08-11, and its `write_report` outlived it by a day -- called
+from nowhere while 13 stale files sat in the directory looking current, each
+headed with a `quant N + narrative M` conviction the scoring no longer produces.
+Both are gone. Enrichment prose stays in `output/enrichment/` beside the
+`enrichment.csv` tier 4 joins on; the dossier inlines it verbatim.
+
 **The fifth surface is not a tier: the `enrich` skill.** Qualitative research —
 competitive position, whether a tripped rule is a sector artifact, what the
 filings and the tape say — runs from a Claude Code session over the MCP tools,
@@ -139,9 +179,10 @@ python enrichment.py show TJX
 # The combined dossier: the graded half and the researched half on one page.
 # Reads recorded files only -- no network, no grading, nothing recomputed.
 # Scope decides the filename, so a subset run can never overwrite a wider one.
-python combined_report.py TJX                # -> TJX_<date>_combined.md
-python combined_report.py TJX GOOG           # -> subset_combined_<date>.md
-python combined_report.py --from-signals 7   # -> signals_combined_<date>.md
+# Lands in output/reports/ beside the facts.json and chart it renders from.
+python combined_report.py TJX                # -> reports/TJX_<date>_combined.md
+python combined_report.py TJX GOOG           # -> reports/subset_combined_<date>.md
+python combined_report.py --from-signals 7   # -> reports/signals_combined_<date>.md
 
 # The risk/reward plane. Cached per ticker, so a re-run is instant. No Discord.
 # Each scope writes its OWN table/PNG/HTML -- a subset can never overwrite the
@@ -1026,8 +1067,10 @@ real send.
     that fails silently at runtime.
 - **Every generated file goes to `output/`** via
   `scanner_common.output_dir()` — logs, `latest_hits.json`, the cached price
-  panel, all backtest tables/charts, the tier-3 reports (`output/reports/`), the
-  signal history (`output/history/`), the deep-dive step logs
+  panel, all backtest tables/charts, the tier-3 facts, charts and the combined
+  dossier that renders them (`output/reports/` — the one report directory), the
+  signal history (`output/history/`), the enrichment record
+  (`output/enrichment/`), the deep-dive step logs
   (`output/logs/`) and the tier-4 ledger and findings (`output/portfolio/`).
   There are no exceptions; Google Drive
   was one until 2026-07-26 and was removed, partly because Claude Code cannot

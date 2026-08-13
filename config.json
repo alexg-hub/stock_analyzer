@@ -1346,6 +1346,6 @@
         "csv": "enrichment.csv"
     },
     "combined": {
-        "dir": "combined"
+        "dir": "reports"
     }
 }

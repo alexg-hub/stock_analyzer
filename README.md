@@ -844,6 +844,12 @@ python combined_report.py TJX GOOG           # several, prose linked
 python combined_report.py --from-signals 7   # the week's signals
 ```
 
+All of it lands in **`output/reports/`**, which is the one report directory —
+the dossier sits beside the `_facts.json` and `_financials.png` it renders from.
+It had its own `output/combined/` until 2026-08-12, which put the only readable
+artifact in the project in a different folder from everything it quotes. Change
+it with `combined.dir` in `config.json`.
+
 Per ticker: the trigger and setup, the ⭐ quality result, the 🚫 exclusion, both
 plane coordinates and the quadrant, the recorded tier and conviction with its
 group breakdown, then the agent's stance / moat view / social read with its
