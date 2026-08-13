@@ -25,6 +25,7 @@ SINGLE_BACKTESTS = {
     "breakout_strategy": "backtest_breakout.py",
     "pullback_strategy": "backtest_pullback.py",
     "reclaim_strategy": "backtest_reclaim.py",
+    "trend_strategy": "backtest_trend.py",
 }
 
 
@@ -222,9 +223,10 @@ def register(mcp) -> None:
                         start: str | None = None, end: str | None = None) -> dict:
         """Replay one screen over one ticker's history, day by day.
 
-        `screen` is a config key: breakout_strategy, pullback_strategy or
-        reclaim_strategy. Writes output/backtest_*.csv and .png. Always
-        downloads (no cache), so it is a job. Never touches Discord.
+        `screen` is a config key: breakout_strategy, pullback_strategy,
+        reclaim_strategy or trend_strategy. Writes output/backtest_*.csv and
+        .png. Always downloads (no cache), so it is a job. Never touches
+        Discord.
         """
         script = SINGLE_BACKTESTS.get(screen)
         if script is None:

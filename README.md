@@ -43,7 +43,7 @@ the market actually did:
 
 | tier | what it asks | how | output |
 |---|---|---|---|
-| **1 — technical** | Is the chart set up? | `breakout_scanner` / `sma_pullback` / `sma_reclaim`, nightly over the 503 alerting names | `Setup` (`full`/`partial`) + `Missing` |
+| **1 — technical** | Is the chart set up? | `breakout_scanner` / `sma_pullback` / `sma_reclaim` / `trend_line`, nightly over the 503 alerting names | `Setup` (`full`/`partial`) + `Missing` |
 | **2 — quality** | Are the fundamentals sound? | the `fast` half of the `quality` registry over the tier-1 hits only, one Yahoo pass | `Quality` (the ⭐ badge) + `Quality Missing` |
 | **3 — verdict** | How does the *business* grade out? | the `deep` half of the same registry, weighted to 0-100 → a tier and a conviction. Deterministic, inside the nightly scan, and nothing revises it | a tier/conviction verdict + `_facts.json` + the financials chart |
 | **4 — portfolio** | Was any of it *right*? | `portfolio_sim`: buy every recorded signal at the next open, grade every recorded attribute against the realized return, and watch the book for a double-top exit | `output/portfolio/positions.csv` + `findings.csv` + `exits.csv` |
@@ -90,12 +90,13 @@ Current screens:
 | `breakout_scanner.py` | Breakout screen module (condition math, alert section, hit chart) |
 | `sma_pullback.py` | SMA-pullback screen module (same shape) |
 | `sma_reclaim.py` | SMA-reclaim screen module (same shape) |
+| `trend_line.py` | Near-linear multi-month uptrend screen module (same shape) |
 | `scanner_common.py` | Shared infra: config, tickers, downloads, statement access, Discord |
 | `quality.py` | **The one quality check**: the parameter registry, its resolvers, the gates (tier 2's ⭐) and the weighted 0-100 score (tier 3's anchor) |
 | `ibkr.py` | IBKR over the TWS API (`ib_async`) — ratios and market stats, optional, never account data |
 | `migrate_config.py` | One-shot: proves the unified `quality` section reproduces the two it replaced |
 | `charts.py` | Shared chart rendering (palette + per-screen chart builders) |
-| `backtest_breakout.py` / `backtest_pullback.py` / `backtest_reclaim.py` | Single-ticker historical validators |
+| `backtest_breakout.py` / `backtest_pullback.py` / `backtest_reclaim.py` / `backtest_trend.py` | Single-ticker historical validators |
 | `backtest_universe.py` | Universe-wide profit backtest: every screen × all history, buy the trigger / sell N days later |
 | `tune_screen.py` | Parameter tuning: sweep one screen's thresholds, scored against the baseline **and** against cases that must keep firing |
 | `research_report.py` | Tier 3: the candidate gate, the deterministic verdict, report archive, Discord verdict cards |
@@ -230,14 +231,86 @@ First crosses of a long-term SMA are whipsaw-prone by nature — expect some
 signals to fail back below the line; this is a watchlist alert, not an
 entry system.
 
+## Screen 4: a near-linear multi-month uptrend
+
+> **Currently disabled** (`trend_strategy.enabled: false`, since 2026-08-13) —
+> shipped switched off so it can be measured before it is acted on. On the
+> 904-name cached panel over 3 years it produces **428 signals** (0.57 a night,
+> max 5, 329 distinct tickers) and reads **below** a random entry: excess
+> **−1.79** over 30 days (mean +0.48% against a +2.27% baseline) and **−2.22**
+> over 60. As with reclaim, **`enabled` silences the alert only** —
+> `backtest_universe.py` and `tune_screen.py` deliberately still run it.
+
+The other three screens fire on a one-day event. This one asks a question about
+the shape of the whole year: has the stock been grinding up something close to a
+straight line for the better part of it? A least-squares fit of the trailing
+`trend_window_days` (default 210 ≈ 10 months) answers that, and the numbers the
+fit produces *are* the three knobs — the angle, the tightness around the line,
+and the window itself as the duration.
+
+The fit runs on **log price** by default (`fit_on_log_price`): a constant-percent
+grower is a straight line there, which is what a linear uptrend means for an
+equity over ten months, and the residual is then a scale-free fraction that reads
+directly as "percent away from the line".
+
+Conditions (parameter names refer to the `trend_strategy` section):
+
+1. **Angle** — the fitted line's annualized slope is between
+   `min_annual_slope_pct` and `max_annual_slope_pct`. Mandatory. The ceiling
+   earns its keep: a parabolic blow-off scores a *very* high r², because r² rises
+   with slope for a given noise level, so linearity alone will not reject one.
+   Set the ceiling to `null` to drop it.
+2. **Linearity** — the fit's r² is at least `min_r_squared`.
+3. **Volatility around the line** — the residual standard deviation is at most
+   `max_residual_pct` of price. This is the "distance from the line" measure, and
+   it counts every bar in the window rather than just today's.
+4. **Not extended** (optional, off by default) — when `max_last_dev_pct` is set,
+   today's close is within that fraction of the fitted line, so a name that has
+   torn away from its own trend doesn't qualify while it is stretched.
+5. **Fresh qualification** (optional, `alert_only_on_new_trend`) — the signal is
+   the day the trend *first* qualifies, not every day it holds.
+
+Point 5 is the whole difference between this screen and the other three. A
+ten-month trend is a **state** that stays true for months: alerting on the state
+puts ~53 tickers a night in the message and gives the backtest no dated entry to
+score, while alerting on the transition is under one a night. The trend re-arms —
+if it breaks and later re-forms, that is a new signal.
+
+Three things about that transition are load-bearing, and each was wrong once:
+
+- **The angle floor and ceiling are not symmetric.** The floor is a qualifier; a
+  trend can begin by getting steep enough. The ceiling is a *disqualifier*,
+  applied to the signal rather than to the state freshness watches. Folded in, it
+  fired on the day a hot trend *cooled* through the bar — a deceleration entry
+  dressed as a trend entry, and **18% of all signals**, against 0% that ever
+  fired by crossing the floor upward.
+- **A transition needs something to transition from.** On the first bar with a
+  full window — and on the first bar after an interior `Close` hole rolls out of
+  one — the previous day has no fit at all, so "not in trend yesterday, in trend
+  today" is an artefact of where the data starts. Without that guard a hole
+  manufactures a phantom trend exactly `window` bars later, and **116 of the 904
+  tickers** on the 5-year panel carry one.
+- **The two tiers are armed independently.** Gating both off one combined state
+  let the far wider control-cohort door swallow a trend before it tightened: 33
+  signals against 1512 control rows, from a rule worth 656 on its own.
+
+**The screen stays strict**, like the pullback screen: every alerted row is
+`Setup == "full"`. Its `partial_mask` — the angle holding while up to
+`max_partial_fails` confirmations fail — is a **backtest-only control cohort**,
+never sent. That cohort is the measurement the screen exists to justify: it is
+the same trend without the linearity requirement, so comparing the two says
+whether demanding a straight line buys anything. So far it does not (the control
+reads −0.91 over 30 days against the strict cohort's −1.79), which is exactly the
+kind of finding it is there to surface.
+
 ## Signal tiers
 
 There is one signal list per screen. `Setup` grades it:
 
-| tier | breakout | pullback | reclaim |
-|---|---|---|---|
-| `full` | all 4 conditions | all conditions (the only tier) | every confirmation held |
-| `partial` | exactly 3 of 4 (+ proximity guard when the breakout leg failed) | — never; this screen stays strict | fresh cross out of a downtrend, 1–2 confirmations failing |
+| tier | breakout | pullback | reclaim | trend |
+|---|---|---|---|---|
+| `full` | all 4 conditions | all conditions (the only tier) | every confirmation held | all conditions (the only tier) |
+| `partial` | exactly 3 of 4 (+ proximity guard when the breakout leg failed) | — never; this screen stays strict | fresh cross out of a downtrend, 1–2 confirmations failing | — never; this screen stays strict |
 
 Both tiers are alerted together, sorted full-first, and both are carried into
 `output/latest_hits.json` for tier 3. A partial card uses the grey side bar and
@@ -570,7 +643,7 @@ python backtest_pullback.py --ticker MSFT --start 2024-01-01 --end 2025-06-30
 python backtest_reclaim.py  --ticker META --start 2023-01-01 --end 2023-12-31
 ```
 
-`run_backtests.bat` runs all three default validation cases in one go and
+`run_backtests.bat` runs all four default validation cases in one go and
 writes their combined step-by-step output to `output/backtest_log.txt`
 (overwritten each run) — separate from the nightly production
 `output/scanner_log.txt`.
@@ -1343,6 +1416,16 @@ small differences as noise.
 | `reclaim_strategy.sma_slope_lookback_days` | `63` | Lookback for the optional SMA-slope floor |
 | `reclaim_strategy.min_sma_slope_pct` | `null` | Optional slope floor (e.g. `-0.02`); `null` = off |
 | `reclaim_strategy.alert_only_on_cross` | `true` | Alert only on the day the close first crosses the level |
+| `trend_strategy.enabled` | `false` | Run the near-linear trend screen **in the nightly alert**; off since 2026-08-13 (unmeasured at first, and reads below baseline — see Screen 4). The backtest and tuner ignore this flag |
+| `trend_strategy.trend_window_days` | `210` | Fit window in trading days (~10 months); this is the **duration** knob |
+| `trend_strategy.fit_on_log_price` | `true` | Fit `log(Close)` so a constant-% grower is a straight line; `false` fits raw price, normalizing slope and residual by the window's mean |
+| `trend_strategy.min_annual_slope_pct` | `0.2` | Minimum annualized slope — the **angle** floor, a qualifier |
+| `trend_strategy.max_annual_slope_pct` | `0.8` | Maximum annualized slope, rejecting parabolic blow-offs r² alone admits. A **disqualifier**, never a trigger; `null` = no ceiling |
+| `trend_strategy.min_r_squared` | `0.85` | Minimum r² of the fit — how *linear* the path has to be |
+| `trend_strategy.max_residual_pct` | `0.08` | Max residual std as a fraction of price — the **volatility around the line** knob |
+| `trend_strategy.max_last_dev_pct` | `null` | Optional: today's close must be within this fraction of the fitted line (not extended). `null` = off. Note switching it on makes the state flicker, so one trend can signal repeatedly |
+| `trend_strategy.max_partial_fails` | `1` | Confirmations allowed to fail in the **backtest-only control cohort**; never affects the alert. `0` = no control cohort |
+| `trend_strategy.alert_only_on_new_trend` | `true` | Signal on the day the trend first qualifies, not every day it holds |
 | `charts.enabled` | `true` | Attach a chart image per signal to the Discord alert |
 | `charts.partial_charts` | `true` | Also chart `partial` setups (set `false` to chart full setups only) |
 | `charts.lookback_days` | `250` | Trading days shown in alert charts |
@@ -1357,7 +1440,7 @@ small differences as noise.
 | `backtest.benchmark_ticker` | `SPY` | Buy-and-hold benchmark, downloaded alongside the universe |
 | `backtest.cache_path` | `backtest_universe_cache.pkl` | Cached price panel, resolved inside `output/`; `--refresh` re-downloads |
 | `backtest.cache_max_age_days` | `1` | Reuse the cache only while it is younger than this |
-| `backtest.screens` | all three | Config keys of the screens to include |
+| `backtest.screens` | all four | Config keys of the screens to include |
 | `backtest.output.*` | — | Trades CSV, summary CSV, bar-chart path, `grid_chart_path` for the wait × hold heatmap, chart DPI |
 | `tuning.years` | `5` | Analysis window `tune_screen.py` scores over |
 | `tuning.holding_days` | `[30, 60]` | Holding periods; the first is the default scored in the tables, all are used by `delay` mode |

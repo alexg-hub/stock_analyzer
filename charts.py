@@ -15,8 +15,10 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 from matplotlib.colors import LinearSegmentedColormap
+from matplotlib.ticker import ScalarFormatter
 
 from scanner_common import fmt_compact
 
@@ -246,6 +248,103 @@ def plot_pullback(table: pd.DataFrame, strategy: dict, ticker: str,
         subtitle += (f", reversal candle body<={strategy.get('max_candle_body_pct', 0.0):.1%}"
                      f" range>={strategy.get('min_candle_range_pct', 0.0):.1%}")
     _title(ax_p, f"{ticker} -- pullback to rising {sma_days}-day SMA", subtitle)
+
+    fig.savefig(out_path, dpi=dpi, bbox_inches="tight", facecolor=C["surface"])
+    plt.close(fig)
+    print(f"Chart saved to {out_path}")
+
+
+# --------------------------------------------------------------------------
+# Near-linear trend chart
+# --------------------------------------------------------------------------
+
+def _fit_line(table: pd.DataFrame, window: int, use_log: bool):
+    """The fitted line and its +/-1 residual band, as three aligned series.
+
+    Anchored on the last SIGNAL row when there is one -- the line you would
+    have drawn on the day the screen fired -- and otherwise on the last row
+    with a usable fit. Returns (index, line, low, high) or None when no row in
+    the table has a fit at all (a table shorter than the window).
+    """
+    usable = table["Slope"].notna()
+    if not usable.any():
+        return None
+    hits = table[table["SIGNAL"].fillna(False) & usable]
+    anchor = hits.index[-1] if not hits.empty else table.index[usable][-1]
+
+    end = table.index.get_loc(anchor)
+    span = table.index[max(0, end - window + 1):end + 1]
+    row = table.loc[anchor]
+    # x runs 0..n-1 across the window, exactly as the fit was computed.
+    x = np.arange(len(span), dtype="float64") + (window - len(span))
+    fitted = row["Intercept"] + row["Slope"] * x
+    resid = row["ResidPct"] / 100.0
+
+    if use_log:
+        line = np.exp(fitted)
+        low, high = line * np.exp(-resid), line * np.exp(resid)
+    else:
+        line = fitted
+        low, high = line * (1 - resid), line * (1 + resid)
+    return span, line, low, high
+
+
+def plot_trend(table: pd.DataFrame, strategy: dict, ticker: str,
+               out_path: Path, dpi: int = 150) -> None:
+    """Price + r-squared chart of the linear-trend calc table
+    (columns as produced by trend_line.build_calc_table)."""
+    window = strategy["trend_window_days"]
+    use_log = strategy.get("fit_on_log_price", True)
+    min_r2 = strategy["min_r_squared"]
+    max_resid = strategy["max_residual_pct"]
+    hits = table[table["SIGNAL"].fillna(False)]
+
+    fig, ax_p, ax_r = _two_panel_figure()
+
+    # -- price panel: the fitted line, its residual band, close, signals --
+    fit = _fit_line(table, window, use_log)
+    if fit is not None:
+        span, line, low, high = fit
+        ax_p.fill_between(span, low, high, color=C["grid"], alpha=0.75,
+                          label="+/-1 residual", linewidth=0)
+        ax_p.plot(span, line, color=C["ink2"], linewidth=1.4, linestyle="--",
+                  label=f"{window}d fitted line")
+    ax_p.plot(table.index, table["Close"], color=C["close"], linewidth=2,
+              label="close")
+    _mark_signals(ax_p, hits, "Close", "trend signal")
+    ax_p.set_ylabel("Price (USD)", color=C["ink2"], fontsize=10)
+    if use_log:
+        # The fit is a straight line in log space, so this is the axis on which
+        # "near-linear" is the thing being judged by eye.
+        ax_p.set_yscale("log")
+        ax_p.yaxis.set_major_formatter(ScalarFormatter())
+        ax_p.yaxis.set_minor_formatter(ScalarFormatter())
+    ax_p.legend(loc="upper left", frameon=False, fontsize=9, labelcolor=C["ink2"])
+
+    # -- r-squared panel: how linear the trailing window is, vs the gate --
+    ax_r.plot(table.index, table["R2"], color=C["close"], linewidth=1.6,
+              label=f"r2 of the trailing {window}d fit")
+    ax_r.axhline(min_r2, color=C["ink2"], linewidth=1.2, linestyle="--")
+    ax_r.axhspan(min_r2, 1.0, color=C["grid"], alpha=0.55)
+    if not hits.empty:
+        ax_r.scatter(hits.index, hits["R2"], color=C["event"], s=45, zorder=5,
+                     edgecolor=C["surface"], linewidth=1.2)
+    ax_r.set_ylim(0, 1)
+    ax_r.set_ylabel("r-squared", color=C["ink2"], fontsize=10)
+    # Lower right: the gate sits high on this axis, and an upper-left legend
+    # lands straight on top of its dashed threshold line.
+    ax_r.legend(loc="lower right", frameon=False, fontsize=9, labelcolor=C["ink2"])
+
+    months = window / 21.0
+    n_sig = len(hits)
+    cap = strategy.get("max_annual_slope_pct")
+    band = (f"{strategy['min_annual_slope_pct']:.0%}"
+            + (f"..{cap:.0%}" if cap is not None else "+"))
+    subtitle = (f"{n_sig} signal day(s)" if n_sig else "no signal days") + \
+        f" -- slope {band}/yr, r2 >= {min_r2:.2f}, residual <= {max_resid:.1%}" \
+        f", fit on {'log ' if use_log else ''}price"
+    _title(ax_p, f"{ticker} -- near-linear uptrend over {months:.0f} months",
+           subtitle)
 
     fig.savefig(out_path, dpi=dpi, bbox_inches="tight", facecolor=C["surface"])
     plt.close(fig)

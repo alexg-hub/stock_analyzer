@@ -1,6 +1,6 @@
 ---
 name: tune-thresholds
-description: Tune one screen's strategy thresholds with tune_screen.py — sweeping parameters over the cached price panel and scoring candidates against the random-entry baseline and the protected cases that must keep firing. Use when asked to tune, sweep, or retune a screen's config values (breakout/pullback/reclaim), or to interpret a sensitivity/grid/delay run.
+description: Tune one screen's strategy thresholds with tune_screen.py — sweeping parameters over the cached price panel and scoring candidates against the random-entry baseline and the protected cases that must keep firing. Use when asked to tune, sweep, or retune a screen's config values (breakout/pullback/reclaim/trend), or to interpret a sensitivity/grid/delay run.
 ---
 
 # Threshold tuning
@@ -31,7 +31,13 @@ via `Read`, or from the job's output.
   edit. Measured so far: reclaim is **untunable** (all candidates below
   baseline, every tightening hurts) while breakout **does** respond
   (`breakout_multiplier` 1.01→1.02 lifts excess +0.62→+1.33 but demotes the JNJ
-  protected case).
+  protected case). Trend (added 2026-08-13, `enabled: false`) starts at excess
+  −1.79 and responds on exactly one axis: `min_r_squared` 0.85→0.9 takes it to
+  −0.06 at a 60.6% win rate, on 208 signals. Two traps there — dropping
+  `max_annual_slope_pct` also improves excess but readmits parabolas the screen
+  exists to exclude, and `max_last_dev_pct` improves it by changing the event
+  from "the trend began" into "price returned to the line", which re-signals the
+  same trend repeatedly. Neither is a free win; check the signal count.
 
 Note that `enabled: false` on a screen never hides it from tuning — the screen
 argument selects it. A screen is switched off precisely when it is

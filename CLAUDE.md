@@ -8,9 +8,9 @@ A **four-tier stock filter** running nightly on this Windows machine via Task
 Scheduler, plus historical tooling (single-ticker backtesters, a universe-wide
 profit backtest, a threshold tuner).
 
-1. **Tier 1 — technical.** The index screens (breakout, pullback; reclaim
-   disabled). Records `Setup` (`full`/`partial`) + `Missing`, and the `Index`
-   the ticker signalled in.
+1. **Tier 1 — technical.** The index screens (breakout, pullback; reclaim and
+   trend disabled). Records `Setup` (`full`/`partial`) + `Missing`, and the
+   `Index` the ticker signalled in.
 2. **Tier 2 — quality *and* exclusion.** The `fast` half of the `quality`
    registry graded over the tier-1 hits. Records `Quality` (the ⭐ badge) +
    `Quality Missing`, and — the "identify the losers" half of the thesis —
@@ -141,6 +141,7 @@ python migrate_config.py           # prove the unified section == the old two
 python backtest_breakout.py --ticker JNJ  --start 2025-01-01 --end 2025-10-31
 python backtest_pullback.py --ticker MSFT --start 2024-01-01 --end 2025-06-30
 python backtest_reclaim.py  --ticker META --start 2023-01-01 --end 2023-12-31
+python backtest_trend.py    --ticker COST --start 2023-06-01 --end 2024-06-30
 
 # Universe-wide profit backtest: every screen x all history, sweeping a grid of
 # "wait x trading days, then hold y". No Discord. Caches the price panel, so
@@ -330,12 +331,24 @@ real send.
 - **The `compute_*` function in each screen module is the single source of
   truth** for its condition math (`breakout_scanner.compute_signals`,
   `sma_pullback.compute_pullback_signals`,
-  `sma_reclaim.compute_reclaim_signals`). Fully vectorized: every
+  `sma_reclaim.compute_reclaim_signals`, `trend_line.compute_trend_signals`).
+  Fully vectorized: every
   input/output is a `(days, tickers)` DataFrame, no per-ticker loops. The
   production scan evaluates only the last row; the backtests
-  (`backtest_breakout.py`, `backtest_pullback.py`, `backtest_reclaim.py`)
+  (`backtest_breakout.py`, `backtest_pullback.py`, `backtest_reclaim.py`,
+  `backtest_trend.py`)
   evaluate every historical day for one ticker and import the compute
   functions — never reimplement the condition math there.
+  `trend_line.py` is the one whose math is not elementwise: it is a rolling OLS
+  fit of `log(Close)`, kept vectorized by computing the fit **from rolling sums
+  in closed form** rather than fitting each window. The re-basing of the cross
+  term from the absolute bar index onto the window's own `x = 0..n-1` is the
+  step that fails silently — an off-by-one there yields a plausible slope and
+  raises nothing, so `tests/test_trend_line.py` checks slope, intercept, r² and
+  residual against `numpy.polyfit`. Cost is not a reason to change it: the whole
+  904 x 1254 panel fits in **0.238 s**, cheaper than any of the other three
+  screens, and weekly bars were measured and rejected (same signal count, same
+  excess within noise, and the signal date collapses to the resample boundary).
 - **One signal list per screen, two tiers.** There is no separate near-miss
   list: `find_*` returns a single `hits` frame with a **`Setup`** column
   (`full`/`partial`) and **`Missing`** (the failing test, `""` when full),
@@ -345,9 +358,10 @@ real send.
   - `partial_mask(data, signals, strategy)` — the *partial-tier* combination
     logic, vectorized over all days like `compute_*`;
   - `fires_mask(...)` = `signal | partial_mask` — every day the screen alerts
-    on. **The pullback screen is the exception**: it stays strict, so its
-    `fires_mask` is just `signal` and its `partial_mask` (touch-but-no-fire) is
-    **backtest-only**, a control cohort that is never alerted.
+    on. **The pullback and trend screens are the exceptions**: both stay
+    strict, so their `fires_mask` is just `signal` and their `partial_mask`
+    (pullback: touch-but-no-fire; trend: the same trend with linearity relaxed)
+    is **backtest-only**, a control cohort that is never alerted.
   `find_*` takes `.iloc[-1]` of `fires_mask`, so production and the backtest
   share one definition. `missing_reason(...)` (breakout: positional args;
   reclaim: a calc-table row) names the failing leg.
@@ -355,6 +369,46 @@ real send.
   returned +3.10% vs +0.67% for full ones over 30 days, so suppressing them was
   discarding the better cohort. Keep the tier recorded — it is the only thing
   that preserves that distinction.
+- **`trend_line.py` screens a *state*, and turning that into an event is the
+  whole design.** The other three screens ask about one bar; this one fits the
+  trailing `trend_window_days` (210 ≈ 10 months) and asks whether the path is
+  close to a line. That condition stays true for months — ~53 tickers a night —
+  so alerting on it would swamp the one nightly message and give
+  `forward_trades` no dated entry to score. The signal is therefore the
+  **transition** into it (~0.57/night), re-arming if the trend breaks and
+  re-forms. Three rules make that transition mean what it says, and each was
+  wrong once:
+  - **The angle floor and ceiling are not symmetric.** The floor
+    (`min_annual_slope_pct`) is a qualifier — a trend can begin by getting steep
+    enough. The ceiling (`max_annual_slope_pct`) is a **disqualifier**, applied
+    to the signal and deliberately kept *out* of the state freshness watches.
+    Folded in, it fired on the day a hot trend **decelerated** through the bar:
+    a momentum-fade entry wearing a trend entry's clothes, and **18% of all
+    signals**, against 0% that ever fired by crossing the floor upward. The
+    ceiling exists because a parabola scores a very high r² — r² rises with
+    slope for a given noise level — so linearity alone will not reject one.
+    Note removing it *improves* measured excess (−0.63 vs −1.79); it is kept on
+    the definition, not the backtest, and the sweep carries `null` so that stays
+    checkable.
+  - **A transition needs something to transition from** (`had_fit`). On the
+    first bar with a full window, and on the first bar after an interior `Close`
+    hole rolls out of one, yesterday has no fit at all — so "not in trend
+    yesterday, in trend today" is an artefact of where the data starts. Without
+    the guard a hole manufactures a phantom trend exactly `window` bars later,
+    and **116 of the 904 tickers** on the 5y panel carry one. This is the same
+    family as `drop_unsettled_bars`: a missing measurement must not read as a
+    finding.
+  - **The two tiers are armed independently.** Gating both off one combined
+    "in trend" state let the far wider control-cohort door swallow a trend
+    before it tightened — **33 signals against 1512 control rows**, from a rule
+    worth 656 on its own. `max_partial_fails` widens the control cohort only; a
+    test pins that changing it leaves the signal count untouched.
+  Measured on the 904-name panel over 3 years, and the reason it ships
+  `enabled: false`: 428 signals, excess **−1.79** at 30 days and **−2.22** at
+  60, against a +2.27/+4.81 baseline. The control cohort reads −0.91, i.e.
+  **relaxing the linearity requirement did better than demanding it** — which is
+  the finding that cohort exists to surface. `min_r_squared` is the one axis with
+  real gradient (0.9 → excess −0.06, win 60.6%, n=208).
 - **`backtest_universe.py` is the profit backtest** — the whole universe ×
   all history, one fixed-horizon trade per signal, reusing the production
   `compute_*` + `fires_mask` unchanged. It caches its price panel to

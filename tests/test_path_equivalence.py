@@ -21,6 +21,7 @@ from _harness import Checks, cached_panel_or_skip
 import breakout_scanner
 import sma_pullback
 import sma_reclaim
+import trend_line
 from scanner_common import download_history
 
 c = Checks("data-path equivalence (network)")
@@ -37,6 +38,8 @@ CASES = [
      "2022-06-01", "2023-12-31", ["2023-02-02"]),
     ("NVDA", breakout_scanner, breakout_scanner.compute_signals,
      "2024-01-01", "2026-07-01", None),
+    ("COST", trend_line, trend_line.compute_trend_signals,
+     "2023-06-01", "2024-06-30", ["2023-12-06"]),
 ]
 
 for ticker, module, compute, start, end, documented in CASES:

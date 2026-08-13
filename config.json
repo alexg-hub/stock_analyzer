@@ -49,6 +49,18 @@
         "min_sma_slope_pct": null,
         "alert_only_on_cross": true
     },
+    "trend_strategy": {
+        "enabled": false,
+        "trend_window_days": 210,
+        "fit_on_log_price": true,
+        "min_annual_slope_pct": 0.2,
+        "max_annual_slope_pct": 0.8,
+        "min_r_squared": 0.85,
+        "max_residual_pct": 0.08,
+        "max_last_dev_pct": null,
+        "max_partial_fails": 1,
+        "alert_only_on_new_trend": true
+    },
     "exit_strategy": {
         "enabled": true,
         "recent_window_days": 20,
@@ -78,7 +90,8 @@
         "benchmark_ticker": "SPY",
         "cache_path": "backtest_universe_cache.pkl",
         "cache_max_age_days": 1,
-        "screens": ["breakout_strategy", "pullback_strategy", "reclaim_strategy"],
+        "screens": ["breakout_strategy", "pullback_strategy", "reclaim_strategy",
+                    "trend_strategy"],
         "output": {
             "trades_csv": "backtest_universe_trades.csv",
             "summary_csv": "backtest_universe_summary.csv",
@@ -96,7 +109,9 @@
             {"screen": "breakout_strategy", "ticker": "JNJ", "date": "2025-09-30",
              "note": "the original breakout validation case"},
             {"screen": "pullback_strategy", "ticker": "MSFT", "date": "2024-04-30",
-             "note": "the original pullback validation case"}
+             "note": "the original pullback validation case"},
+            {"screen": "trend_strategy", "ticker": "COST", "date": "2023-12-06",
+             "note": "10-month near-linear grind; r2 0.86, +28%/yr, residual 2.4%, on the line"}
         ],
         "sweeps": {
             "breakout_strategy": {
@@ -124,6 +139,15 @@
                 "volume_surge_multiplier": [1.0, 1.2, 1.5],
                 "sma_slope_lookback_days": [21, 30, 63],
                 "min_sma_slope_pct": [null, -0.2, -0.15, -0.1, -0.05]
+            },
+            "trend_strategy": {
+                "trend_window_days": [168, 210, 252],
+                "fit_on_log_price": [true, false],
+                "min_annual_slope_pct": [0.1, 0.2, 0.3],
+                "max_annual_slope_pct": [0.6, 0.8, 1.5, null],
+                "min_r_squared": [0.75, 0.8, 0.85, 0.9],
+                "max_residual_pct": [0.05, 0.06, 0.08, 0.1],
+                "max_last_dev_pct": [null, 0.05, 0.1]
             }
         },
         "grid": {
@@ -133,7 +157,9 @@
                                   "min_candle_body_pct",
                                   "volume_surge_multiplier"],
             "pullback_strategy": ["touch_band_pct", "min_days_above_sma_pct",
-                                  "require_reversal_candle"]
+                                  "require_reversal_candle"],
+            "trend_strategy": ["min_r_squared", "max_residual_pct",
+                               "max_annual_slope_pct"]
         }
     },
     "fundamentals": {

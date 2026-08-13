@@ -41,6 +41,7 @@ import breakout_scanner
 import charts
 import sma_pullback
 import sma_reclaim
+import trend_line
 from scanner_common import (
     download_price_data,
     drop_unsettled_bars,
@@ -58,6 +59,7 @@ SCREENS = [
     (breakout_scanner, breakout_scanner.compute_signals),
     (sma_pullback, sma_pullback.compute_pullback_signals),
     (sma_reclaim, sma_reclaim.compute_reclaim_signals),
+    (trend_line, trend_line.compute_trend_signals),
 ]
 
 BASELINE_LABEL = "ALL stock-days (random entry)"

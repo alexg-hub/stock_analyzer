@@ -25,6 +25,7 @@ TESTS = [
     ("test_ibkr.py", "offline -- IBKR client: no account surface, degrades"),
     ("test_mcp_server.py", "offline -- MCP tool contract, stdout purity, dry-run"),
     ("test_forward_trades.py", "offline -- synthetic panel arithmetic"),
+    ("test_trend_line.py", "offline -- the trend fit, its cohorts and events"),
     ("test_research_output.py", "offline -- tier-3 financials, chart, verdict cards"),
     ("test_portfolio_sim.py", "offline -- tier-4 ledger, marking, attribution"),
     ("test_enrichment.py", "offline -- the agent's record: graded, never a score"),

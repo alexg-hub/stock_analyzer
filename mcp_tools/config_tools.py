@@ -118,13 +118,14 @@ def _download_period_ok(cfg: dict) -> list[str]:
     import breakout_scanner
     import sma_pullback
     import sma_reclaim
+    import trend_line
 
     period = str(cfg.get("data", {}).get("download_period", "")).strip()
     if not period.endswith("mo") or not period[:-2].isdigit():
         return []                        # not a form we can check; leave it be
     bars = int(period[:-2]) * 21         # ~21 trading days a month
     problems = []
-    for module in (breakout_scanner, sma_pullback, sma_reclaim):
+    for module in (breakout_scanner, sma_pullback, sma_reclaim, trend_line):
         strategy = cfg.get(module.CONFIG_KEY)
         if not strategy or not strategy.get("enabled", True):
             continue

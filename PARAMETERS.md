@@ -9,14 +9,14 @@ from `config.json` and measured against the **full 503-ticker universe pass of
 Regenerate the measurements with the commands in [Reproducing](#reproducing).
 
 **Totals:** 77 quality parameters (43 fast / 34 deep · 73 enabled / 4 off ·
-17 veto · 30 sector-relative) · 40 screen and exit thresholds · 139
+17 veto · 30 sector-relative) · 50 screen and exit thresholds · 139
 operational settings.
 
 ---
 
 ## 1. Deterministic vs AI
 
-**All 77 quality parameters are deterministic Python.** So are all 40 screen
+**All 77 quality parameters are deterministic Python.** So are all 50 screen
 thresholds, the tier-3 score, the tier-3 tier, and every sentence in the tier-4
 findings report. Nothing a model writes can move a gate, a veto, an axis
 coordinate or a recorded return.
@@ -56,7 +56,7 @@ verdict exists before anything is posted.
 
 | Stage | Entry point | Parameters graded | Network |
 |---|---|---|---|
-| Tier 1 — screens | `run_scanners.py` → `SCANNERS` registry | 40 screen thresholds | one bulk `yf.download` |
+| Tier 1 — screens | `run_scanners.py` → `SCANNERS` registry | 50 screen thresholds | one bulk `yf.download` |
 | Tier 2 — `fast` | `quality.annotate` in `run_scanners.main()` | **43** fast, over tier-1 hits | `info` + statements + cached closes |
 | Tier 3 — all stages | `research_report.deterministic_verdict` (`stage=None`) | **77** — fast *and* deep | + `collect_yahoo`, EDGAR |
 | Enrichment | `enrich` skill, in a session | none — a graded categorical record | web, IBKR MCP |
@@ -251,7 +251,7 @@ Column notes:
 
 ---
 
-## 5. Screen and exit thresholds — 40 parameters
+## 5. Screen and exit thresholds — 50 parameters
 
 `enabled` gates the **nightly alert only** — `backtest_universe.py` and
 `tune_screen.py` deliberately ignore it, because a screen gets switched off
@@ -303,6 +303,21 @@ it.
 | `min_sma_slope_pct` | `null` | [null, -0.2, -0.15, -0.1, -0.05] | ✓ | `null` = slope confirmation disabled |
 | `alert_only_on_cross` | `true` | — |  |  |
 
+#### `trend_strategy` — Tier 1 — near-linear uptrend · consumed by `trend_line.py`
+
+| Parameter | Value | Swept by `tune_screen` | In grid | Note |
+|---|---|---|---|---|
+| `enabled` | `false` | — |  | **OFF since 2026-08-13** — shipped disabled to be measured first; reads excess −1.79 (30d) / −2.22 (60d) vs the random-entry baseline on 428 signals. Deliberately still measurable by backtest/tuner |
+| `trend_window_days` | `210` | [168, 210, 252] |  | the **duration** knob, ~10 months; → 211 bars needed, 2y ≈ 504 ✓ |
+| `fit_on_log_price` | `true` | [true, false] |  | log space makes a constant-% grower a straight line and the residual scale-free; `false` normalizes slope and residual by the window's mean price |
+| `min_annual_slope_pct` | `0.2` | [0.1, 0.2, 0.3] |  | the **angle** floor, a *qualifier*. Barely binds — r² ≥ 0.85 with a positive slope already implies a steep one |
+| `max_annual_slope_pct` | `0.8` | [0.6, 0.8, 1.5, null] | ✓ | the ceiling, a **disqualifier** applied to the signal, never to the state freshness watches. Folded into the state it fired when a hot trend *decelerated* through the bar — 18% of all signals. Removing it improves measured excess (−0.63 at `null`); it is kept because a parabola is not a line, which is a definition rather than a backtest |
+| `min_r_squared` | `0.85` | [0.75, 0.8, 0.85, 0.9] | ✓ | the linearity gate, and the one axis with real gradient: 0.9 reads excess −0.06 on 208 signals at a 60.6% win rate |
+| `max_residual_pct` | `0.08` | [0.05, 0.06, 0.08, 0.1] | ✓ | the **volatility around the line** knob (residual std as a fraction of price) |
+| `max_last_dev_pct` | `null` | [null, 0.05, 0.1] |  | optional "not extended today" gate. Off by default: switching it on makes the qualifying state flicker, so one trend re-signals repeatedly — it more than doubles the signal count and changes the event from "the trend began" to "price came back to the line" |
+| `max_partial_fails` | `1` | — |  | width of the **backtest-only control cohort**; never reaches the alert. A test pins that changing it leaves the signal count untouched |
+| `alert_only_on_new_trend` | `true` | — |  | the signal is the transition, not the state (~0.57/night against ~53/night) |
+
 #### `exit_strategy` — Tier 4 — double-top exit · consumed by `portfolio_sim/exits.py`
 
 | Parameter | Value | Swept by `tune_screen` | In grid | Note |
@@ -329,7 +344,7 @@ live, and this file is committed.
 | Setting | Value | Consumer | Note |
 |---|---|---|---|
 | `data.universe_sources` | `sp500` (alert), `sp400` (not alerted) | scanner_common.py | one entry per index: `name`, `label`, `url`, `alert`. **`alert` gates the nightly Discord message only** — the plane, the peer stats and the backtest grade every source, the same split `<screen>.enabled` draws. Wikipedia publishes the S&P 500/400/600 lists with identical headings, so a new index needs no parser. |
-| `data.download_period` | `"2y"` | scanner_common.py | must exceed every screen's lookback: breakout 312, pullback 402, reclaim 380 bars. 2y ≈ 504 ✓ |
+| `data.download_period` | `"2y"` | scanner_common.py | must exceed every screen's lookback: breakout 312, pullback 402, reclaim 380, trend 211 bars. 2y ≈ 504 ✓ |
 | `data.download_interval` | `"1d"` | scanner_common.py |  |
 | `charts.enabled` | `true` | charts.py, run_scanners.py |  |
 | `charts.partial_charts` | `true` | charts.py, run_scanners.py |  |
@@ -346,7 +361,7 @@ live, and this file is committed.
 | `backtest.benchmark_ticker` | `"SPY"` | backtest_universe.py |  |
 | `backtest.cache_path` | `"backtest_universe_cache.pkl"` | backtest_universe.py |  |
 | `backtest.cache_max_age_days` | `1` | backtest_universe.py | the panel `tune_screen.py` and the tests also read |
-| `backtest.screens` | `["breakout_strategy", "pullback_strategy", "reclaim_strategy"]` | backtest_universe.py |  |
+| `backtest.screens` | `["breakout_strategy", "pullback_strategy", "reclaim_strategy", "trend_strategy"]` | backtest_universe.py | a screen in the `SCREENS` registry but missing here is silently skipped |
 | `backtest.output.trades_csv` | `"backtest_universe_trades.csv"` | backtest_universe.py |  |
 | `backtest.output.summary_csv` | `"backtest_universe_summary.csv"` | backtest_universe.py |  |
 | `backtest.output.chart_path` | `"backtest_universe.png"` | backtest_universe.py |  |
@@ -636,6 +651,10 @@ of `risk`, where `negative_equity` (1.00), `accruals_ratio` (0.91),
 - `reclaim_strategy.enabled: false` — deliberate and documented (excess −1.65 vs
   the random-entry baseline), and correctly still measurable by the backtest and
   tuner.
+- `trend_strategy.enabled: false` — same posture, shipped that way on
+  2026-08-13 so the screen is measured before it is acted on. Excess −1.79 (30d)
+  / −2.22 (60d) on 428 signals; `min_r_squared` is the axis to tune (0.9 reads
+  −0.06 at a 60.6% win rate on n=208).
 
 ### 7.7 Clean — things checked that are fine
 

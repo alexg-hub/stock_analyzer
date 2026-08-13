@@ -1,5 +1,5 @@
 @echo off
-rem Run all 3 single-ticker backtests (default validation cases) and write
+rem Run all 4 single-ticker backtests (default validation cases) and write
 rem their combined output to output\backtest_log.txt. Separate from the nightly
 rem production log (output\scanner_log.txt); fresh file each run.
 cd /d "C:\Users\Lenovo\CC\stock_analyzer"
@@ -22,6 +22,10 @@ echo ##### pullback -- MSFT 2024-01-01..2025-06-30 ##### >> %LOG%
 echo. >> %LOG%
 echo ##### reclaim -- META 2023-01-01..2023-12-31 ##### >> %LOG%
 %PY% backtest_reclaim.py --ticker META --start 2023-01-01 --end 2023-12-31 >> %LOG% 2>&1
+
+echo. >> %LOG%
+echo ##### trend -- COST 2023-06-01..2024-06-30 ##### >> %LOG%
+%PY% backtest_trend.py --ticker COST --start 2023-06-01 --end 2024-06-30 >> %LOG% 2>&1
 
 echo. >> %LOG%
 echo ==== Backtests finished %date% %time% ==== >> %LOG%

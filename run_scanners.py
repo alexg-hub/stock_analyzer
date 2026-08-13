@@ -11,7 +11,8 @@ hand-off shape so tier 3 cannot tell the two apart.
 
 Adding a new scanner:
   1. write a module exposing CONFIG_KEY, scan(), EMBED_COLOR + describe_hit(),
-     plot_hit() (see breakout_scanner.py / sma_pullback.py / sma_reclaim.py);
+     plot_hit() (see breakout_scanner.py / sma_pullback.py / sma_reclaim.py /
+     trend_line.py);
   2. add it to SCANNERS below;
   3. add its config section (with an "enabled" flag) to config.json.
 
@@ -34,6 +35,7 @@ import breakout_scanner
 import quality
 import sma_pullback
 import sma_reclaim
+import trend_line
 from scanner_common import (
     DISCLAIMER,
     INDEX_COL,
@@ -58,7 +60,7 @@ from scanner_common import (
 )
 
 # Every screen that runs nightly, in alert order.
-SCANNERS = [breakout_scanner, sma_pullback, sma_reclaim]
+SCANNERS = [breakout_scanner, sma_pullback, sma_reclaim, trend_line]
 
 # The screen entry a ticker gets when nothing fired: an on-demand look is
 # mostly about tier 2, so the payload still needs somewhere to put the row.
