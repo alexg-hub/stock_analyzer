@@ -1406,9 +1406,26 @@ small differences as noise.
 
 ## Nightly schedule (Windows Task Scheduler)
 
-The scan runs Mon–Fri at **23:30 Israel time** (~30 min after the 16:00 ET US
-market close) via the task **"SP500 Breakout Scanner"**, which executes
-`run_scanner.bat` and appends all output to `output/scanner_log.txt`.
+The scan runs Tue–Sat at **07:00 Israel time** (= 00:00 ET, the morning after
+each US session) via the task **"SP500 Breakout Scanner"**, which executes
+`run_scanner.bat` and appends all output to `output/scanner_log.txt`. It grades
+the previous day's close: Tuesday 07:00 scans Monday's bar, Saturday 07:00
+scans Friday's.
+
+> **It must not move back to just after the close.** It ran Mon–Fri at 23:30
+> (16:30 ET, 30 min after the bell) until 2026-08-13, and at that hour Yahoo's
+> **volume** for the session is still preliminary — the closing auction and late
+> prints have not landed. `Close` is already final, so nothing looks wrong.
+> Measured over the 29 breakout rows in `signals.csv`: `Close` matched a later
+> re-read to the cent in 29 of 29, while `Vol Ratio` was understated in **20 of
+> 29, by a mean of 12.6% and up to 58%**. The split is entirely by run time —
+> every scan date whose run happened the next morning matched to within ±0.2%.
+> Breakout condition C3 (`volume >= volume_surge_multiplier x` the prior SMA) was
+> therefore being graded on incomplete volume, and replaying the last ten scan
+> dates found **8 signals the 23:30 runs missed against 17 they recorded**
+> (MMM, ALL, MET, CRL, TGT, MPC). The 2026-08-12 "zero-signal night" that
+> prompted this was one of them: MPC reads 1.168 against the 1.1 gate once the
+> tape settles. A same-night alert is worth less than a correct one.
 
 `run_scanners.py` now does all four tiers itself — the screens, the quality
 check, the ledger (`open` → `mark` → exit scan) and the graded verdict — and
@@ -1441,9 +1458,9 @@ To (re)create the task from scratch, run in PowerShell:
 
 ```powershell
 $action   = New-ScheduledTaskAction -Execute "C:\Users\Lenovo\CC\stock_analyzer\run_scanner.bat" -WorkingDirectory "C:\Users\Lenovo\CC\stock_analyzer"
-$trigger  = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At 23:30
+$trigger  = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Tuesday,Wednesday,Thursday,Friday,Saturday -At 7:00am
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -WakeToRun -ExecutionTimeLimit (New-TimeSpan -Hours 3)
-Register-ScheduledTask -TaskName "SP500 Breakout Scanner" -Action $action -Trigger $trigger -Settings $settings -Description "Scans S&P 500 for breakouts from consolidation ~30 min after US market close, grades and alerts via Discord webhook."
+Register-ScheduledTask -TaskName "SP500 Breakout Scanner" -Action $action -Trigger $trigger -Settings $settings -Description "Scans S&P 500 for breakouts from consolidation the morning after each US session, once Yahoo's volume has settled; grades and alerts via Discord webhook."
 ```
 
 A second, **weekly** task puts the week's signals on the risk/reward plane
@@ -1476,12 +1493,21 @@ Get-Content output\universe_log.txt -Tail 20               # its progress lines
 
 Notes:
 
-- `StartWhenAvailable` runs the scan at next boot if the PC was off at 23:30,
+- `StartWhenAvailable` runs the scan at next boot if the PC was off at 07:00,
   and `WakeToRun` wakes it from sleep — but a run that *started* and was then
-  interrupted (e.g. shutting the PC down at ~23:31) is **not** retried, and
-  that night's alert is lost. Avoid shutting down between ~23:25 and ~23:35.
+  interrupted (e.g. shutting the PC down at ~07:01) is **not** retried, and
+  that session's alert is lost. Avoid shutting down between ~06:55 and ~07:05.
   The verdict pass extends that window; the signals themselves are archived
   before it starts, so only the verdicts are lost.
+- **A per-ticker hole is warned about, never dropped.** `drop_unsettled_bars`
+  discards a bar only when *most* of the index has no settled close, so a
+  handful of missing tickers cannot cost the day for the other 490 — but each of
+  those tickers still carries a NaN inside every rolling window spanning it and
+  cannot fire for the next `window` sessions. `warn_ticker_holes` logs them as
+  `DOWNLOAD warn`. Seen 2026-08-11: Yahoo had no bar at all for 28 constituents
+  (5.6% of the index, far below the 50% drop threshold), blacking them out on
+  the breakout screen for 312 sessions. Re-downloading does not help — the bar
+  is absent upstream — so the warning is the whole remedy.
 - A result code of `0` in `Get-ScheduledTaskInfo` means success;
   `3221225786` (0xC000013A) means the run was terminated mid-scan.
 - The nightly run needs no Claude Code authentication at all — it invokes no

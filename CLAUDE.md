@@ -1235,10 +1235,21 @@ real send.
   prior conversation, and don't revert their changes.
 - `config.json` holds the **live Discord webhook URL** and is committed on
   purpose (private repo). Never paste it into issues/PRs or public output.
-- Nightly run: Task Scheduler task **"SP500 Breakout Scanner"**, Mon–Fri 23:30
+- Nightly run: Task Scheduler task **"SP500 Breakout Scanner"**, Tue–Sat 07:00
   Israel time → `run_scanner.bat` → `run_scanners.py`, all four tiers in one
   process → `output/scanner_log.txt`. One task, one command, nothing chained
-  after it since 2026-08-11. README's "Nightly schedule" section has the exact
+  after it since 2026-08-11. **It grades the previous session's close, and
+  running it just after that close is a measured mistake** — it was Mon–Fri
+  23:30 (16:30 ET, 30 min after the bell) until 2026-08-13, and at that hour
+  Yahoo's **volume** has not absorbed the closing auction or the late prints
+  while `Close` is already final, so nothing looks wrong. Over the 29 breakout
+  rows in `signals.csv`, `Close` matched a later re-read to the cent 29/29 while
+  `Vol Ratio` was understated in **20/29, mean 12.6%, max 58%** — split purely
+  by run time, with every next-morning run matching to ±0.2%. Breakout C3 was
+  therefore graded on incomplete volume, costing **8 signals against 17
+  recorded** over the last ten scan dates; the 2026-08-12 zero-signal night was
+  one of them (MPC reads 1.168 against the 1.1 gate once settled). Don't move it
+  back toward the close to make the alert same-day. README's "Nightly schedule" section has the exact
   `Register-ScheduledTask` command and diagnostics; keep it in sync if the
   schedule changes. Result code `3221225786` in `Get-ScheduledTaskInfo` means
   the run was killed mid-scan (usually PC shutdown), and that night's alert is
@@ -1280,6 +1291,21 @@ real send.
   run's `output/logs/<run_id>.log` for the `DOWNLOAD warn` line first (or
   `output/scanner_log.txt`, which captures the same steps via `2>&1`), and never
   assume a NaN close means a failed condition.
+  **The sub-threshold case is reported, not acted on** (`warn_ticker_holes`,
+  called from `drop_unsettled_bars` so every download *and* every cache load
+  passes through one chokepoint). Keeping the bar when only a handful of tickers
+  are blank is right — the other 490 must not lose the day — but the handful is
+  not fine, it is a per-*ticker* version of the same poisoning, and it was
+  completely silent until 2026-08-13. Measured on 2026-08-11: Yahoo had no bar
+  at all for 28 constituents (ABBV, CARR, PSX, HLT, …), 5.6% of the index and
+  nowhere near the 50% threshold, which blacked each of them out of the breakout
+  screen for 312 sessions — about fifteen months — with nothing logged. A
+  re-download does not repair it (the bar is absent upstream, not lost in the
+  batch), so the warning is the entire remedy. **Interior holes only**: a leading
+  NaN run is a young listing and a trailing one a delisting or an unsettled tail,
+  both legitimate and neither poisoning any later bar's window. That distinction
+  is what keeps it at ~30 tickers on a normal 2y panel instead of firing every
+  night and going unread; tests pin both halves.
 - Windows box, Microsoft Store Python 3.13 (`python` on PATH). yfinance's
   progress bar is disabled for non-TTY output so `output/scanner_log.txt` stays
   readable. matplotlib uses the Agg backend (set in `charts.py`).

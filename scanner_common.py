@@ -447,34 +447,90 @@ def drop_unsettled_bars(data: pd.DataFrame, max_missing_pct: float = 0.5) -> pd.
 
     A fraction, not `any`: individual tickers legitimately go missing
     (delistings, per-ticker download failures) and must not discard the day.
+    Those sub-threshold gaps are not harmless, though -- they just have to be
+    reported rather than acted on, which is `warn_ticker_holes` below.
     """
     if "Close" not in data.columns.get_level_values(0):
         return data
     missing = data["Close"].isna().mean(axis=1)   # NaN fraction per bar
     bad = missing > max_missing_pct
-    if not bad.any():
-        return data
-    if bad.all():
+    if bad.all() and len(data):
         raise RuntimeError(
             f"No bar has a settled close (checked {len(data)}) -- Yahoo is "
             f"serving unsettled rows; retry later.")
 
-    kept = data.loc[~bad]
-    dropped = [str(d.date()) for d in data.index[bad]]
-    # Trailing drops change *which* bar gets scanned; interior ones silently
-    # poison the rolling windows. Both are worth a line, but they are different
-    # failures and the log has to say which one happened.
-    tail_dropped = bool(bad.iloc[-1])
-    # Logged at `warn`, not printed: this is the single diagnostic most worth
-    # finding after a suspicious zero-signal night, and burying it in a wall of
-    # stdout is how it got missed before.
-    log_step("DOWNLOAD", "warn",
-             f"dropped {len(dropped)} bar(s) with no settled close for most "
-             f"tickers: {', '.join(dropped)}"
-             + (f"; scanning {kept.index[-1].date()} instead" if tail_dropped
-                else " (interior -- would have voided every rolling window "
-                     "spanning it)"))
+    kept = data
+    if bad.any():
+        kept = data.loc[~bad]
+        dropped = [str(d.date()) for d in data.index[bad]]
+        # Trailing drops change *which* bar gets scanned; interior ones silently
+        # poison the rolling windows. Both are worth a line, but they are
+        # different failures and the log has to say which one happened.
+        tail_dropped = bool(bad.iloc[-1])
+        # Logged at `warn`, not printed: this is the single diagnostic most
+        # worth finding after a suspicious zero-signal night, and burying it in
+        # a wall of stdout is how it got missed before.
+        log_step("DOWNLOAD", "warn",
+                 f"dropped {len(dropped)} bar(s) with no settled close for most "
+                 f"tickers: {', '.join(dropped)}"
+                 + (f"; scanning {kept.index[-1].date()} instead" if tail_dropped
+                    else " (interior -- would have voided every rolling window "
+                         "spanning it)"))
+    warn_ticker_holes(kept)
     return kept
+
+
+def warn_ticker_holes(data: pd.DataFrame, max_named: int = 12) -> list[str]:
+    """Log the tickers carrying an *interior* Close hole. Returns their names.
+
+    The complement of the guard above, and the case it deliberately does not
+    act on. `drop_unsettled_bars` discards a bar only when most of the index has
+    no settled close, because a handful of missing tickers must not cost the day
+    for the other 490 -- but the handful is not fine, it is simply a per-ticker
+    failure rather than a per-bar one. Every `compute_*` builds its baselines
+    with `rolling(window)` at the default `min_periods=window`, so one NaN
+    inside the window voids that **ticker's** output for the next `window`
+    sessions exactly as an index-wide blank voids everyone's.
+
+    Measured on 2026-08-11: Yahoo had no bar at all for 28 constituents (ABBV,
+    CARR, PSX, HLT, ...), 5.6% of the index and so nowhere near the 50%
+    threshold. Nothing dropped, nothing warned, and those 28 were silently
+    unable to fire the breakout screen for the next 312 sessions -- about
+    fifteen months. A re-download does not fix it (the bar is absent upstream,
+    not lost in the batch), so the only available remedy is knowing.
+
+    **Interior only.** A leading run of NaNs is a young listing and a trailing
+    one is a delisting or an unsettled tail; both are legitimate and neither
+    poisons a window that any later bar depends on. Only a gap with settled
+    closes on *both* sides is a hole. Measured over a normal 2y/503 panel that
+    is ~30 tickers, essentially all of them the real defect -- so this stays a
+    warning worth reading rather than noise.
+    """
+    if "Close" not in data.columns.get_level_values(0) or data.empty:
+        return []
+    ok = data["Close"].notna()
+    # Vectorized "has a settled close somewhere before / after this bar": a hole
+    # needs both, which is what excludes the leading and trailing runs.
+    interior = (ok.cumsum() > 0) & (ok[::-1].cumsum()[::-1] > 0) & ~ok
+    per_ticker = interior.sum()
+    affected = per_ticker[per_ticker > 0]
+    if affected.empty:
+        return []
+
+    names = sorted(affected.index)
+    # Newest hole across all of them, and how far back it sits -- a hole one bar
+    # back is tonight's problem, one 400 bars back may already have aged out of
+    # every window. Position 0 can never be interior, so 0 is safe as "none".
+    pos = pd.Series(range(len(data)), index=data.index)
+    newest = int(interior.mul(pos, axis=0).max().max())
+    shown = ", ".join(names[:max_named])
+    more = f" (+{len(names) - max_named} more)" if len(names) > max_named else ""
+    log_step("DOWNLOAD", "warn",
+             f"{len(names)} ticker(s) carry an interior Close hole -- every "
+             f"rolling window spanning it is void for that ticker: {shown}{more}"
+             f"; newest {data.index[newest].date()}, "
+             f"{len(data) - 1 - newest} bar(s) back")
+    return names
 
 
 def download_price_data(tickers: list[str], period: str, interval: str) -> pd.DataFrame:

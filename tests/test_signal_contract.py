@@ -450,6 +450,64 @@ for module, compute, strategy in screens(cfg):
          f"expected={int(last_fires(without).sum())}")
 
 # --------------------------------------------------------------------------
+# The complement: the gap the guard above deliberately does NOT act on. Below
+# the fraction threshold the bar is kept -- correctly, since a handful of
+# missing tickers must not cost the day for the other 490 -- but each of those
+# tickers still carries a NaN inside every rolling window that spans it, and is
+# therefore unable to fire for the next `window` sessions. On 2026-08-11 Yahoo
+# had no bar at all for 28 constituents (5.6% of the index); nothing dropped,
+# nothing warned, and those 28 went dark on the breakout screen for 312
+# sessions. The bar must stay; the silence must not.
+c.section("a sub-threshold per-ticker hole is warned about, not dropped")
+
+_HOLE_BACK = 4
+
+
+def with_ticker_hole(frame, tickers_, back=_HOLE_BACK):
+    """`frame` with the bar `back` from the end blanked for `tickers_` only."""
+    out = frame.copy()
+    fields = list(dict.fromkeys(frame.columns.get_level_values(0)))
+    cols = pd.MultiIndex.from_product([fields, tickers_]).intersection(frame.columns)
+    out.loc[[out.index[-back]], cols] = float("nan")
+    return out
+
+
+_few = all_tickers[:max(1, len(all_tickers) // 20)]     # ~5%, as observed
+_holed = with_ticker_hole(truncated, _few)
+
+_before = _probe.read_text(encoding="utf-8")
+_hole_kept = drop_unsettled_bars(_holed)
+_hole_lines = _probe.read_text(encoding="utf-8")[len(_before):].splitlines()
+_warned = [ln for ln in log_lines_for(_hole_lines, "DOWNLOAD")
+           if ln.split()[3] == "warn"]
+
+c.ok("the bar is kept -- a few missing tickers must not cost the day",
+     _hole_kept.index.equals(_holed.index),
+     f"{len(_hole_kept)} bars vs {len(_holed)}")
+c.ok("the hole is logged as a warning, counting the affected tickers",
+     any(str(len(_few)) in ln and "interior" in ln for ln in _warned),
+     " | ".join(_warned) or "nothing logged -- 5% of the index went dark silently")
+c.ok("the warning names the tickers it found",
+     set(scanner_common.warn_ticker_holes(_holed)) == set(_few),
+     "a count with no names cannot be acted on")
+
+# Leading and trailing NaN runs are a young listing and a delisting/unsettled
+# tail: legitimate, and neither poisons a window any later bar depends on. If
+# they counted, the warning would fire on every normal panel and stop being read.
+_lead = truncated.copy()
+_lead.loc[_lead.index[:3], pd.MultiIndex.from_product(
+    [["Close"], _few]).intersection(_lead.columns)] = float("nan")
+_tail = truncated.copy()
+_tail.loc[_tail.index[-2:], pd.MultiIndex.from_product(
+    [["Close"], _few]).intersection(_tail.columns)] = float("nan")
+c.ok("a leading NaN run (young listing) is not a hole",
+     not scanner_common.warn_ticker_holes(_lead))
+c.ok("a trailing NaN run (delisting / unsettled tail) is not a hole",
+     not scanner_common.warn_ticker_holes(_tail))
+c.ok("a clean panel warns about nothing",
+     not scanner_common.warn_ticker_holes(truncated))
+
+# --------------------------------------------------------------------------
 # Tier 2: the quality verdict, the archive, and the deep-dive gate.
 #
 # The run above deliberately disables fundamentals to stay off the network,
