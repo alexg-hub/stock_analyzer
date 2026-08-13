@@ -112,7 +112,9 @@ def stub_collect(ticker, c_, stage="fast", close=None, benchmark=None):
     return json.loads(json.dumps(DEEP_BUNDLE))
 
 
-run_scanners.get_sp500_tickers = lambda url: list(panel["Close"].columns)
+run_scanners.universe_constituents = lambda cfg, alert_only=False: pd.DataFrame(
+    {"ticker": list(panel["Close"].columns), "sector": "",
+     "sub_industry": "", "index_name": "sp500", "alert": True})
 run_scanners.download_price_data = lambda t, period=None, interval=None: truncated
 run_scanners.quality.fetch_fast = stub_fast
 research_report.quality.collect = stub_collect

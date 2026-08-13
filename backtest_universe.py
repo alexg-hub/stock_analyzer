@@ -1,7 +1,7 @@
 """
 Universe-wide historical backtest: did the screens actually make money?
 
-Downloads the whole S&P 500 once (analysis window + rolling-window warm-up),
+Downloads the whole universe once (analysis window + rolling-window warm-up),
 runs every enabled screen over *all* history, and simulates one fixed-horizon
 trade per signal: buy at the trigger, sell `holding_days` trading days later.
 
@@ -44,9 +44,9 @@ import sma_reclaim
 from scanner_common import (
     download_price_data,
     drop_unsettled_bars,
-    get_sp500_tickers,
     load_config,
     output_dir,
+    universe_tickers,
     warmup_months,
 )
 
@@ -130,7 +130,10 @@ def load_panel(bt_cfg: dict, cfg: dict, years: int, warmup_days: int,
               f"{max_age_days}d or span {span_years:.1f}y < {period_years}y) "
               f"-- re-downloading.")
 
-    tickers = get_sp500_tickers(cfg["data"]["sp500_source_url"])
+    # Every configured index, alerted or not: a universe gets held back from
+    # the alert precisely when nobody has measured it yet, and this is what
+    # measures it. Same reason the screen `enabled` flag is ignored here.
+    tickers = universe_tickers(cfg)
     benchmark = bt_cfg.get("benchmark_ticker")
     if benchmark and benchmark not in tickers:
         tickers = tickers + [benchmark]  # not an index constituent
@@ -497,8 +500,10 @@ def main() -> int:
           f"{len(delays) * len(horizons)} cell(s); detailed table for "
           f"wait={detail[0]}, hold={detail[1]}.")
     print("\nCAVEATS -- this is a screen-comparison tool, not a tradeable backtest:")
-    print("  * Survivorship bias: the universe is TODAY's S&P 500, so companies")
-    print("    dropped/acquired/delisted during the window are absent. Biased up.")
+    print("  * Survivorship bias: the universe is TODAY's index membership, so")
+    print("    companies dropped/acquired/delisted during the window are absent,")
+    print("    and a name promoted out of the mid-caps is backtested in the index")
+    print("    it sits in today. Biased up.")
     print("  * No costs (commission/spread/slippage) and no dividends (price-only")
     print("    returns; splits are handled). High-yield names are understated.")
     print("  * No position sizing or capital limit: every signal is an independent")

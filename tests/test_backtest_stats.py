@@ -128,10 +128,30 @@ else:
          (closed["exit_date"] > closed["entry_date"]).all())
     c.ok("prices are positive (closed)",
          ((closed["entry_price"] > 0) & (closed["exit_price"] > 0)).all())
-    c.ok("MFE >= MAE (closed)", (closed["mfe_pct"] >= closed["mae_pct"]).all())
-    c.ok("the return lies within [MAE, MFE] (closed)",
-         ((closed["return_pct"] <= closed["mfe_pct"] + 1e-6)
-          & (closed["return_pct"] >= closed["mae_pct"] - 1e-6)).all())
+    # An excursion is measured over the whole price path, so one interior NaN
+    # bar inside the holding window voids it -- `rolling` runs at the default
+    # `min_periods=window`, exactly as every `compute_*` does. The return
+    # survives, because it reads only the entry open and the exit close. So a
+    # closed trade CAN carry a NaN MFE/MAE, and that is the honest answer
+    # rather than a max taken over the bars that happened to survive.
+    # Comparing with `.all()` over the raw column conflated the two: a NaN
+    # fails every comparison, so an unmeasurable excursion reported itself as
+    # an ordering violation. Assert the ordering where it was measured, and
+    # assert separately that the unmeasured ones are NaN and explained.
+    measured = closed[closed["mfe_pct"].notna() & closed["mae_pct"].notna()]
+    unmeasured = closed[closed["mfe_pct"].isna() | closed["mae_pct"].isna()]
+    c.ok("MFE >= MAE wherever both were measured",
+         (measured["mfe_pct"] >= measured["mae_pct"]).all(),
+         f"{len(measured)} of {len(closed)} closed trades")
+    c.ok("the return lies within [MAE, MFE] wherever measured",
+         ((measured["return_pct"] <= measured["mfe_pct"] + 1e-6)
+          & (measured["return_pct"] >= measured["mae_pct"] - 1e-6)).all())
+    c.ok("an unmeasurable excursion is NaN on BOTH sides, never half a range",
+         (unmeasured["mfe_pct"].isna() & unmeasured["mae_pct"].isna()).all(),
+         f"{len(unmeasured)} unmeasurable -- a hole in the price path")
+    c.ok("...and it still carries a real return",
+         unmeasured["return_pct"].notna().all(),
+         "entry open and exit close are unaffected by an interior hole")
     c.ok("open trades carry no return", opened["return_pct"].isna().all())
     c.ok("closed count == summed 'evaluable'",
          len(closed) == int(cohorts["evaluable"].sum()),

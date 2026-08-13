@@ -1,4 +1,4 @@
-# S&P 500 Scanners
+# S&P 500 / MidCap 400 Scanners
 
 Nightly scans of all S&P 500 stocks (via Windows Task Scheduler) with results
 sent to Discord via a webhook — a short summary line per screen, then one
@@ -12,6 +12,29 @@ Each screen reports **one signal list with two tiers** (there is no separate
 when the setup is incomplete, with `Missing` naming the failing test. Full
 setups are listed first. See [Signal tiers](#signal-tiers).
 
+## The universe
+
+`data.universe_sources` lists one entry per index — `name`, `label`, `url` and
+`alert`. Today that is the **S&P 500 (503 names, alerted)** and the **S&P
+MidCap 400 (400 names, not yet alerted)**: 903 constituents, no overlap,
+because S&P's indices are mutually exclusive by construction. All three list
+pages on Wikipedia publish the same `Symbol` / `GICS Sector` /
+`GICS Sub-Industry` headings, so adding the 600 later needs a config line and
+no parser.
+
+**`alert` gates the nightly Discord message and nothing else.** The risk/reward
+plane, the peer distributions and the profit backtest grade every configured
+source regardless — exactly the split `<screen>.enabled` already draws, and for
+the same reason: a universe is held back from the alert precisely when nobody
+has measured whether its signals pay, which is when it most needs measuring.
+Promoting the mid-caps is therefore a one-line config change once
+`backtest_universe.py` says their cohort clears the random-entry baseline.
+
+Every signal records the index it fired in, as an `Index` column on
+`signals.csv` and on the tier-4 position. S&P rewrites index membership at each
+rebalance, so it cannot be reconstructed after the fact — same reason `Setup`
+is recorded rather than recomputed.
+
 ## The four-tier pipeline
 
 The scan is the first of four stages. The first three narrow, each recording
@@ -20,7 +43,7 @@ the market actually did:
 
 | tier | what it asks | how | output |
 |---|---|---|---|
-| **1 — technical** | Is the chart set up? | `breakout_scanner` / `sma_pullback` / `sma_reclaim`, nightly over all 503 names | `Setup` (`full`/`partial`) + `Missing` |
+| **1 — technical** | Is the chart set up? | `breakout_scanner` / `sma_pullback` / `sma_reclaim`, nightly over the 503 alerting names | `Setup` (`full`/`partial`) + `Missing` |
 | **2 — quality** | Are the fundamentals sound? | the `fast` half of the `quality` registry over the tier-1 hits only, one Yahoo pass | `Quality` (the ⭐ badge) + `Quality Missing` |
 | **3 — verdict** | How does the *business* grade out? | the `deep` half of the same registry, weighted to 0-100 → a tier and a conviction. Deterministic, inside the nightly scan, and nothing revises it | a tier/conviction verdict + `_facts.json` + the financials chart |
 | **4 — portfolio** | Was any of it *right*? | `portfolio_sim`: buy every recorded signal at the next open, grade every recorded attribute against the realized return, and watch the book for a double-top exit | `output/portfolio/positions.csv` + `findings.csv` + `exits.csv` |
@@ -422,9 +445,9 @@ proves the gates and anchors reproduce the two sections they replaced.
 
 ```
 pip install -r requirements.txt
-python run_scanners.py            # tiers 1+2: full S&P 500 scan + Discord alert
+python run_scanners.py            # tiers 1+2: the alerting universe + Discord alert
 python run_scanners.py --no-send  # the same scan, cards printed instead of posted
-python universe_scan.py           # the whole index on the risk/reward plane (~13 min)
+python universe_scan.py           # all 903 constituents on the risk/reward plane (~17 min)
 python universe_scan.py --no-fetch                   # re-render from cache, no network
 python research_report.py candidates                 # tier 3: who is worth researching
 python research_report.py risk INTC MSFT             # every risk rule beside its threshold
@@ -460,7 +483,7 @@ do: run something, run it safely, or run it without blocking.
 |---|---|
 | `scan_status` | latest scan: date, per-screen counts, tickers |
 | `scan_tickers` | tiers 1+2 for named tickers, on demand |
-| `run_nightly_scan` | the full S&P 500 scan **(prompts)** |
+| `run_nightly_scan` | the full scan over the alerting universe **(prompts)** |
 | `deepdive_candidates` | who is worth a deep dive, per the tier-2 gate |
 | `deepdive_context` | the deterministic tier-3 research bundle |
 | `params_list` | **every tunable parameter**, its current value and the path to change it |

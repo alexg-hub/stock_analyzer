@@ -64,7 +64,7 @@ def register(mcp) -> None:
 
     @mcp.tool()
     def run_nightly_scan(send: bool = False) -> dict:
-        """Run the full nightly scan over the whole S&P 500 (tiers 1 and 2).
+        """Run the full nightly scan over the alerting universe (tiers 1 and 2).
 
         Minutes of Yahoo traffic, so it returns a job_id. **With `send=True`
         this posts to the user's real Discord channel** -- the default prints

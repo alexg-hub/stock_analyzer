@@ -92,7 +92,8 @@ CAVEATS = [
     "Trades overlap and cluster -- signals arrive in bunches on the same few "
     "days, so they are not independent samples and every p-value here is "
     "optimistic.",
-    "Survivorship: the screens run over today's S&P 500 membership.",
+    "Survivorship: the screens run over today's index membership, and a name's "
+    "index is recorded as of the signal, not of the trade.",
     "Dozens of tests share one sample. Read q_value (FDR-adjusted), not "
     "p_value; 'significant' is keyed off q.",
     "Pending and open positions are recorded but excluded from every "

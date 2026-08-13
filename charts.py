@@ -409,7 +409,7 @@ def plot_backtest_summary(summary: pd.DataFrame, horizon: int, entry: str,
     _title(ax_ret,
            f"Screen performance -- buy at {entry.replace('_', ' ')}, "
            f"sell {horizon} trading days later",
-           "S&P 500, price-only returns, no costs; survivorship-biased "
+           "Index constituents, price-only returns, no costs; survivorship-biased "
            "(today's index members only)")
     fig.savefig(out_path, dpi=dpi, bbox_inches="tight", facecolor=C["surface"])
     plt.close(fig)

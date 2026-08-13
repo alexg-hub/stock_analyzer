@@ -8,8 +8,9 @@ A **four-tier stock filter** running nightly on this Windows machine via Task
 Scheduler, plus historical tooling (single-ticker backtesters, a universe-wide
 profit backtest, a threshold tuner).
 
-1. **Tier 1 — technical.** The S&P 500 screens (breakout, pullback; reclaim
-   disabled). Records `Setup` (`full`/`partial`) + `Missing`.
+1. **Tier 1 — technical.** The index screens (breakout, pullback; reclaim
+   disabled). Records `Setup` (`full`/`partial`) + `Missing`, and the `Index`
+   the ticker signalled in.
 2. **Tier 2 — quality *and* exclusion.** The `fast` half of the `quality`
    registry graded over the tier-1 hits. Records `Quality` (the ⭐ badge) +
    `Quality Missing`, and — the "identify the losers" half of the thesis —
@@ -187,7 +188,7 @@ python combined_report.py --from-signals 7   # -> reports/signals_combined_<date
 # The risk/reward plane. Cached per ticker, so a re-run is instant. No Discord.
 # Each scope writes its OWN table/PNG/HTML -- a subset can never overwrite the
 # whole-index plane (it silently did until 2026-08-10).
-python universe_scan.py                      # all 503 -> risk_reward_*    ~13 min
+python universe_scan.py                      # all 903 -> risk_reward_*    ~17 min
 python universe_scan.py --from-signals       # the week's signals -> signals_plane_*
 python universe_scan.py --from-signals 14    # ...a 14-day window instead
 python universe_scan.py --tickers MSFT KO    # just these -> subset_plane_*
@@ -226,7 +227,7 @@ python mcp_server.py                # stdio (what .mcp.json runs)
 ```
 
 To test alert formatting/sending without spamming the channel, monkeypatch
-`run_scanners.get_sp500_tickers` (small ticker list) and
+`run_scanners.universe_constituents` (a small frame) and
 `run_scanners.send_discord_alert` (print instead of POST) in a scratchpad
 script and call `run_scanners.main()` — or confirm with the user before any
 real send.
@@ -248,6 +249,84 @@ real send.
 
   The rest of the registry contract (`scan`, `EMBED_COLOR`/`describe_hit`,
   `plot_hit`) and how to add a screen are in `run_scanners.py`'s own docstring.
+- **The universe is a list of indices, and `alert` gates only the alert.**
+  `data.universe_sources` holds one entry per index (`name`, `label`, `url`,
+  `alert`); `scanner_common.universe_constituents(cfg, alert_only=)` is the one
+  fetch and the one parse, `universe_tickers` its list form. Today: **S&P 500
+  (503, alerted) + S&P MidCap 400 (400, not alerted) = 903**, no overlap,
+  because S&P's indices are mutually exclusive by construction. The Nasdaq-100
+  was considered first and rejected on measurement — 87 of its 102 members were
+  already constituents, and of the 15 net-new names ~7 are foreign private
+  issuers that file 20-F/6-K, for which `sec.flags()` returns a confident
+  **all-zero** rather than `{}`: ten risk flags reading a clean 1.00, which
+  `worst_k` then never selects, so those names would grade structurally safer
+  than any US filer with nothing saying why. Four rules:
+  - **`alert: false` gates the nightly Discord message and nothing else.**
+    Identical semantics to `<screen>.enabled`, for the identical reason:
+    `universe_scan.py`, `peers.py` and `backtest_universe.py` all grade every
+    source, because a universe is held back from the alert precisely when
+    nobody has measured whether its signals pay. `run_scanners.py` is the only
+    caller passing `alert_only=True`. Promotion is a config flip, once the
+    mid-cap cohort clears the random-entry baseline — **and as of 2026-08-13 it
+    does not, which is why `sp400` is still `alert: false`.** Measured over 3
+    years of the 903-name panel, split by `index_name` against each index's own
+    baseline (wait 0, hold 30):
+
+    | screen | S&P 500 excess | S&P 400 excess |
+    |---|---|---|
+    | breakout | **+0.59** | **−1.76** |
+    | pullback | **+0.68** | +0.06 |
+    | reclaim (off) | −1.40 | −0.34 |
+
+    Not an outlier artifact: mid-cap breakout is below its baseline on mean,
+    **median** (0.51 vs 1.53) and **win rate** (51.7% vs 55.8%) alike, on 2008
+    signals, and the sign holds at 10, 30 and 60 days. Mid-cap pullback is
+    flat — better than baseline on median and win rate, level on mean, which is
+    not enough to earn a card. So the mid-caps stay measured and unalerted, and
+    that is the flag doing exactly its job. Re-run before revisiting; the split
+    is not a repo script yet, which is the gap to close if this becomes a
+    recurring question.
+    (Noted in passing, and a separate matter: **breakout on the S&P 500 is
+    mean-positive but median-negative** — +0.59 mean against a median of 1.37
+    vs the baseline's 1.55. Its edge is a handful of large winners, not a
+    typical trade. That predates this change and is worth its own look.)
+  - **One parse covers every S&P index.** The 500, 400 and 600 list pages all
+    publish `Symbol` / `GICS Sector` / `GICS Sub-Industry`, so `_index_table`
+    and `_CONSTITUENT_COLS` are unchanged and adding the 600 is a config line.
+    That is *why* the MidCap 400 was the cheap expansion and the Nasdaq-100 was
+    not — the NDX page carries no ticker table at all any more, and its foreign
+    members have no GICS sector in any source here, which would have dropped
+    exactly those names to absolute anchors while everything else used peers.
+  - **Fail-open per source, and de-duplicated first-wins.** An unreachable or
+    reshaped index logs `UNIVERSE warn` and is skipped; losing the mid-caps
+    must never cost the S&P 500 scan. Every source failing yields an empty
+    frame, and the download that follows raises — loud, which is right. The
+    de-duplication guards a rebalance moving a name between indices: a
+    duplicate would be downloaded, screened and peer-ranked twice.
+  - **`Index` is recorded on every signal** (`INDEX_COL`, joined in
+    `run_scanners.main()` before `quality.annotate`), so it reaches
+    `latest_hits.json`, `signals.csv` and — because a position copies its whole
+    source row — the tier-4 ledger. Same rule as `Setup`: S&P rewrites
+    membership at every rebalance, so it is not reconstructable later, and it
+    is the only thing that makes "did the mid-caps pay?" answerable. Written by
+    the scan, so like `VETO_COLS` it stays **out** of `merge_history_csv`'s
+    `protect=`. Wiring it as a graded tier-4 *question* is still to do.
+  - **Peer distributions pool the indices by sector**, deliberately, and this
+    was checked rather than assumed. Every pooled bucket is 29–170 names
+    against `MIN_PEERS` 12, whereas bucketing by `(sector, index)` puts S&P 400
+    Communication Services at 6 — under the floor, and so silently back on
+    absolute anchors. The worry was that pooling would introduce a *size* bias
+    the way absolute anchors introduced a sector one. Measured on the first
+    903-name pass: mid-caps do read riskier (mean risk **66.3 vs 61.2**, veto
+    rate **17.2% vs 11.5%**), but that is a gradient, not an exclusion — the
+    tell is the buy quadrant, where they hold **47.5%** of the places against a
+    **44.3%** population share. Compare the utilities case that motivated
+    `peers.py`: 84% of the sector vetoed and the highest mean risk in the
+    index. So pooling stands. If it ever stops standing the symptom is
+    mid-caps' buy share collapsing below their population share, and the fix is
+    a `(sector, index)` → `sector` → absolute fallback chain. Re-run the
+    diagnostic after any scoring change; the 15 buckets already under
+    `MIN_PEERS` fall back to absolute anchors and are expected to.
 - **The `compute_*` function in each screen module is the single source of
   truth** for its condition math (`breakout_scanner.compute_signals`,
   `sma_pullback.compute_pullback_signals`,
@@ -534,7 +613,7 @@ real send.
     the previous week's page over it. It posts nothing to Discord: a reference
     artifact is not an event, and the nightly card already carries the part that
     is actionable that day.
-    **The full 503-ticker pass is therefore on no schedule.** Run it by hand when
+    **The full 903-ticker pass is therefore on no schedule.** Run it by hand when
     the whole plane needs refreshing — and note it is the base population for the
     sector-relative percentiles the scoring still needs, so it going stale
     silently blocks that work.
@@ -545,7 +624,11 @@ real send.
     day's whole-index plane with a plane of ten — no error, just a quietly wrong
     chart. Three scopes now: `SCOPE_UNIVERSE` keeps the configured names (the MCP
     tools glob them and the published page is built from them), `SCOPE_SIGNALS`
-    writes `signals_plane_*`, `SCOPE_SUBSET` writes `subset_plane_*`. The
+    writes `signals_plane_*`, `SCOPE_SUBSET` writes `subset_plane_*` — and
+    **`--limit` is a subset too**, which it was not until 2026-08-13: the
+    timing probe kept `SCOPE_UNIVERSE`, so it republished the day's whole-index
+    plane from thirty names *and* rebuilt `peer_stats.json` from them, the one
+    file whose entire contract is that only a full pass may narrow it. The
     **cache is shared** by all three, which is correct — it is keyed per ticker,
     so any run simply refreshes the rows it touched. A test pins that the three
     scopes cannot collide.
@@ -581,9 +664,14 @@ real send.
     install, a thin sector and a cold cache behaving exactly as before.
   - **Percentile scoring re-centres a metric at 0.5**, so switching it on moves
     the *level* of both axes and invalidates fixed quadrant thresholds. They were
-    recalibrated once (`reward_min` 60→58, `risk_max` 25→30) and again when
-    `worst_k` was enabled (`risk_max` 30→56, 47 buys across all 11 sectors);
-    expect to do it every time the scoring changes.
+    recalibrated once (`reward_min` 60→58, `risk_max` 25→30), again when
+    `worst_k` was enabled (`risk_max` 30→56, 47 buys across all 11 sectors),
+    and again when the MidCap 400 doubled the population (`reward_min` 58→59,
+    `risk_max` 56→58, 80 buys of 903 across all 11 sectors). That third one
+    barely moved, which is itself the finding: adding 400 mid-caps shifted the
+    *level* of neither axis much. Expect to do it every time the scoring or
+    the population changes, and re-anchor at the **percentile the old bar sat
+    at**, never by eye.
   - **A caller that forgets to pass `sector` gets absolute anchors, silently.**
     Every grading entry point takes `sector` as its 4th argument
     (`evaluate`, `axis_scores`, `score_of`, `group_scores`, `veto_failures`), and
@@ -1305,7 +1393,21 @@ real send.
   NaN run is a young listing and a trailing one a delisting or an unsettled tail,
   both legitimate and neither poisoning any later bar's window. That distinction
   is what keeps it at ~30 tickers on a normal 2y panel instead of firing every
-  night and going unread; tests pin both halves.
+  night and going unread; tests pin both halves. On the 5y/904 backtest panel
+  it reads **116** — bigger universe, longer window, same defect.
+  **The same hole voids an excursion without touching the return.**
+  `forward_trades` takes MFE/MAE with `rolling` at the default
+  `min_periods=window`, so one interior NaN inside the holding window makes
+  both NaN, while `return_pct` reads only the entry open and the exit close and
+  survives. A closed trade with NaN excursions is therefore *correct* — the
+  path could not be measured, and a max over the bars that happened to survive
+  would be a plausible wrong number. `describe` already uses `nanmean`, so the
+  cost is nil (3 of 9036 trades on 2026-08-13). `test_backtest_stats.py` used
+  to compare the columns with a bare `.all()`, which a NaN fails — so an
+  unmeasurable excursion reported itself as an *ordering violation*, the exact
+  missing-vs-failing conflation the registry forbids everywhere else. It now
+  asserts the ordering where measured and, separately, that an unmeasured one
+  is NaN on both sides and still carries a real return.
 - Windows box, Microsoft Store Python 3.13 (`python` on PATH). yfinance's
   progress bar is disabled for non-TTY output so `output/scanner_log.txt` stays
   readable. matplotlib uses the Agg backend (set in `charts.py`).

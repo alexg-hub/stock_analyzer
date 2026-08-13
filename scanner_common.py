@@ -1,5 +1,5 @@
 """
-Shared infrastructure for all S&P 500 scanners.
+Shared infrastructure for all index scanners.
 
 Everything here is scanner-agnostic: config loading, ticker universe,
 bulk/single-ticker price downloads, fundamentals, and Discord delivery.
@@ -76,6 +76,14 @@ COMPANY_COL = "Company"
 # needing the engine.
 QUALITY_COL = "Quality"
 QUALITY_MISSING_COL = "Quality Missing"
+
+# Which index the ticker was a member of when it signalled, written by the scan
+# from `universe_constituents`. Recorded for the same reason `Setup` is: S&P
+# rewrites index membership at every rebalance, so it cannot be reconstructed
+# later, and it is what makes "did the mid-caps pay?" a question tier 4 can
+# answer instead of a decision nobody revisits. Written by the scan, so like
+# `VETO_COLS` it stays *out* of `merge_history_csv`'s `protect`.
+INDEX_COL = "Index"
 
 # The exclusion verdict, written by the same `quality.annotate` pass. Separate
 # from the badge on purpose: the badge asks "is this a good company" and most
@@ -368,12 +376,14 @@ _CONSTITUENT_COLS = {"symbol": "ticker",
                      "gics sub-industry": "sub_industry"}
 
 
-def sp500_constituents(source_url: str) -> pd.DataFrame:
-    """The S&P 500 table from Wikipedia: ticker, sector, sub_industry.
+def _index_table(source_url: str) -> pd.DataFrame:
+    """One index's constituent table from Wikipedia: ticker, sector,
+    sub_industry.
 
-    The single place that knows the shape of that table. `get_sp500_tickers`
-    takes its ticker column, so there is one fetch and one parse no matter which
-    of the two you call.
+    The single place that knows the shape of that table -- and one shape covers
+    every S&P index, because the S&P 500, 400 and 600 list pages all publish the
+    same `Symbol` / `GICS Sector` / `GICS Sub-Industry` headings. That is the
+    whole reason adding the MidCap 400 needed no second parser.
 
     Sector matters because every threshold in the `quality` registry is an
     *absolute* anchor, and several of them are only meaningful relative to a
@@ -403,17 +413,127 @@ def sp500_constituents(source_url: str) -> pd.DataFrame:
     # Yahoo uses '-' where Wikipedia uses '.' in share-class tickers
     # (BRK.B -> BRK-B), so normalize before anything downloads.
     out["ticker"] = out["ticker"].str.replace(".", "-", regex=False)
-
-    missing = int((out["sector"] == "").sum())
-    log_step("UNIVERSE", "ok" if not missing else "partial",
-             f"{len(out)} S&P 500 constituents from Wikipedia"
-             + (f" -- {missing} without a sector" if missing else ""))
     return out
 
 
-def get_sp500_tickers(source_url: str) -> list[str]:
-    """Just the tickers, for the callers that only ever wanted a list."""
-    return sp500_constituents(source_url)["ticker"].tolist()
+def universe_sources(cfg: dict) -> list[dict]:
+    """The configured index sources, normalized.
+
+    `data.universe_sources` is a list of `{name, label, url, alert}`; `label`
+    defaults to `name` and is what user-facing text calls the index. The older
+    single-index `data.sp500_source_url` is still honoured as a one-source
+    universe, so an archived or hand-edited config keeps working unchanged.
+    """
+    data = cfg.get("data", {})
+    sources = data.get("universe_sources")
+    if not sources:
+        url = data.get("sp500_source_url")
+        sources = [{"name": "sp500", "label": "S&P 500", "url": url,
+                    "alert": True}] if url else []
+    out = []
+    for i, src in enumerate(sources):
+        if not src.get("url"):
+            continue
+        name = str(src.get("name") or f"source{i}")
+        out.append({"name": name,
+                    "label": str(src.get("label") or name),
+                    "url": src["url"],
+                    "alert": bool(src.get("alert", True))})
+    return out
+
+
+def universe_label(cfg: dict, alert_only: bool = True) -> str:
+    """What to call the scanned universe in user-facing text.
+
+    Config-driven for the same reason every threshold and chart label here is:
+    the alert header said "S&P 500 Scan" as a literal, which stopped being true
+    the moment a second index was configured, and nothing would have flagged
+    it. `alert_only` because the header names what the message covers.
+    """
+    labels = [s["label"] for s in universe_sources(cfg)
+              if s["alert"] or not alert_only]
+    return " + ".join(labels) if labels else "Universe"
+
+
+def universe_constituents(cfg: dict, alert_only: bool = False) -> pd.DataFrame:
+    """Every configured index as one frame: ticker, sector, sub_industry,
+    index_name, alert.
+
+    Replaced the single-URL `sp500_constituents` when the MidCap 400 was added
+    on 2026-08-13. Two columns carry what the concatenation would otherwise
+    lose:
+
+    * **`index_name`** -- which index the row came from. Named that rather than
+      `index` because a column called `index` collides with `DataFrame.index`
+      in every `.itertuples()` and `.to_dict()` that touches the frame. It is
+      recorded on the signal row for the same reason `Setup` is: membership at
+      signal time is not recoverable afterwards, and it is the only thing that
+      makes "did mid-cap signals pay?" a question tier 4 can answer.
+    * **`alert`** -- whether this source reaches the nightly Discord alert.
+      Exactly the semantics `<screen>.enabled` already has: it gates the alert
+      and nothing else, so `universe_scan.py`, `peers.py` and
+      `backtest_universe.py` all keep grading a source the alert ignores. A
+      universe is added precisely when nobody knows yet whether it pays, which
+      is when it most needs measuring.
+
+    **Fail-open, per source.** A 404, a moved table shape or an unreachable
+    Wikipedia costs that one index and logs `UNIVERSE warn`; whatever parsed
+    still runs. Losing the mid-caps must never cost the S&P 500 scan. With no
+    source left standing the caller gets an empty frame and the download that
+    follows raises -- which is the honest outcome, and loud.
+    """
+    frames = []
+    for src in universe_sources(cfg):
+        try:
+            table = _index_table(src["url"])
+        except Exception as exc:  # noqa: BLE001 - one index must not sink the rest
+            log_step("UNIVERSE", "warn",
+                     f"{src['name']}: {exc} -- skipped, continuing without it")
+            continue
+        table["index_name"] = src["name"]
+        table["alert"] = src["alert"]
+        missing = int((table["sector"] == "").sum())
+        log_step("UNIVERSE", "ok" if not missing else "partial",
+                 f"{src['name']}: {len(table)} constituents from Wikipedia"
+                 + (f" -- {missing} without a sector" if missing else "")
+                 + ("" if src["alert"] else " (not alerted)"))
+        frames.append(table)
+
+    if not frames:
+        log_step("UNIVERSE", "failed", "no index source could be read")
+        return pd.DataFrame(columns=["ticker", "sector", "sub_industry",
+                                     "index_name", "alert"])
+
+    out = pd.concat(frames, ignore_index=True)
+    # First source wins. The S&P indices are mutually exclusive by construction
+    # so this drops nothing today, but S&P moves names between them at
+    # rebalance, and a duplicate would be downloaded twice, screened twice and
+    # counted twice in its sector's peer distribution.
+    before = len(out)
+    out = out.drop_duplicates(subset="ticker", keep="first").reset_index(drop=True)
+    if len(out) != before:
+        log_step("UNIVERSE", "warn",
+                 f"{before - len(out)} ticker(s) listed by more than one index "
+                 f"-- kept the first")
+
+    if len(frames) > 1:
+        log_step("UNIVERSE", "ok",
+                 f"{len(out)} constituents across {len(frames)} index/indices "
+                 f"({int(out['alert'].sum())} alerted)")
+    if alert_only:
+        out = out[out["alert"]].reset_index(drop=True)
+    return out
+
+
+def universe_tickers(cfg: dict, alert_only: bool = False) -> list[str]:
+    """Just the tickers, for the callers that only ever wanted a list.
+
+    `alert_only` is the nightly scan's gate: it drops every source whose
+    `alert` is false. Everything that *measures* rather than notifies -- the
+    universe plane, the peer statistics, the profit backtest -- deliberately
+    leaves it False and grades the whole universe.
+    """
+    return universe_constituents(cfg, alert_only=alert_only)["ticker"].tolist()
 
 
 def drop_unsettled_bars(data: pd.DataFrame, max_missing_pct: float = 0.5) -> pd.DataFrame:

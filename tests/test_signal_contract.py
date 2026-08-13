@@ -173,7 +173,9 @@ run_cfg["research"]["history"].update(enabled=True, dir=str(sandbox / "history")
 # config this is deep-copied from, so run_cfg inherits it.
 
 run_scanners.load_config = lambda: run_cfg
-run_scanners.get_sp500_tickers = lambda url: list(panel["Close"].columns)
+run_scanners.universe_constituents = lambda cfg, alert_only=False: pd.DataFrame(
+    {"ticker": list(panel["Close"].columns), "sector": "",
+     "sub_industry": "", "index_name": "sp500", "alert": True})
 run_scanners.download_price_data = lambda t, period, interval: truncated
 run_scanners.send_discord_alert = \
     lambda content, dc, embeds=(), images=(): captured.update(

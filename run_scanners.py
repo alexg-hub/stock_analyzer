@@ -1,5 +1,5 @@
 """
-Nightly S&P 500 scan -- entry point.
+Nightly index scan -- entry point.
 
 Downloads the whole universe once, runs every enabled screen module over
 it, and sends one combined Discord alert (text sections + a chart image
@@ -36,6 +36,7 @@ import sma_pullback
 import sma_reclaim
 from scanner_common import (
     DISCLAIMER,
+    INDEX_COL,
     QUALITY_COL,
     VETO_COL,
     VETO_REASONS_COL,
@@ -45,13 +46,14 @@ from scanner_common import (
     build_hits_payload,
     download_price_data,
     enable_utf8_output,
-    get_sp500_tickers,
     load_config,
     log_step,
     output_dir,
     prune_run_logs,
     run_id,
     send_discord_alert,
+    universe_constituents,
+    universe_label,
     write_latest_hits,
 )
 
@@ -72,7 +74,7 @@ def parse_args(argv: list[str] | None = None):
     added here has to be optional and default to the production path.
     """
     parser = argparse.ArgumentParser(
-        description="Nightly S&P 500 scan (tiers 1 and 2).")
+        description="Nightly index scan (tiers 1 and 2).")
     parser.add_argument(
         "--no-send", action="store_true",
         help="print the Discord cards instead of posting them (dry run)")
@@ -338,7 +340,13 @@ def main(argv: list[str] | None = None) -> int:
     if pruned:
         log_step("SCAN", "ok", f"pruned {pruned} old run log(s)", cfg=cfg)
 
-    tickers = get_sp500_tickers(cfg["data"]["sp500_source_url"])
+    # `alert_only`: a source with `alert: false` is graded by the plane, the
+    # peer statistics and the backtest, but never reaches this alert -- the
+    # same split `<screen>.enabled` draws between notifying and measuring.
+    # The frame rather than the ticker list, because `index_name` is recorded
+    # on every signal below and a second call would re-fetch Wikipedia.
+    constituents = universe_constituents(cfg, alert_only=True)
+    tickers = constituents["ticker"].tolist()
     data = download_price_data(
         tickers,
         period=cfg["data"]["download_period"],
@@ -374,6 +382,17 @@ def main(argv: list[str] | None = None) -> int:
     if not fundamentals.empty:
         for _, result in results:
             result.hits = result.hits.join(fundamentals)
+
+    # -- which index each signal came from, recorded on the row. Same rule as
+    #    `Setup`: index membership is rewritten by S&P at every rebalance, so
+    #    it is not recoverable after the fact, and it is the only thing that
+    #    lets tier 4 ever ask whether mid-cap signals behaved differently --
+    index_of = dict(zip(constituents["ticker"], constituents["index_name"])) \
+        if not constituents.empty else {}
+    for _, result in results:
+        if not result.hits.empty:
+            result.hits[INDEX_COL] = [index_of.get(t, "")
+                                      for t in result.hits.index]
 
     # -- tier 2: grade the fundamentals once, here. Both the Discord badge and
     #    the hand-off read the recorded verdict, so they cannot disagree --
@@ -445,7 +464,7 @@ def main(argv: list[str] | None = None) -> int:
                  ms=(time.perf_counter() - chart_t0) * 1000, cfg=cfg)
 
     # -- header/summary text + one embed card per ticker --
-    summary = [f"**S&P 500 Scan -- {scan_date}**"]
+    summary = [f"**{universe_label(cfg)} Scan -- {scan_date}**"]
     embeds, image_paths = [], []
     for module, result in results:
         if result.hits.empty:

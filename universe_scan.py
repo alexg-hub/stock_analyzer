@@ -1,5 +1,5 @@
 """
-Universe-wide risk/reward pass: every S&P 500 name on the quadrant plane.
+Universe-wide risk/reward pass: every constituent on the quadrant plane.
 
 Grades the whole index through the `quality` registry's **`fast`** stage and
 records the two axis coordinates `quality.axis_scores` produces, so the thesis
@@ -71,7 +71,7 @@ from scanner_common import (
     load_config,
     log_step,
     output_dir,
-    sp500_constituents,
+    universe_constituents,
 )
 
 CONFIG_KEY = "universe"
@@ -85,7 +85,7 @@ AVOID = quality.QUADRANT_AVOID
 UNKNOWN = quality.QUADRANT_UNKNOWN
 
 TABLE_COLUMNS = [
-    "ticker", "company", "sector", "sub_industry",
+    "ticker", "company", "sector", "sub_industry", "index_name",
     "reward", "risk", "safety", "quadrant",
     "vetoed", "veto_reasons",
     "stage", "risk_metrics_used", "risk_metrics_total",
@@ -456,6 +456,11 @@ def build_table(cfg: dict, cache: dict, constituents: pd.DataFrame
             "sector": sector,
             "sub_industry": (meta.get("sub_industry")
                              if hasattr(meta, "get") else "") or "",
+            # Which index the name came from. Carried so the by-index skew is
+            # readable straight off the table -- adding a second population to
+            # one set of peer distributions is a hypothesis, not a fact.
+            "index_name": (meta.get("index_name")
+                           if hasattr(meta, "get") else "") or "",
             "reward": graded["reward"],
             "risk": graded["risk"],
             "safety": graded["safety"],
@@ -495,15 +500,34 @@ def _with_sectors(cfg: dict, tickers: list[str]) -> pd.DataFrame:
     by but the table and the peer lookup both use. Fail-open: a scoped run must
     still work when Wikipedia is unreachable, just without sectors.
     """
-    blank = pd.DataFrame({"ticker": tickers, "sector": "", "sub_industry": ""})
+    blank = pd.DataFrame({"ticker": tickers, "sector": "", "sub_industry": "",
+                          "index_name": ""})
     try:
-        full = sp500_constituents(cfg["data"]["sp500_source_url"])
+        full = universe_constituents(cfg)
     except Exception as exc:  # noqa: BLE001 - sector is a nicety, not a gate
         log_step("UNIVERSE", "warn",
                  f"no sector labels ({exc}) -- grading anyway", cfg=cfg)
         return blank
     merged = blank[["ticker"]].merge(full, on="ticker", how="left")
-    return merged.fillna({"sector": "", "sub_industry": ""})
+    return merged.fillna({"sector": "", "sub_industry": "", "index_name": ""})
+
+
+def _limited(constituents: pd.DataFrame, limit: int) -> pd.DataFrame:
+    """The first `limit` names, sampled across every index rather than off the
+    top of the concatenation.
+
+    `--limit` is a timing probe: it exists to answer "how long will the full
+    pass take" before committing ~20 minutes to it. A plain `.head()` reads
+    entirely off the first source, so the probe would time 30 large caps and
+    say nothing about the mid caps whose thinner Yahoo coverage is exactly what
+    might slow the run down.
+    """
+    if constituents.empty or "index_name" not in constituents.columns:
+        return constituents.head(limit)
+    groups = constituents["index_name"].nunique()
+    per_source = -(-limit // max(1, groups))  # ceil, so the total is never short
+    return (constituents.groupby("index_name", sort=False)
+            .head(per_source).head(limit))
 
 
 def signal_tickers(cfg: dict, days: int) -> list[str]:
@@ -950,9 +974,17 @@ def main(argv=None) -> int:
         constituents = _with_sectors(cfg, wanted)
     else:
         scope = SCOPE_UNIVERSE
-        constituents = sp500_constituents(cfg["data"]["sp500_source_url"])
+        constituents = universe_constituents(cfg)
         if args.limit:
-            constituents = constituents.head(args.limit)
+            # A limited run is a subset, and must be scoped like one. It kept
+            # SCOPE_UNIVERSE until 2026-08-13, which meant a 30-ticker timing
+            # probe both replaced the day's whole-index table/PNG/page and
+            # **rebuilt peer_stats.json from 30 names** -- the one file whose
+            # whole contract is that only a full pass may narrow it. The
+            # `--tickers` path had been fixed for exactly this; `--limit` sat
+            # one branch away and had not.
+            scope = SCOPE_SUBSET
+            constituents = _limited(constituents, args.limit)
 
     tickers = constituents["ticker"].tolist()
     cache = scan(cfg, tickers, refresh=args.refresh, fetch=not args.no_fetch)

@@ -6,7 +6,10 @@
         "request_timeout_seconds": 15
     },
     "data": {
-        "sp500_source_url": "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
+        "universe_sources": [
+            {"name": "sp500", "label": "S&P 500", "url": "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies", "alert": true},
+            {"name": "sp400", "label": "S&P MidCap 400", "url": "https://en.wikipedia.org/wiki/List_of_S%26P_400_companies", "alert": false}
+        ],
         "download_period": "2y",
         "download_interval": "1d"
     },
@@ -1187,8 +1190,8 @@
         "veto_tier": "AVOID",
         "veto_enforced": false,
         "quadrant": {
-            "reward_min": 58,
-            "risk_max": 56
+            "reward_min": 59,
+            "risk_max": 58
         },
         "peers": {
             "enabled": true,

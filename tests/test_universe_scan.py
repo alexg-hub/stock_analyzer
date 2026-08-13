@@ -32,6 +32,7 @@ import pandas as pd
 from _harness import Checks, config
 
 import quality
+import scanner_common
 import universe_scan
 
 c = Checks("universe plane")
@@ -214,6 +215,87 @@ for name, frame in (("empty", universe_scan.build_table(cfg, {}, pd.DataFrame())
 
 c.ok("the payload is JSON with no NaN, which no browser can parse",
      "NaN" not in universe_scan.html_payload(built, cfg)[0])
+
+# --------------------------------------------------------------------------
+c.section("many indices, one universe -- and `alert` gates only the alert")
+
+# Stubbed at the parse boundary, so everything above it -- the source list, the
+# concatenation, the de-duplication and the gate -- is the real code.
+INDEX_TABLES = {
+    "big://ok": pd.DataFrame({"ticker": ["AAA", "BBB", "DUP"],
+                              "sector": ["Tech", "Tech", "Energy"],
+                              "sub_industry": ["", "", ""]}),
+    "mid://ok": pd.DataFrame({"ticker": ["CCC", "DUP"],
+                              "sector": ["Health", "Energy"],
+                              "sub_industry": ["", ""]}),
+}
+
+def _index_table(url):
+    if url not in INDEX_TABLES:
+        raise RuntimeError(f"404 {url}")
+    return INDEX_TABLES[url].copy()
+
+
+scanner_common._index_table = _index_table
+
+
+def sources_cfg(*entries):
+    return {"data": {"universe_sources": [
+        dict(zip(("name", "url", "alert"), e)) for e in entries]}}
+
+
+two = sources_cfg(("big", "big://ok", True), ("mid", "mid://ok", False))
+alerted = scanner_common.universe_tickers(two, alert_only=True)
+graded = scanner_common.universe_tickers(two)
+
+# The invariant the whole measure-first rollout rests on: a source held back
+# from the alert must still be graded by everything that measures, or holding
+# it back would mean never learning whether it was worth alerting.
+c.ok("a source with alert:false never reaches the nightly alert",
+     "CCC" not in alerted, f"alerted={alerted}")
+c.ok("...but is still graded by the plane, the peers and the backtest",
+     "CCC" in graded, f"graded={graded}")
+c.ok("an alerting source is in both", "AAA" in alerted and "AAA" in graded)
+
+frame = scanner_common.universe_constituents(two)
+dup = frame[frame["ticker"] == "DUP"]
+c.ok("a ticker listed by two indices appears exactly once", len(dup) == 1,
+     f"{len(dup)} row(s)")
+c.ok("...and keeps the first source's index_name",
+     not dup.empty and dup.iloc[0]["index_name"] == "big",
+     "a duplicate would be downloaded, screened and peer-ranked twice")
+
+# Fail-open, per source: losing the mid-caps must never cost the S&P 500 scan.
+half = scanner_common.universe_constituents(
+    sources_cfg(("dead", "gone://404", True), ("big", "big://ok", True)))
+c.ok("an unreadable index is skipped and the others still run",
+     set(half["ticker"]) == {"AAA", "BBB", "DUP"}, f"{list(half['ticker'])}")
+
+none = scanner_common.universe_constituents(sources_cfg(("dead", "x://404", True)))
+c.ok("every source failing yields an empty frame rather than an exception",
+     none.empty and list(none.columns)[:2] == ["ticker", "sector"],
+     "the download that follows raises, which is loud and honest")
+
+legacy = scanner_common.universe_constituents({"data": {"sp500_source_url": "big://ok"}})
+c.ok("the older single-URL config still resolves, and alerts",
+     len(legacy) == 3 and bool(legacy["alert"].all()),
+     "an archived config must keep working")
+
+# `--limit` is a timing probe; reading it off the top of the concatenation
+# would time the first index only and say nothing about the second.
+probe = universe_scan._limited(frame, 2)
+c.ok("--limit samples across every index, not off the top",
+     probe["index_name"].nunique() == 2, f"{list(probe['index_name'])}")
+c.ok("--limit never returns more than asked", len(probe) == 2, f"{len(probe)}")
+
+# A limited run is a subset and must be scoped like one, or the timing probe
+# republishes the day's whole-index plane -- and rebuilds peer_stats.json,
+# which only a full pass may ever narrow -- from thirty names.
+src = Path(universe_scan.__file__).read_text(encoding="utf-8")
+_, _, after_limit = src.partition("if args.limit:")
+c.ok("a --limit run is scoped SCOPE_SUBSET, not SCOPE_UNIVERSE",
+     "scope = SCOPE_SUBSET" in after_limit.split("tickers = constituents")[0],
+     "it kept the universe scope until 2026-08-13")
 
 shutil.rmtree(tmp, ignore_errors=True)
 raise SystemExit(c.finish())
