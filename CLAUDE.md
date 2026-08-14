@@ -8,8 +8,8 @@ A **four-tier stock filter** running nightly on this Windows machine via Task
 Scheduler, plus historical tooling (single-ticker backtesters, a universe-wide
 profit backtest, a threshold tuner).
 
-1. **Tier 1 — technical.** The index screens (breakout, pullback; reclaim and
-   trend disabled). Records `Setup` (`full`/`partial`) + `Missing`, and the
+1. **Tier 1 — technical.** The index screens (breakout, pullback and trend;
+   reclaim disabled). Records `Setup` (`full`/`partial`) + `Missing`, and the
    `Index` the ticker signalled in.
 2. **Tier 2 — quality *and* exclusion.** The `fast` half of the `quality`
    registry graded over the tier-1 hits. Records `Quality` (the ⭐ badge) +
@@ -1407,6 +1407,34 @@ real send.
   have no Debt/Equity); individual ticker download failures just drop out of
   the scan; Wikipedia scraping needs the browser-like User-Agent header;
   tickers use `-` not `.` (BRK-B).
+- **A session still in progress is not a bar** (`drop_open_session_bar`, called
+  first inside `drop_unsettled_bars` so every download *and* every cache load
+  passes through it). The guard below keys off a **null `Close`**; the *live*
+  session has a perfectly real one — the last trade price — so it survives every
+  check and gets scanned. What is wrong is the **volume**: an hour of trading
+  against a 30-day average. Measured 2026-08-14, a run at 17:38 Israel time
+  (11:15 ET) pulled a 502nd bar carrying **5–25% of a normal day's volume**, and
+  breakout C3 compares volume to that average — so `is_volume_surge` was true for
+  **0 of 903 tickers**, an impossible reading on settled data, and the scan
+  announced "nothing today" while the same code on the previous settled bar fired
+  two signals. Worse than a lost alert: the trend screen *did* fire on the partial
+  bar, and that signal was written to `signals.csv` and bought by tier 4, where
+  `merge_history_csv` de-duplicates but never deletes — a phantom signal is
+  permanent unless removed by hand. Two states, one drop:
+  - **Session open** → the bar is dropped and the last settled session is scanned,
+    exactly as for a withdrawn close.
+  - **Session closed earlier today** → kept, but warned: Yahoo's volume has not
+    necessarily absorbed the closing auction, which is the same 20/29 · mean
+    12.6% understatement that moved the nightly schedule off 23:30. A calibration
+    hazard, not a wrong bar, so it is reported and not acted on — the split
+    `warn_ticker_holes` already draws.
+  The close is a fixed 16:00 ET, so on the ~3 early-close sessions a year a run
+  between 13:00 and 16:00 drops a bar that did finish. That is the conservative
+  direction and it says so in the log; inferring completeness from the volume
+  itself would be guessing at the very thing that was wrong. `now` is injectable
+  so the tests pin both sides without waiting for a market session.
+  **The nightly schedule never hits this** — 07:00 Israel is ~9h after the close.
+  This is a hazard of running by hand during US market hours.
 - **Unsettled bars, trailing *and* interior.** Yahoo serves a session it has not
   settled as an ordinary daily row — Open/High/Low/Volume present, **`Close`
   null** — and it sometimes *reverts an already-settled bar to that form hours
@@ -1417,8 +1445,9 @@ real send.
   complete** — no error, no warning. `scanner_common.drop_unsettled_bars` (a
   *fraction*-of-tickers test, since individual tickers legitimately go missing)
   strips such bars in both download functions and on every cache load, logging
-  which ones it dropped (`DOWNLOAD warn`); for a trailing bar that also makes an
-  intraday run scan the last settled session instead of a partial one.
+  which ones it dropped (`DOWNLOAD warn`). It handles only the **null-`Close`**
+  form; a session still being traded is a different shape and needs
+  `drop_open_session_bar` below.
   **It must keep dropping interior bars, not just the tail.** A withdrawn bar
   stops being the tail the moment the next session lands on top of it, but every
   `compute_*` builds its baselines with `rolling(window)` at the default

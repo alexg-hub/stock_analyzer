@@ -50,7 +50,7 @@
         "alert_only_on_cross": true
     },
     "trend_strategy": {
-        "enabled": false,
+        "enabled": true,
         "trend_window_days": 210,
         "fit_on_log_price": true,
         "min_annual_slope_pct": 0.2,

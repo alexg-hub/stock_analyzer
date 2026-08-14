@@ -18,6 +18,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import requests
@@ -536,7 +537,84 @@ def universe_tickers(cfg: dict, alert_only: bool = False) -> list[str]:
     return universe_constituents(cfg, alert_only=alert_only)["ticker"].tolist()
 
 
-def drop_unsettled_bars(data: pd.DataFrame, max_missing_pct: float = 0.5) -> pd.DataFrame:
+# The US equity session, in exchange-local time. Named constants because the
+# rule below is about a *session*, not about a clock reading on this box --
+# the scanner runs in Israel, seven hours ahead, which is exactly how an
+# in-progress bar came to be scanned as a finished one.
+MARKET_TZ = "America/New_York"
+MARKET_CLOSE_HOUR = 16
+
+
+def drop_open_session_bar(data: pd.DataFrame,
+                          now: datetime | None = None) -> pd.DataFrame:
+    """Drop a trailing bar for a session that has not closed yet.
+
+    The complement of the null-Close guard below, and the case it cannot see.
+    Yahoo publishes the *live* session as an ordinary daily row whose Close is
+    the last trade price -- a real number, not a NaN -- so `drop_unsettled_bars`
+    finds nothing missing and keeps it. Every screen then grades an hour of
+    trading as if it were a day.
+
+    Observed 2026-08-14: a scan run at 17:38 Israel time (10:38 ET, ~1h after
+    the open) pulled a 502nd bar for that date carrying **5-25% of a normal
+    day's volume**. Breakout C3 compares volume against its 30-day average, so
+    `is_volume_surge` was true for **0 of 903 tickers** -- an impossible reading
+    on settled data -- and the scan reported a confident "nothing today" while
+    the same code on the previous settled bar fired two signals. Worse than a
+    lost alert: the trend screen *did* fire on that partial bar, and the signal
+    was written to `signals.csv` and bought by tier 4, where nothing later
+    removes it.
+
+    Two distinct states, and only one of them is a drop:
+
+    * **Session still open** -- the bar is not a bar. Dropped, and the scan
+      grades the last settled session instead, exactly as it does for a
+      withdrawn close.
+    * **Session closed earlier today** -- kept, but warned. Yahoo's volume has
+      not necessarily absorbed the closing auction and the late prints: measured
+      over the 29 breakout rows in `signals.csv`, `Close` matched a later re-read
+      29/29 while `Vol Ratio` was understated in **20/29, mean 12.6%, max 58%**,
+      split purely by run time, with every next-morning run matching to ±0.2%.
+      That is a calibration hazard rather than a wrong bar, so it is reported and
+      not acted on -- the same split `warn_ticker_holes` draws.
+
+    `now` is injectable so the tests can pin both sides without waiting for a
+    market session.
+
+    **Half-day caveat:** the close is a fixed 16:00 ET, so on the ~3 early-close
+    sessions a year (13:00 ET) a run between 13:00 and 16:00 drops a bar that
+    really did finish. That is the conservative direction -- it scans the prior
+    settled session and says so -- and it is why this keys off the session
+    rather than trying to infer completeness from the volume itself.
+    """
+    if data.empty or not isinstance(data.index, pd.DatetimeIndex):
+        return data
+    now_et = now or datetime.now(ZoneInfo(MARKET_TZ))
+    last = data.index[-1]
+    if last.date() != now_et.date():
+        return data                     # not today's bar; nothing is in flight
+    if now_et.hour >= MARKET_CLOSE_HOUR:
+        log_step("DOWNLOAD", "warn",
+                 f"grading {last.date()} on the same day it closed -- Yahoo's "
+                 f"volume may not have absorbed the closing auction "
+                 f"(measured: understated in 20/29 rows, mean 12.6%); a "
+                 f"next-morning re-run is the settled read")
+        return data
+    if len(data) == 1:
+        raise RuntimeError(
+            f"The only bar available ({last.date()}) is the session still in "
+            f"progress -- nothing settled to scan; retry after 16:00 ET.")
+    kept = data.iloc[:-1]
+    log_step("DOWNLOAD", "warn",
+             f"dropped the trailing {last.date()} bar -- the US session is "
+             f"still open ({now_et:%H:%M} ET, closes {MARKET_CLOSE_HOUR}:00), "
+             f"so its volume is a fraction of a day; scanning "
+             f"{kept.index[-1].date()} instead")
+    return kept
+
+
+def drop_unsettled_bars(data: pd.DataFrame, max_missing_pct: float = 0.5,
+                        now: datetime | None = None) -> pd.DataFrame:
     """Drop every bar that has no settled close -- trailing *or* interior.
 
     Yahoo serves an unsettled session as an ordinary daily row with Open/High/
@@ -572,6 +650,9 @@ def drop_unsettled_bars(data: pd.DataFrame, max_missing_pct: float = 0.5) -> pd.
     """
     if "Close" not in data.columns.get_level_values(0):
         return data
+    # First, because a live bar carries a real Close and so is invisible to the
+    # nullity test below -- it would survive every check and be scanned.
+    data = drop_open_session_bar(data, now=now)
     missing = data["Close"].isna().mean(axis=1)   # NaN fraction per bar
     bad = missing > max_missing_pct
     if bad.all() and len(data):

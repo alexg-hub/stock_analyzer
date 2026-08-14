@@ -236,8 +236,9 @@ entry system.
 
 ## Screen 4: a near-linear multi-month uptrend
 
-> **Currently disabled** (`trend_strategy.enabled: false`, since 2026-08-13) —
-> shipped switched off so it can be measured before it is acted on. On the
+> **Enabled** since 2026-08-14 by user decision, *against* the measurement
+> below — it shipped switched off on 2026-08-13 so it could be measured before
+> being acted on, and the measurement has not improved since. On the
 > 904-name cached panel over 3 years it produces **428 signals** (0.57 a night,
 > max 5, 329 distinct tickers) and reads **below** a random entry: excess
 > **−1.79** over 30 days (mean +0.48% against a +2.27% baseline) and **−2.22**

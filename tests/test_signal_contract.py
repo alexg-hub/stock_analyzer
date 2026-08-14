@@ -32,7 +32,9 @@ import io
 import json
 import sys
 import tempfile
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -377,6 +379,70 @@ for module, compute, strategy in screens(cfg):
     c.ok(f"{module.CONFIG_KEY}: unsettled bar would scan as zero, guard restores it",
          int(raw.sum()) == 0 and guarded.equals(last_fires(panel)),
          f"unguarded={int(raw.sum())} guarded={int(guarded.sum())}")
+
+# --------------------------------------------------------------------------
+c.section("a session still in progress is not a bar")
+
+# The null-Close guard above cannot see this one: Yahoo publishes the live
+# session with a real Close (the last trade price), so nothing reads as missing.
+# What is wrong is the *volume* -- an hour of trading against a 30-day average --
+# which is why this reproduces the 2026-08-14 incident by scaling it down rather
+# than by blanking anything out.
+_ET = ZoneInfo(scanner_common.MARKET_TZ)
+_live_day = panel.index[-1] + pd.Timedelta(days=1)
+
+
+def at(hour, minute=0, day=None):
+    d = (day or _live_day).date() if hasattr(day or _live_day, "date") else day
+    return datetime(d.year, d.month, d.day, hour, minute, tzinfo=_ET)
+
+
+def with_live_bar(frame, volume_frac=0.1):
+    """`frame` plus a trailing partial session: same prices, a fraction of the
+    volume, which is exactly the shape an intraday download returns."""
+    row = frame.iloc[[-1]].copy()
+    row.index = [_live_day]
+    vol = [c for c in row.columns if c[0] == "Volume"]
+    # Cast back: Yahoo's Volume is int64 and pandas refuses a float in place.
+    row.loc[:, vol] = (row.loc[:, vol] * volume_frac).astype(row[vol].dtypes)
+    return pd.concat([frame, row])
+
+
+_live = with_live_bar(panel)
+
+c.ok("an open session is dropped and the last settled bar is scanned",
+     drop_unsettled_bars(_live, now=at(10, 38)).index.equals(panel.index),
+     "10:38 ET is an hour into the session")
+c.ok("...including before the open",
+     drop_unsettled_bars(_live, now=at(9, 0)).index.equals(panel.index))
+c.ok("a bar whose session has closed is kept",
+     drop_unsettled_bars(_live, now=at(17, 0)).index.equals(_live.index),
+     "incomplete volume is a calibration hazard, warned about, not a wrong bar")
+c.ok("a bar from a previous day is never touched",
+     drop_unsettled_bars(_live, now=at(10, 38, _live_day + pd.Timedelta(days=1)))
+     .index.equals(_live.index))
+
+_before = _probe.read_text(encoding="utf-8")
+drop_unsettled_bars(_live, now=at(10, 38))
+_live_lines = _probe.read_text(encoding="utf-8")[len(_before):].splitlines()
+c.ok("dropping an open session is logged, naming the bar and the reason",
+     any(str(_live_day.date()) in ln and "still open" in ln
+         for ln in log_lines_for(_live_lines, "DOWNLOAD")),
+     " | ".join(_live_lines) or "nothing logged")
+
+# The incident itself: a partial bar does not merely add noise, it makes the
+# volume leg unsatisfiable, so a screen that gates on volume reports a confident
+# zero. Asserted per screen because only some of them gate on volume -- the
+# invariant is that the guard reproduces the settled answer either way.
+for module, compute, strategy in screens(cfg):
+    def last_fires(frame):
+        return module.fires_mask(
+            frame, compute(frame, strategy), strategy).fillna(False).iloc[-1]
+
+    guarded = last_fires(drop_unsettled_bars(_live, now=at(10, 38)))
+    c.ok(f"{module.CONFIG_KEY}: the guard reproduces the settled answer",
+         guarded.equals(last_fires(panel)),
+         f"guarded={int(guarded.sum())} settled={int(last_fires(panel).sum())}")
 
 # --------------------------------------------------------------------------
 # The same withdrawn bar, one session later. It is no longer the tail, so a

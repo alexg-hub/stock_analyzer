@@ -651,10 +651,11 @@ of `risk`, where `negative_equity` (1.00), `accruals_ratio` (0.91),
 - `reclaim_strategy.enabled: false` — deliberate and documented (excess −1.65 vs
   the random-entry baseline), and correctly still measurable by the backtest and
   tuner.
-- `trend_strategy.enabled: false` — same posture, shipped that way on
-  2026-08-13 so the screen is measured before it is acted on. Excess −1.79 (30d)
-  / −2.22 (60d) on 428 signals; `min_r_squared` is the axis to tune (0.9 reads
-  −0.06 at a 60.6% win rate on n=208).
+- `trend_strategy.enabled: true` — shipped `false` on 2026-08-13 so the screen
+  would be measured before it was acted on, then switched on 2026-08-14 by user
+  decision against that measurement: excess −1.79 (30d) / −2.22 (60d) on 428
+  signals. `min_r_squared` is the axis to tune (0.9 reads −0.06 at a 60.6% win
+  rate on n=208). Its first live alert was AIT on 2026-08-13.
 
 ### 7.7 Clean — things checked that are fine
 
