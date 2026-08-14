@@ -15,8 +15,8 @@ setups are listed first. See [Signal tiers](#signal-tiers).
 ## The universe
 
 `data.universe_sources` lists one entry per index — `name`, `label`, `url` and
-`alert`. Today that is the **S&P 500 (503 names, alerted)** and the **S&P
-MidCap 400 (400 names, not yet alerted)**: 903 constituents, no overlap,
+`alert`. Today that is the **S&P 500 (503 names)** and the **S&P MidCap 400
+(400 names)**, both alerted: 903 constituents, no overlap,
 because S&P's indices are mutually exclusive by construction. All three list
 pages on Wikipedia publish the same `Symbol` / `GICS Sector` /
 `GICS Sub-Industry` headings, so adding the 600 later needs a config line and
@@ -27,8 +27,11 @@ plane, the peer distributions and the profit backtest grade every configured
 source regardless — exactly the split `<screen>.enabled` already draws, and for
 the same reason: a universe is held back from the alert precisely when nobody
 has measured whether its signals pay, which is when it most needs measuring.
-Promoting the mid-caps is therefore a one-line config change once
-`backtest_universe.py` says their cohort clears the random-entry baseline.
+Promoting a source is therefore a one-line config change — the mid-caps were
+promoted on 2026-08-14 by user decision, *ahead* of their cohort clearing the
+random-entry baseline (mid-cap breakout measured −1.76 excess against its own
+baseline). Tier 4 now buys those signals, so the `Index` column below is what
+turns that into a settled answer rather than a backtest estimate.
 
 Every signal records the index it fired in, as an `Index` column on
 `signals.csv` and on the tier-4 position. S&P rewrites index membership at each

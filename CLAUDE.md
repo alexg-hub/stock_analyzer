@@ -254,7 +254,7 @@ real send.
   `data.universe_sources` holds one entry per index (`name`, `label`, `url`,
   `alert`); `scanner_common.universe_constituents(cfg, alert_only=)` is the one
   fetch and the one parse, `universe_tickers` its list form. Today: **S&P 500
-  (503, alerted) + S&P MidCap 400 (400, not alerted) = 903**, no overlap,
+  (503) + S&P MidCap 400 (400) = 903, both alerted**, no overlap,
   because S&P's indices are mutually exclusive by construction. The Nasdaq-100
   was considered first and rejected on measurement — 87 of its 102 members were
   already constituents, and of the 15 net-new names ~7 are foreign private
@@ -267,9 +267,9 @@ real send.
     `universe_scan.py`, `peers.py` and `backtest_universe.py` all grade every
     source, because a universe is held back from the alert precisely when
     nobody has measured whether its signals pay. `run_scanners.py` is the only
-    caller passing `alert_only=True`. Promotion is a config flip, once the
-    mid-cap cohort clears the random-entry baseline — **and as of 2026-08-13 it
-    does not, which is why `sp400` is still `alert: false`.** Measured over 3
+    caller passing `alert_only=True`. Promotion is a config flip, and **`sp400`
+    was flipped to `alert: true` on 2026-08-14 — by user decision, against the
+    measurement, which is recorded here rather than erased.** Measured over 3
     years of the 903-name panel, split by `index_name` against each index's own
     baseline (wait 0, hold 30):
 
@@ -282,11 +282,13 @@ real send.
     Not an outlier artifact: mid-cap breakout is below its baseline on mean,
     **median** (0.51 vs 1.53) and **win rate** (51.7% vs 55.8%) alike, on 2008
     signals, and the sign holds at 10, 30 and 60 days. Mid-cap pullback is
-    flat — better than baseline on median and win rate, level on mean, which is
-    not enough to earn a card. So the mid-caps stay measured and unalerted, and
-    that is the flag doing exactly its job. Re-run before revisiting; the split
-    is not a repo script yet, which is the gap to close if this becomes a
-    recurring question.
+    flat — better than baseline on median and win rate, level on mean. So the
+    mid-cap breakout card is the one to watch: **the standing hypothesis is that
+    it underperforms**, and tier 4 now buys those signals, so `portfolio_sim
+    analyze` split on `Index` is what settles it with live rows rather than a
+    backtest. Re-run the split before revisiting; it is not a repo script yet,
+    which is the gap to close if this becomes a recurring question. Reverting is
+    the same one-line flip.
     (Noted in passing, and a separate matter: **breakout on the S&P 500 is
     mean-positive but median-negative** — +0.59 mean against a median of 1.37
     vs the baseline's 1.55. Its edge is a handful of large winners, not a

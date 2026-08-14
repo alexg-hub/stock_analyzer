@@ -343,7 +343,7 @@ live, and this file is committed.
 
 | Setting | Value | Consumer | Note |
 |---|---|---|---|
-| `data.universe_sources` | `sp500` (alert), `sp400` (not alerted) | scanner_common.py | one entry per index: `name`, `label`, `url`, `alert`. **`alert` gates the nightly Discord message only** — the plane, the peer stats and the backtest grade every source, the same split `<screen>.enabled` draws. Wikipedia publishes the S&P 500/400/600 lists with identical headings, so a new index needs no parser. |
+| `data.universe_sources` | `sp500` (alert), `sp400` (alert since 2026-08-14) | scanner_common.py | one entry per index: `name`, `label`, `url`, `alert`. **`alert` gates the nightly Discord message only** — the plane, the peer stats and the backtest grade every source, the same split `<screen>.enabled` draws. Wikipedia publishes the S&P 500/400/600 lists with identical headings, so a new index needs no parser. |
 | `data.download_period` | `"2y"` | scanner_common.py | must exceed every screen's lookback: breakout 312, pullback 402, reclaim 380, trend 211 bars. 2y ≈ 504 ✓ |
 | `data.download_interval` | `"1d"` | scanner_common.py |  |
 | `charts.enabled` | `true` | charts.py, run_scanners.py |  |

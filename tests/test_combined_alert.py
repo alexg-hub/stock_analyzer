@@ -169,7 +169,15 @@ c.ok("the message carries signal cards", bool(signal_cards),
      f"{len(signal_cards)}")
 c.ok("...and deterministic verdict cards in the same message",
      bool(verdict_cards), f"{len(verdict_cards)}")
-c.ok("the header names the scan date", "S&P 500 Scan" in message["content"])
+# Derived from the config, never a literal: the header names whichever indices
+# carry `alert: true`, so hardcoding "S&P 500 Scan" here turned a routine config
+# flip (the MidCap 400 promotion, 2026-08-14) into a test failure that said
+# nothing about the header being wrong. The invariant is that the line carries
+# the configured universe label *and* the date of the bar that was scanned.
+c.ok("the header names the scanned universe and the scan date",
+     f"{scanner_common.universe_label(base_cfg)} Scan -- "
+     f"{truncated.index[-1].date()}" in message["content"],
+     message["content"].splitlines()[0])
 c.ok("the header summarises the verdicts",
      "Verdicts:" in message["content"], message["content"].splitlines()[-2:])
 c.ok("the disclaimer travels with it",

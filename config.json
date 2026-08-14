@@ -8,7 +8,7 @@
     "data": {
         "universe_sources": [
             {"name": "sp500", "label": "S&P 500", "url": "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies", "alert": true},
-            {"name": "sp400", "label": "S&P MidCap 400", "url": "https://en.wikipedia.org/wiki/List_of_S%26P_400_companies", "alert": false}
+            {"name": "sp400", "label": "S&P MidCap 400", "url": "https://en.wikipedia.org/wiki/List_of_S%26P_400_companies", "alert": true}
         ],
         "download_period": "2y",
         "download_interval": "1d"
