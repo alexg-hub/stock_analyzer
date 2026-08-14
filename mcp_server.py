@@ -37,13 +37,14 @@ from mcp_tools import (
     jobs,
     portfolio,
     signals,
+    themes,
     universe,
 )
 
 mcp = FastMCP("stock_analyzer")
 
 for module in (signals, deepdive, portfolio, backtests, config_tools, jobs,
-               universe, enrichment):
+               universe, enrichment, themes):
     module.register(mcp)
 
 
@@ -101,6 +102,7 @@ def _selftest() -> int:
         ("params_list", config_tools.params_list_impl),
         ("list_jobs", jobs.listing),
         ("universe_quadrant", universe.quadrant_impl),
+        ("theme_read", themes.read_impl),
     ]
     for name, fn in checks:
         try:

@@ -1,0 +1,665 @@
+"""The thematic screen -- AI names the candidate, Python grades it.
+
+Tiers 1-3 all ask one kind of question: *which of the 903 constituents did
+something on the tape?* That is arithmetic, which is why it is deterministic and
+why no code path in the analyzer can start a model. A whole class of investable
+event is invisible to it. When a hyperscaler announces a data centre, when an
+outbreak starts, when an AI capex cycle turns, the beneficiaries -- the grid
+engineer, the turbine maker, the CDMO, the semiconductor equipment supplier --
+have done nothing on their own charts yet. The chain runs from a dated event
+through a company's revenue, and no rolling window finds it.
+
+`DETERMINISTIC_GAPS.md` section D scoped AI to `risk_research`: the *grading*
+side, judging a ticker a screen already surfaced. This is the mirror image --
+the *identification* side -- and it keeps the same contract, stated in
+`AI_ROLE.md`: a session may call the analyzer; the analyzer may not call a
+session. Nothing here invokes a model. A session reasons over the bundle
+`mcp_tools/themes.py` assembles and calls `record()` with what it concluded.
+
+Three properties hold the boundary, and each fails silently if broken:
+
+  * **The record names a company and a mechanism; it never carries a number.**
+    `validate` rejects `conviction`, `tier`, `score`, `Verdict`, `Reward`,
+    `Risk` and `price_target` by name. Every figure on a theme row is computed
+    by `run_scanners.scan_ticker` *after* the pick is made.
+  * **A pick is proved tradeable before it is recorded.** IBKR's theme graph
+    happily returns Prysmian (Milan), NKT (Copenhagen) and POWERGRID (NSE), and
+    a model can invent a symbol outright. `scan_ticker` downloads real price
+    data, so a name with none is refused and nothing is written. That check also
+    supplies the `scan_date`, from the ticker's own last settled bar.
+  * **An invalid row raises rather than records**, inverting the house
+    fail-open rule for the same reason `enrichment.record` inverts it: a wrong
+    categorical value is not a missing measurement, it is a cohort of one that
+    `portfolio_sim analyze` will faithfully grade.
+
+This screen is deliberately in **neither** screen registry. It is not in
+`run_scanners.SCANNERS` (it would run nightly, and `scan(data, strategy)` over a
+price panel is meaningless for a news-driven pick), and it is not in
+`backtest_universe.SCREENS` -- which is the load-bearing one. That list is what
+`tests/_harness.screens()` reads, and `test_signal_contract.py` then demands a
+full-history `(days x tickers)` mask that reproduces itself when bars are
+dropped, blanked and half-formed. A list dated *today* has no history; faking
+one would get backtested as though it were real. `tests/test_theme_screen.py`
+pins the absence from both registries, because nothing else would notice.
+
+What it *is*: a third write path into `signals.csv`, alongside the nightly scan
+and `on_demand`. `portfolio_sim.ledger.sync` filters by nothing, so tier 4 buys
+and grades these positions under `config_key = "theme_screen"` with no change
+there at all -- which is the entire point. Whether AI thematic screening pays is
+then a measurement (`analyze` split on `config_key`) rather than an argument.
+"""
+
+import json
+from datetime import date
+from pathlib import Path
+
+import pandas as pd
+
+from newsfeed import chain_of, is_enabled, section, theme_names, themes_dir
+from scanner_common import (
+    HISTORY_KEYS,
+    INDEX_COL,
+    VERDICT_COLS,
+    log_step,
+    merge_history_csv,
+    signals_csv_path,
+    universe_constituents,
+)
+
+# The `config_key` every theme row carries. Not a `*_strategy` section: there
+# are no thresholds to sweep here, and naming it one would imply `tune_screen`
+# could tune it.
+CONFIG_KEY = "theme_screen"
+
+# Distinct from full / partial / none, so a theme pick is never mistaken for a
+# technical setup in any cohort split.
+SETUP_VALUE = "theme"
+
+# The beneficiary tiers a chain can name. Deliberately one flat vocabulary
+# across every theme rather than one per theme: `analyze` grades a group split,
+# and a role that exists in only one theme is a cohort of one by construction.
+CHAIN_ROLES = ("operator", "engineering", "equipment", "power", "utility",
+               "transmission", "materials", "fuel", "designer", "foundry",
+               "developer", "cdmo", "diagnostics", "supplies", "prime",
+               "subsystem", "services")
+
+# How much of the company the theme can actually move. The single most useful
+# field here: a mega-cap with a rounding-error exposure is the classic way a
+# thematic pick looks right and pays nothing.
+EXPOSURES = ("pure_play", "major", "moderate", "minor")
+
+HORIZONS = ("announced", "near_term", "multi_year", "speculative")
+CONFIDENCES = ("high", "medium", "low")
+
+# `social` is legal and will almost never be used: Reddit is blocked outright,
+# StockTwits 403s, X is paid-tier and Facebook has no public search (tested
+# 2026-08-14, see `newsfeed.py`). Kept in the vocabulary so the record is
+# already shaped if a source ever opens up, and so a session that *did* reach
+# one can say so precisely instead of calling it `mixed`.
+EVIDENCE_TYPES = ("news", "trade_press", "filing", "theme_graph", "social",
+                  "mixed")
+
+VOCABULARIES = {
+    "chain_role": CHAIN_ROLES,
+    "exposure": EXPOSURES,
+    "time_horizon": HORIZONS,
+    "confidence": CONFIDENCES,
+    "evidence_type": EVIDENCE_TYPES,
+}
+
+LIST_FIELDS = ("sources", "risks")
+
+# `scan_date` is deliberately absent: unlike an enrichment, the caller does not
+# supply it. It comes from the ticker's own last settled bar during recording,
+# which is also what proves the ticker exists.
+REQUIRED = ("ticker", "theme", "event", "mechanism", "sources")
+
+COLUMNS = ["scan_date", "ticker", "theme", "event", "event_date", "mechanism",
+           "chain_role", "exposure", "time_horizon", "confidence",
+           "evidence_type", "risks", "sources", "sources_n", "risks_n",
+           "report", "agent_date", "evidence_file", "evidence_n"]
+
+THEME_KEYS = ["scan_date", "ticker"]
+
+# The compact categoricals that ride along on the `signals.csv` row, so tier 4
+# carries them verbatim onto the position and can grade each as a group split.
+# The wide narrative (event, mechanism, risks, sources) stays in themes.csv --
+# same split `enrichment.py` draws, and for the same reason: `signals.csv` is a
+# union of every screen's columns and prose would bloat every row of it.
+THEME_COL = "Theme"
+ROLE_COL = "Chain Role"
+EXPOSURE_COL = "Exposure"
+HORIZON_COL = "Horizon"
+CONFIDENCE_COL = "Confidence"
+EVIDENCE_COL = "Evidence"
+TRIGGER_COL = "Trigger"
+
+# What `Trigger` says when no technical screen fired on a pick. An explicit
+# value rather than "", because "" round-trips through CSV as NaN and pandas
+# `groupby` drops NaN silently -- which would discard exactly the cohort this
+# column exists to isolate, the picks the AI found *before* the tape did. Same
+# rule the registry draws everywhere else: not-measured must be nameable.
+TRIGGER_NONE = "none"
+
+SIGNAL_FIELDS = {
+    "theme": THEME_COL,
+    "chain_role": ROLE_COL,
+    "exposure": EXPOSURE_COL,
+    "time_horizon": HORIZON_COL,
+    "confidence": CONFIDENCE_COL,
+    "evidence_type": EVIDENCE_COL,
+}
+
+# The fields a caller must never send. Redundant with the unknown-field check
+# below, exactly as `enrichment.validate` re-rejects `narrative_adj` by name:
+# the generic message says "unknown", and this one says why it will stay that
+# way.
+BANNED_FIELDS = ("conviction", "tier", "score", "narrative_adj", "Verdict",
+                 "Conviction", "Quality", "Reward", "Risk", "Quadrant",
+                 "price_target", "target_price")
+
+
+# --------------------------------------------------------------------------
+# Where it lives
+# --------------------------------------------------------------------------
+
+def themes_csv_path(cfg: dict, create: bool = True) -> Path:
+    """The theme table -- one row per (scan_date, ticker)."""
+    path = Path(section(cfg).get("csv", "themes.csv"))
+    if not path.is_absolute():
+        return themes_dir(cfg, create) / path
+    if create:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def report_path(ticker: str, scan_date: str, cfg: dict,
+                create: bool = True) -> Path:
+    """Where a theme write-up for one pick belongs."""
+    return themes_dir(cfg, create) / f"{ticker.upper()}_{scan_date}.md"
+
+
+def evidence_path(theme: str, scan_date: str, cfg: dict,
+                  create: bool = True) -> Path:
+    """Where the events a pick was made from are frozen."""
+    return themes_dir(cfg, create) / f"events_{theme}_{scan_date}.json"
+
+
+def snapshot_evidence(theme: str, scan_date: str, cfg: dict) -> tuple[str, int]:
+    """Freeze the events behind a pick. Returns `(filename, count)`.
+
+    **The news cache is mutable and this is not.** `newsfeed._save_cache`
+    replaces a theme's entry wholesale on every refresh, so re-reading a pick
+    from three weeks ago through the cache shows *today's* headlines -- which
+    would make the record look auditable without being auditable. This writes
+    the events as they stood when the pick was recorded, under a name keyed by
+    `(theme, scan_date)`, and the row points at it.
+
+    Fail-open: a snapshot that cannot be written costs the audit trail, never
+    the record. It returns `("", 0)` and the row simply says so.
+    """
+    import newsfeed
+
+    try:
+        events = newsfeed.cluster_events(newsfeed.recent(cfg, [theme]))
+        if not events:
+            # No file rather than an empty one: "" in the row says the trail is
+            # missing, while an empty snapshot would claim the pick was made
+            # from no evidence at all.
+            return "", 0
+        path = evidence_path(theme, scan_date, cfg)
+        path.write_text(json.dumps(
+            {"theme": theme, "scan_date": scan_date,
+             "captured_at": date.today().isoformat(), "events": events},
+            indent=2, ensure_ascii=False), encoding="utf-8")
+        return path.name, len(events)
+    except Exception as exc:  # noqa: BLE001 - the record matters more
+        log_step("THEME", "warn",
+                 f"{theme}: could not snapshot the evidence ({exc})", cfg=cfg)
+        return "", 0
+
+
+# --------------------------------------------------------------------------
+# Validation
+# --------------------------------------------------------------------------
+
+def validate(row: dict, cfg: dict | None = None) -> list[str]:
+    """Everything wrong with a proposed pick; empty means it is recordable.
+
+    Strict for the reason `enrichment.validate` is strict: every case here
+    fails *silently* downstream. An unknown `chain_role` reaches `analyze` as
+    its own cohort of one; a single-source event is an unverified rumour that
+    reads exactly like a corroborated fact once it is a row in a CSV.
+    """
+    problems = []
+    for field in REQUIRED:
+        value = row.get(field)
+        if isinstance(value, (list, tuple)):
+            if not value:
+                problems.append(f"{field} is required")
+            continue
+        if not str(value or "").strip():
+            problems.append(f"{field} is required")
+
+    for field, allowed in VOCABULARIES.items():
+        value = row.get(field)
+        if value in (None, ""):
+            continue
+        if str(value).lower() not in allowed:
+            problems.append(
+                f"{field}={value!r} is not one of {', '.join(allowed)}")
+
+    for field in LIST_FIELDS:
+        value = row.get(field)
+        if value in (None, ""):
+            continue
+        if not isinstance(value, (list, tuple)):
+            problems.append(f"{field} must be a list, got {type(value).__name__}")
+
+    # Corroboration is the whole difference between an event and a rumour, and
+    # it is the one rule here a session is most likely to want to bend.
+    minimum = int((section(cfg or {}) or {}).get("min_sources", 2))
+    sources = row.get("sources")
+    if isinstance(sources, (list, tuple)) and 0 < len(sources) < minimum:
+        problems.append(
+            f"sources has {len(sources)} entr{'y' if len(sources) == 1 else 'ies'}"
+            f", need at least {minimum} -- an event with one source is not an "
+            "event, it is a rumour")
+
+    if cfg is not None:
+        known = theme_names(cfg)
+        theme = str(row.get("theme") or "").strip()
+        if theme and known and theme not in known:
+            problems.append(
+                f"theme={theme!r} is not configured -- one of {', '.join(known)}"
+                " (add it to theme_screen.themes in config.json first)")
+
+    unknown = set(row) - set(COLUMNS)
+    if unknown:
+        problems.append(f"unknown field(s): {', '.join(sorted(unknown))}")
+
+    for banned in BANNED_FIELDS:
+        if banned in row:
+            problems.append(
+                f"{banned!r} is not a theme field -- this screen identifies "
+                "candidates, it never grades them. Every number on a theme row "
+                "is computed after the pick, by the registry.")
+
+    return problems
+
+
+def normalize(row: dict) -> dict:
+    """A validated pick in storage form: vocabularies lowered, lists JSON."""
+    out = {}
+    for key, value in row.items():
+        if key in VOCABULARIES and value not in (None, ""):
+            value = str(value).lower()
+        elif key in LIST_FIELDS:
+            value = json.dumps(list(value or []), ensure_ascii=False)
+        out[key] = value
+
+    out.setdefault("sources_n", len(row.get("sources") or []))
+    out.setdefault("risks_n", len(row.get("risks") or []))
+    # Stamped rather than asked for, like `enrichment.normalize`: `scan_date` is
+    # the bar the pick was graded against and cannot answer "when was this
+    # judgment formed".
+    out.setdefault("agent_date", date.today().isoformat())
+    out["ticker"] = str(out.get("ticker", "")).upper()
+    out["scan_date"] = str(out.get("scan_date", ""))
+    return {c: out.get(c) for c in COLUMNS if c in out}
+
+
+# --------------------------------------------------------------------------
+# Grading a pick -- the deterministic half
+# --------------------------------------------------------------------------
+
+def _graded(ticker: str, cfg: dict) -> tuple[dict, str, str]:
+    """Run tiers 1+2 for one pick. Returns `(row, scan_date, trigger)`.
+
+    Raises `ValueError` when the ticker has no price data -- which is the guard
+    against a hallucinated symbol and against the foreign listings IBKR's theme
+    graph returns. Everything numeric on a theme row originates here, *after*
+    the pick was made, so the record cannot influence its own grade.
+
+    A ticker that also fired a screen keeps that screen's name in `trigger`:
+    free at record time, and the natural cohort split for "did the AI find it
+    before or after the tape did".
+    """
+    import run_scanners
+
+    try:
+        payload = run_scanners.scan_ticker(ticker, cfg)
+    except Exception as exc:  # noqa: BLE001 - a bad symbol is a refusal, not a crash
+        raise ValueError(
+            f"{ticker}: could not be scanned ({exc}). A symbol with no bars is "
+            "either not US-listed or does not exist -- refused rather than "
+            "recorded.") from exc
+    screens = payload.get("screens") or []
+
+    merged: dict = {}
+    fired = []
+    for screen in screens:
+        key = screen.get("config_key")
+        hit = (screen.get("hits") or {}).get(ticker.upper())
+        if hit is None:
+            continue
+        if key and key != run_scanners.NO_SIGNAL_KEY:
+            fired.append(key)
+        # Union across screens: the tier-2 columns are identical, the per-screen
+        # stat columns are not, and a theme row may as well carry both.
+        merged.update(hit)
+
+    if not merged:
+        raise ValueError(
+            f"{ticker}: no price data -- refused. A symbol with no bars is "
+            "either not US-listed (the theme graph returns Milan, Copenhagen "
+            "and NSE listings) or does not exist.")
+
+    return merged, str(payload.get("scan_date") or ""), ",".join(fired)
+
+
+def _index_map(cfg: dict) -> dict:
+    """ticker -> index name, for the `Index` column the nightly scan records.
+
+    A theme pick may sit outside the S&P 500/400 entirely -- that is the point
+    of allowing any US listing -- and an empty `Index` is exactly how a row says
+    so. Recording it is what makes "did the off-index picks pay?" answerable
+    later; S&P rewrites membership at every rebalance, so it is not
+    reconstructable after the fact. Same argument as `Setup`.
+
+    Fail-open: an unreachable index page costs the column, never the record.
+    """
+    try:
+        constituents = universe_constituents(cfg)
+        if constituents.empty:
+            return {}
+        return dict(zip(constituents["ticker"], constituents["index_name"]))
+    except Exception as exc:  # noqa: BLE001 - a missing label is not a failure
+        log_step("THEME", "warn", f"no index membership ({exc})", cfg=cfg)
+        return {}
+
+
+# --------------------------------------------------------------------------
+# Recording
+# --------------------------------------------------------------------------
+
+def record(theme: str, event: str, picks: list[dict], cfg: dict,
+           event_date: str = "", deep: bool = False) -> dict:
+    """Record a theme's picks. The only supported way to add one.
+
+    **Atomic over the batch**: every pick is validated before any is written,
+    and one failure writes nothing. That is `config_edit`'s rule -- the unit of
+    validity is the set -- and it matters more here, because a theme is a
+    *chain*. Half a chain on the record is not a partial answer, it is a
+    misleading cohort: the tiers that happened to validate would look like the
+    whole thesis.
+
+    Each pick is then graded by `scan_ticker` (which is also what proves it is
+    tradeable), written to `signals.csv` under `config_key="theme_screen"`, and
+    its narrative written to `themes.csv` beside it.
+
+    `deep=True` additionally runs tier 3's deterministic verdict and records it.
+    Off by default: it costs an EDGAR fetch plus a deep Yahoo pass per pick.
+    """
+    if not is_enabled(cfg):
+        log_step("THEME", "skip", "theme_screen.enabled is false", cfg=cfg)
+        return {"recorded": False,
+                "note": "theme_screen.enabled is false in config.json"}
+
+    if not picks:
+        return {"recorded": False, "problems": ["no picks supplied"]}
+
+    limit = int(section(cfg).get("max_picks_per_run", 8))
+    if len(picks) > limit:
+        return {"recorded": False,
+                "problems": [f"{len(picks)} picks exceeds "
+                             f"theme_screen.max_picks_per_run ({limit})"]}
+
+    # -- validate the whole batch first; write nothing if any pick fails ------
+    rows, problems = [], []
+    for pick in picks:
+        row = {**pick, "theme": theme, "event": event}
+        if event_date:
+            row["event_date"] = event_date
+        found = validate(row, cfg)
+        if found:
+            problems.append(f"{pick.get('ticker', '?')}: {'; '.join(found)}")
+        rows.append(row)
+    if problems:
+        raise ValueError("; ".join(problems))
+
+    # -- grade every pick before writing anything, for the same reason --------
+    graded = []
+    for row in rows:
+        ticker = str(row["ticker"]).upper()
+        hit, scan_date, trigger = _graded(ticker, cfg)
+        if not scan_date:
+            raise ValueError(f"{ticker}: no settled bar to date the pick from")
+        graded.append((dict(row, ticker=ticker, scan_date=scan_date), hit,
+                       trigger))
+
+    index_of = _index_map(cfg)
+    # One snapshot per (theme, scan_date), taken once for the batch: every pick
+    # in it was made from the same events, and writing it per ticker would be
+    # the same file five times.
+    snapshot_date = graded[0][0]["scan_date"]
+    evidence_file, evidence_n = snapshot_evidence(theme, snapshot_date, cfg)
+
+    signal_rows, theme_rows, recorded = [], [], []
+    for row, hit, trigger in graded:
+        clean = normalize({**row, "evidence_file": evidence_file,
+                           "evidence_n": evidence_n})
+        theme_rows.append(clean)
+
+        signal_row = {
+            "scan_date": clean["scan_date"],
+            "config_key": CONFIG_KEY,
+            "screen": f"AI theme: {theme}",
+            "ticker": clean["ticker"],
+        }
+        for key, value in hit.items():
+            signal_row[key] = (json.dumps(value) if isinstance(value, list)
+                               else value)
+        signal_row["Setup"] = SETUP_VALUE
+        signal_row["Missing"] = ""
+        for field, column in SIGNAL_FIELDS.items():
+            signal_row[column] = clean.get(field) or ""
+        signal_row[TRIGGER_COL] = trigger or TRIGGER_NONE
+        signal_row[INDEX_COL] = index_of.get(clean["ticker"], "")
+        signal_rows.append(signal_row)
+        recorded.append({"ticker": clean["ticker"],
+                         "scan_date": clean["scan_date"],
+                         "trigger": trigger or TRIGGER_NONE,
+                         "index": signal_row[INDEX_COL] or "off-index"})
+
+    # `protect=VERDICT_COLS` for the same reason `archive_scan` passes it: tier
+    # 3 writes the verdict into a row this created, and a re-record must not
+    # erase it.
+    signals_path = signals_csv_path(cfg)
+    merge_history_csv(signals_path, signal_rows, HISTORY_KEYS,
+                      protect=VERDICT_COLS)
+    themes_path = themes_csv_path(cfg)
+    merge_history_csv(themes_path, theme_rows, THEME_KEYS)
+
+    log_step("THEME", "ok",
+             f"{theme}: {len(recorded)} pick(s) -> {signals_path.name} + "
+             f"{themes_path.name}"
+             + (f"; {evidence_n} event(s) frozen in {evidence_file}"
+                if evidence_file else "; evidence NOT snapshotted"), cfg=cfg)
+
+    verdicts = _record_verdicts(recorded, cfg) if deep else []
+
+    return {
+        "recorded": True,
+        "theme": theme,
+        "picks": recorded,
+        "signals_csv": str(signals_path),
+        "themes_csv": str(themes_path),
+        "evidence_file": evidence_file,
+        "evidence_n": evidence_n,
+        "verdicts": verdicts,
+        "note": ("Recorded as candidates, not as a grade. Every number on "
+                 "these rows -- the badge, the veto, both plane axes -- was "
+                 "computed by the registry after the pick and cannot be "
+                 "changed from here. Tier 4 will buy them on the next "
+                 "`portfolio_sim open`."),
+    }
+
+
+def _record_verdicts(recorded: list[dict], cfg: dict) -> list[dict]:
+    """Tier 3's deterministic verdict for each pick, routed to `signals.csv`.
+
+    `source=SOURCE_SIGNAL` is the load-bearing argument. `record_verdict` routes
+    by the `source` key `_facts` wrote, and a theme pick is absent from
+    `latest_hits.json` -- so left to `resolve_trigger` it would be stamped
+    `on_demand` and the verdict would land in the *other* table, leaving the
+    theme row's `Verdict` blank forever. This screen does write a `signals.csv`
+    row, so `signal` is the honest answer, and reusing the existing routing
+    beats hand-writing the columns.
+
+    Fail-open per pick: a verdict is a bonus here, and losing one must never
+    cost the record it was meant to annotate.
+    """
+    import research_report
+
+    out = []
+    for entry in recorded:
+        ticker = entry["ticker"]
+        try:
+            trigger, _, _, _ = research_report.resolve_trigger(ticker, cfg)
+            verdict = research_report.deterministic_verdict(
+                ticker, cfg, trigger, entry["scan_date"],
+                research_report.SOURCE_SIGNAL)
+            research_report.record_verdict(verdict, cfg)
+            out.append({"ticker": ticker, "tier": verdict.get("tier"),
+                        "conviction": verdict.get("conviction")})
+        except Exception as exc:  # noqa: BLE001 - the record matters more
+            log_step("THEME", "warn", f"{ticker}: verdict failed ({exc})",
+                     cfg=cfg)
+    return out
+
+
+# --------------------------------------------------------------------------
+# Reading
+# --------------------------------------------------------------------------
+
+def read_one(ticker: str, scan_date: str, cfg: dict) -> dict:
+    """One theme row as a plain dict, or `{}` when there is none."""
+    path = themes_csv_path(cfg, create=False)
+    if not path.exists():
+        return {}
+    try:
+        frame = pd.read_csv(path, dtype={"scan_date": str})
+    except Exception:  # noqa: BLE001 - an unreadable record is an absent one
+        return {}
+    if frame.empty or not {"ticker", "scan_date"} <= set(frame.columns):
+        return {}
+    hit = frame[(frame["ticker"].astype(str).str.upper() == ticker.upper())
+                & (frame["scan_date"].astype(str) == str(scan_date))]
+    if hit.empty:
+        return {}
+    row = hit.iloc[-1].to_dict()
+    return {k: (None if pd.isna(v) else v) for k, v in row.items()}
+
+
+def read_recent(cfg: dict, ticker: str | None = None,
+                limit: int = 50) -> list[dict]:
+    """Recorded theme picks, newest first. `[]` when nothing is recorded."""
+    path = themes_csv_path(cfg, create=False)
+    if not path.exists():
+        return []
+    try:
+        frame = pd.read_csv(path, dtype={"scan_date": str})
+    except Exception:  # noqa: BLE001
+        return []
+    if frame.empty:
+        return []
+    if ticker and "ticker" in frame.columns:
+        frame = frame[frame["ticker"].astype(str).str.upper() == ticker.upper()]
+    if "scan_date" in frame.columns:
+        frame = frame.sort_values("scan_date", ascending=False, kind="stable")
+    rows = frame.head(limit).to_dict("records")
+    return [decode_lists({k: (None if pd.isna(v) else v)
+                          for k, v in row.items()}) for row in rows]
+
+
+def decode_lists(row: dict) -> dict:
+    """The stored row with its JSON list columns decoded, for display."""
+    out = dict(row)
+    for field in LIST_FIELDS:
+        raw = out.get(field)
+        if isinstance(raw, str) and raw:
+            try:
+                out[field] = json.loads(raw)
+            except json.JSONDecodeError:
+                pass
+    return out
+
+
+def chain_for(theme: str, cfg: dict) -> list[str]:
+    """The configured beneficiary chain for a theme, for the research bundle."""
+    return chain_of(theme, cfg)
+
+
+# --------------------------------------------------------------------------
+# CLI -- the same `record()` the MCP tool calls, so the two cannot drift
+# --------------------------------------------------------------------------
+
+def _cmd_record(args: list[str], cfg: dict) -> int:
+    if not args:
+        print("usage: python theme_signals.py record <picks.json>")
+        return 2
+    payload = json.loads(Path(args[0]).read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        print("picks.json must be an object with theme, event and picks.")
+        return 2
+    try:
+        result = record(payload.get("theme", ""), payload.get("event", ""),
+                        payload.get("picks") or [], cfg,
+                        event_date=payload.get("event_date", ""),
+                        deep="--deep" in args)
+    except ValueError as exc:
+        print(f"Nothing recorded. {exc}")
+        return 1
+    if not result.get("recorded"):
+        print(f"Nothing recorded. {result.get('problems') or result.get('note')}")
+        return 1
+    for pick in result["picks"]:
+        trigger = pick.get("trigger") or "no technical trigger"
+        print(f"Recorded {pick['ticker']} {pick['scan_date']}  ({trigger})")
+    return 0
+
+
+def _cmd_show(args: list[str], cfg: dict) -> int:
+    rows = read_recent(cfg, args[0] if args else None)
+    if not rows:
+        print(f"No theme picks recorded yet ({themes_csv_path(cfg, False)}).")
+        return 1
+    frame = pd.DataFrame(rows)
+    columns = [c for c in ("scan_date", "ticker", "theme", "chain_role",
+                           "exposure", "confidence", "sources_n")
+               if c in frame.columns]
+    print(frame[columns].to_string(index=False))
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    from scanner_common import enable_utf8_output, load_config
+
+    enable_utf8_output()
+    cfg = load_config()
+    command = argv[0] if argv else ""
+    if command == "record":
+        return _cmd_record(argv[1:], cfg)
+    if command == "show":
+        return _cmd_show(argv[1:], cfg)
+    print(__doc__)
+    print("usage:\n  python theme_signals.py record <picks.json> [--deep]"
+          "\n  python theme_signals.py show [TICKER]")
+    return 2
+
+
+if __name__ == "__main__":
+    import sys
+
+    raise SystemExit(main(sys.argv[1:]))

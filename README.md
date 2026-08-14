@@ -110,12 +110,17 @@ Current screens:
 | `portfolio_sim/exits.py` | Tier 4's exit side: the double-top detector, the sell record, the Discord warning |
 | `run_scanner.bat` | Task Scheduler entry point — one command, all four tiers, one message |
 | `enrichment.py` | The agent's record: what the `enrich` skill concluded, keyed (scan_date, ticker), graded by tier 4 and unable to touch a score |
+| `newsfeed.py` | The thematic screen's evidence base: dated, sourced news events (Google News RSS) and 8-K full-text hits (EDGAR), cached per theme |
+| `theme_signals.py` | Screen 5's record: thematic picks written into `signals.csv`, validated so the agent can name a company but never write a number |
+| `.claude/skills/theme-screen/` | Finding candidates from real-world events — the identification counterpart to `enrich`, in a session, graded by the registry |
 | `combined_report.py` | The dossier: the graded half and the researched half on one page. Renders recorded files; computes nothing |
 | `tests/` | Invariant test suite + `run_all.py` runner (no test dependency; plain scripts) |
 
 Adding a new scanner = new module exposing `CONFIG_KEY`, `scan()`,
 `EMBED_COLOR` + `describe_hit()`, `plot_hit()` + one entry in
-`run_scanners.SCANNERS` + a config section with an `enabled` flag.
+`run_scanners.SCANNERS` + a config section with an `enabled` flag. That is the
+contract for a screen that is a function of the price panel; screen 5 is
+deliberately not one, and joins neither registry (see below).
 
 Four companion documents cover what this README does not:
 
@@ -306,6 +311,101 @@ the same trend without the linearity requirement, so comparing the two says
 whether demanding a straight line buys anything. So far it does not (the control
 reads −0.91 over 30 days against the strict cohort's −1.79), which is exactly the
 kind of finding it is there to surface.
+
+## Screen 5: thematic — who benefits from a real-world event
+
+The only screen here that is not a function of the price panel, and the only one
+run **on demand**. The other four ask *which of the 903 constituents did
+something on the tape?* This asks *which companies benefit from something that
+happened in the world?* — when a hyperscaler commits to a data centre, when an
+outbreak starts, when a memory maker puts $38bn into new fabs. The beneficiaries
+two links down the chain (the interconnect builder, the transformer supplier, the
+CDMO) have done nothing on their own charts, so no rolling window finds them.
+
+**An agent names the candidate; Python grades it.** A Claude Code session runs
+the `theme-screen` skill over `theme_research`'s bundle — dated, sourced news
+events and recent 8-Ks from `newsfeed.py`, the configured beneficiary chains, and
+a brief naming only what arithmetic cannot do — traces the chain with IBKR's
+theme graph and web search, and records with `theme_record`. The picks land in
+`signals.csv` under `config_key = "theme_screen"`, tier 2 grades them, and tier 4
+buys them, so the screen's record is measured against the technical ones rather
+than argued about.
+
+```
+event (dated, ≥2 sources)  ->  chain  ->  candidates  ->  registry grades them
+"Ontario unveils a data       operator      PWR  engineering    Reward 47.0 / Risk 66.8
+ centre framework"            engineering   HUBB equipment      Reward 57.9 / Risk 50.7
+                              equipment     GEV  power          Reward 59.8 / Risk 83.4
+                              power
+                              materials
+```
+
+Four rules hold the boundary, and each is pinned by `tests/test_theme_screen.py`:
+
+- **The record carries no number.** `validate` rejects `conviction`, `tier`,
+  `score`, `Verdict`, `Reward`, `Risk` and `price_target` by name. Every figure
+  on a theme row is computed by `run_scanners.scan_ticker` *after* the pick, from
+  a fresh download. On the first live run the registry graded those three picks
+  `avoid`, `speculative` and `dull` — the agent's enthusiasm cannot move them.
+- **The same scan proves the ticker is tradeable.** IBKR's theme graph returns
+  Prysmian (Milan), NKT (Copenhagen) and POWERGRID (NSE), and a model can invent
+  a symbol; a name with no bars is refused rather than written into a table tier
+  4 buys from. It also supplies the `scan_date`, from that ticker's own last
+  settled bar.
+- **The batch is atomic.** A theme is a chain, so one invalid pick writes
+  nothing: half a chain is a misleading cohort, not a partial answer.
+- **It is in neither screen registry.** Not `run_scanners.SCANNERS` (it would run
+  nightly), and — the load-bearing one — not `backtest_universe.SCREENS`, which
+  `tests/_harness.screens()` reads and which would subject it to
+  `test_signal_contract.py`'s demand for a full-history mask that reproduces
+  itself under bar-drop perturbation. A list dated today has no history, and a
+  faked one would then be backtested as though it were real.
+
+Each row also records `Trigger` — the screen that *also* fired on that name, or
+the explicit string `"none"` (never `""`, which round-trips as NaN and would be
+dropped silently by a `groupby`). That is the split for "did the agent find it
+before or after the tape did", and `Index` records whether the pick was even an
+index constituent, since these may be any US listing.
+
+**The evidence behind a pick is frozen at record time.** The news cache is
+replaced wholesale on every refresh, so reading an old pick back through it
+would show today's headlines — auditable-looking without being auditable.
+`snapshot_evidence` writes the clustered events to
+`output/themes/events_<theme>_<scan_date>.json` and the row points at it
+(`evidence_file`, `evidence_n`). No events means no file, not an empty one.
+
+**Events are clustered and ranked, not served in date order.** A raw feed
+repeats one story per outlet and buries a $50bn commitment under an op-ed, so
+`cluster_events` merges headlines on wording overlap **or** a matching money
+figure, then orders by size, corroboration and recency. The money route earns
+its place: three reports of SK Hynix's $38bn fab commitment shared under a third
+of their words and stayed three separate "events" without it. A *disagreeing*
+figure vetoes a merge even when the wording matches (`$13bn Texas` and `C$13bn
+Alberta` are two projects), and nothing is FX-converted. A cluster's
+`sources_n` is exactly the corroboration `min_sources` asks about.
+
+**Filings are ordered index-constituents-first.** Micro-caps mention a theme
+promotionally far more than large filers mention one materially. Filtering on
+8-K `Item 1.01` was the obvious fix and was measured — it surfaced Prologis for
+`datacenter` but collapsed `energy` to one hit and `biopharma` to zero, losing
+Chevron and Oshkosh — so `filing_item` stays supported per theme and set
+nowhere, and the ordering does the work instead. Nothing is dropped; an
+off-index filer is a find, just not the first one to read.
+
+**What it can and cannot see**, tested 2026-08-14: Google News RSS and EDGAR
+full-text search are free and reliable and are what the bundle is built from;
+Reddit is blocked outright, StockTwits 403s, X is paid-tier only, Facebook has no
+public search, and Google Trends publishes no official API. So this is a
+news-and-filings screen rather than a social-sentiment one, and the skill
+requires saying so rather than implying a read that did not happen. Each theme
+therefore carries a `filing_query` separate from its news query, because EDGAR
+full-text matches an *exact phrase* — passing the news keyword soup returns zero
+hits, which reads as "nobody filed about this" and is a wrong answer rather than
+a missing one.
+
+Themes are config (`theme_screen.themes`): `datacenter`, `energy`, `ai_semi`,
+`biopharma`, `defense` today, each with a news query, a filing query and a chain
+template. Adding one is a config line.
 
 ## Signal tiers
 
@@ -531,6 +631,8 @@ python research_report.py risk INTC MSFT             # every risk rule beside it
 python research_report.py scan PGR                   # on-demand: tiers 1+2 for one ticker
 python research_report.py verdicts PGR               # ...and the graded verdict
 python enrichment.py show PGR                        # what the enrich skill concluded
+python newsfeed.py                                   # screen 5's evidence base: dated events
+python theme_signals.py show                         # what the thematic screen picked
 type output\logs\<run_id>.log                        # what that run actually did
 python backtest_breakout.py       # historical validation, breakout screen
 python backtest_pullback.py       # historical validation, pullback screen

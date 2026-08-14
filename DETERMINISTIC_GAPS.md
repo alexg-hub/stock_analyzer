@@ -214,6 +214,63 @@ attributes that tier 4 grades against forward returns — never as an adjustment
 a score. A judgment on the record is a hypothesis you can measure; a judgment
 inside the score is a number nobody can check.
 
+### D2. The other direction — identification, not grading
+
+Everything above is AI *judging a ticker the analyzer already surfaced*. There is
+a second gap, and it is the mirror image: **which companies benefit from a dated
+real-world event.** A hyperscaler announces a data centre, an outbreak starts, a
+memory maker commits $38bn to new fabs — and the beneficiaries two links down the
+chain (the interconnect builder, the transformer supplier, the CDMO) have done
+nothing on their own charts. No screen here can reach them, because the causal
+chain runs through news, filings and a supplier graph rather than through price.
+
+`mcp_tools/themes.theme_research` is the entry point, same shape and same rule:
+it assembles dated sourced events (`newsfeed.py`, Google News RSS plus EDGAR
+full-text search) and returns a brief; the session traces the chain with IBKR's
+theme graph and web search; `theme_record` writes the picks into `signals.csv`
+under `config_key = "theme_screen"`, where the registry grades them and tier 4
+buys them. The agent names a company and a mechanism and cannot write a number —
+`theme_signals.validate` rejects the score fields by name, and the scan that
+grades the pick is what proves the ticker is real and US-listed.
+
+Two things measured while building it, both worth keeping:
+
+- **The "social media" half of the idea is not available.** Reddit is blocked
+  outright, StockTwits 403s, X is paid-tier, Facebook has no public search, and
+  Google Trends publishes no official API (all tested 2026-08-14). What *is*
+  free and reliable is Google News RSS and EDGAR full-text search. This is a
+  news-and-filings screen; the skill says so rather than implying a sentiment
+  read that never happened.
+- **EDGAR full-text matches an exact phrase**, so a theme needs a separate
+  `filing_query` from its news query. Passing the news keyword soup ("data
+  center investment announcement") returns **zero** hits — which reads as
+  "nobody filed about this", a wrong answer rather than a missing one. Configured
+  phrases are checked against live EDGAR before being committed.
+- **8-K item codes are not the fix for the micro-cap bias, and this was the
+  obvious wrong answer.** Small caps mention a theme promotionally far more than
+  large filers mention one materially, so a bare phrase search buries the real
+  names. Filtering on `Item 1.01` (material definitive agreement) looked like
+  the remedy and was measured: it surfaced Prologis for `datacenter` but
+  collapsed `energy` to one hit and `biopharma` to zero, losing Chevron and
+  Oshkosh with them. **Index membership is the fix** — annotate each hit from
+  `universe_constituents` and order constituents first, dropping nothing.
+  `filing_item` remains supported per theme and set nowhere, so the option stays
+  measurable.
+
+### What would improve collection next
+
+Ranked by value against effort, and none of it is worth doing before tier 4 has
+graded a theme cohort — adding sources to an unmeasured screen is tuning a thing
+nobody has shown works:
+
+| Idea | Note | Status |
+|---|---|---|
+| **USASpending.gov** award search | Free, no key, and the award *names the recipient* — it removes the inference step entirely for `defense` and `energy`. Caveat measured: a naive query returns cumulative obligations on long-running vehicles (Lockheed $48bn from DOE), not new awards, so it needs action-date filtering or it confidently reports the wrong thing. | ⬜ |
+| Resolve Google News redirect links | Feed links are opaque (`news.google.com/rss/articles/CBMi…`) and `HEAD` does not resolve them, so a recorded `sources` URL is not human-checkable. Interim rule: the skill requires citing the publisher URL actually fetched. | ⬜ |
+| Article body, not just the headline | Magnitude and counterparty are often in the first paragraph rather than the title; 29% of headlines carry a figure, so the rest is being left on the table. | ⬜ |
+| openFDA approvals / EUA feed | The authoritative `biopharma` event source. Returned HTTP 500 on the date-range syntax tried — probably the query, unverified, so not planned around. | ⬜ |
+| FERC interconnection queue | The authoritative `energy`/`datacenter` demand signal: who is actually queuing to connect load. No API checked yet. | ⬜ |
+
 ---
 
 ## E. No free source

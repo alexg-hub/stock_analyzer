@@ -1374,6 +1374,23 @@
         "dir": "enrichment",
         "csv": "enrichment.csv"
     },
+    "theme_screen": {
+        "enabled": true,
+        "dir": "themes",
+        "csv": "themes.csv",
+        "min_sources": 2,
+        "max_picks_per_run": 8,
+        "lookback_days": 14,
+        "news_cache_hours": 6,
+        "news_feed": "https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en",
+        "themes": [
+            {"name": "datacenter", "query": "data center investment announcement", "filing_query": "data center", "chain": ["operator", "engineering", "equipment", "power", "materials"]},
+            {"name": "energy", "query": "power generation grid investment", "filing_query": "power purchase agreement", "chain": ["utility", "transmission", "equipment", "fuel"]},
+            {"name": "ai_semi", "query": "AI chip capacity fab investment", "filing_query": "semiconductor", "chain": ["designer", "foundry", "equipment", "materials"]},
+            {"name": "biopharma", "query": "outbreak vaccine emergency authorization", "filing_query": "emergency use authorization", "chain": ["developer", "cdmo", "diagnostics", "supplies"]},
+            {"name": "defense", "query": "defense procurement contract award", "filing_query": "Department of Defense", "chain": ["prime", "subsystem", "materials"]}
+        ]
+    },
     "combined": {
         "dir": "reports"
     }

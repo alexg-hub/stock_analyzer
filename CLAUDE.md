@@ -95,6 +95,78 @@ headed with a `quant N + narrative M` conviction the scoring no longer produces.
 Both are gone. Enrichment prose stays in `output/enrichment/` beside the
 `enrichment.csv` tier 4 joins on; the dossier inlines it verbatim.
 
+**The sixth surface is the `theme-screen` skill, and it is the only one that
+*finds* rather than grades.** Every screen above asks which of the 903
+constituents did something on the tape; this asks which companies benefit from a
+dated real-world event — a data-centre announcement, an outbreak, a fab
+commitment — which no rolling window can reach, because the beneficiaries two
+links down the chain have done nothing on their own charts yet.
+`mcp_tools/themes.py` assembles the deterministic bundle (`newsfeed.py`: Google
+News RSS plus EDGAR full-text search, both dated and sourced) and returns a
+brief; a session traces the chain with IBKR's theme graph and web search;
+`theme_signals.record` writes the picks into `signals.csv` under
+`config_key = "theme_screen"`. **On demand only** — it is in neither
+`run_scanners.SCANNERS` nor `backtest_universe.SCREENS`, and
+`tests/test_theme_screen.py` pins both absences: the latter would enrol it in
+`test_signal_contract.py`, which demands a full-history `(days × tickers)` mask
+that reproduces itself under bar-drop perturbation, and a list dated *today*
+cannot supply one. Four rules:
+- **The agent names a ticker and a mechanism; it never writes a number.**
+  `validate` rejects `conviction`, `tier`, `score`, `Verdict`, `Reward`, `Risk`
+  and `price_target` by name. Every figure on a theme row — the ⭐ badge, the 🚫
+  veto, both plane axes, `Index` — is computed by `run_scanners.scan_ticker`
+  *after* the pick. On the first live run the registry graded the agent's three
+  picks `avoid`, `speculative` and `dull`, which is the design working.
+- **That same scan is the tradeability guard.** IBKR's theme graph returns
+  Prysmian (Milan), NKT (Copenhagen) and POWERGRID (NSE), and a model can invent
+  a symbol outright; a name with no bars is refused rather than written into a
+  table tier 4 buys from.
+- **The batch is atomic.** A theme is a *chain*, so one invalid pick writes
+  nothing — half a chain on the record is a misleading cohort, not a partial
+  answer. Same rule as `config_edit`: the unit of validity is the set.
+- **`Trigger` names the no-trigger case explicitly** (`"none"`, never `""`).
+  An empty string round-trips through CSV as NaN and `groupby` drops NaN
+  silently, which would discard exactly the cohort the column exists to isolate
+  — the picks the agent found *before* the tape did.
+- **The evidence behind a pick is frozen, because the news cache is not a
+  record.** `newsfeed._save_cache` replaces a theme's entry wholesale on every
+  refresh, so reading a three-week-old pick back through the cache shows
+  *today's* headlines — auditable-looking without being auditable.
+  `snapshot_evidence` writes the clustered events at record time to
+  `events_<theme>_<scan_date>.json` and the row points at it via
+  `evidence_file`/`evidence_n`. No events means **no file** rather than an empty
+  one: `""` says the trail is missing, while an empty snapshot would claim the
+  pick was made from no evidence at all.
+
+  Two collection rules, both measured rather than assumed:
+  - **Events are clustered and ranked, never served in date order.** Raw feeds
+    repeat one story per outlet and bury a $50bn commitment under an op-ed.
+    `cluster_events` merges on wording overlap **or** a matching money figure —
+    the second route is load-bearing, because three reports of SK Hynix's $38bn
+    fab commitment shared under a third of their words and stayed three separate
+    "events" without it. A *disagreeing* figure vetoes a merge even when the
+    wording matches (`$13bn Texas` vs `C$13bn Alberta` are two projects), and
+    **no FX conversion happens anywhere** — a currency mismatch is a mismatch.
+    `sources_n` on a cluster is exactly the corroboration `min_sources` asks
+    about.
+  - **Filings are ordered index-constituents-first, and 8-K item codes are
+    *not* the fix for the size bias.** Micro-caps mention a theme promotionally
+    far more than large filers mention one materially. Filtering on `Item 1.01`
+    was the obvious remedy and was measured on 2026-08-14: it surfaced PLD for
+    `datacenter` but collapsed `energy` to **one** hit and `biopharma` to
+    **zero**, losing Chevron and Oshkosh. So `filing_item` stays supported per
+    theme and **set nowhere**, and the ordering does the work instead — IRM, NI,
+    AMD, PEG, CVX, ON, LSCC and ZTS now lead where ARMP/QUCY/ZSQR did. Nothing
+    is dropped; an off-index filer is still a find, just not the one to read
+    first.
+  Two things measured rather than assumed (2026-08-14): the "social media" half
+  of the original idea is **unavailable** — Reddit blocked, StockTwits 403, X
+  paid-tier, Facebook no public search, Google Trends no API — so this is a
+  news-and-filings screen and the skill says so; and **EDGAR full-text matches an
+  exact phrase**, so each theme carries a `filing_query` separate from its news
+  query. Passing the news keyword soup returns zero hits, which reads as "nobody
+  filed about this" — a wrong answer rather than a missing one.
+
 **The fifth surface is not a tier: the `enrich` skill.** Qualitative research —
 competitive position, whether a tripped rule is a sector artifact, what the
 filings and the tape say — runs from a Claude Code session over the MCP tools,
@@ -177,6 +249,16 @@ python research_report.py verdicts PGR RL
 # not a missing measurement, it is a cohort of one that `analyze` then grades.
 python enrichment.py record row.json
 python enrichment.py show TJX
+
+# The thematic screen -- AI names the candidate, Python grades it. On demand
+# only; the `theme-screen` skill or the `theme_research`/`theme_record` MCP
+# tools are the interactive surface. Writes into signals.csv, so tier 4 buys
+# these on the next `portfolio_sim open`. No Discord.
+python newsfeed.py                     # the evidence base: dated, sourced events
+python newsfeed.py datacenter --refresh
+python theme_signals.py record picks.json          # {theme, event, picks:[...]}
+python theme_signals.py record picks.json --deep   # + tier 3's verdict per pick
+python theme_signals.py show PWR
 
 # The combined dossier: the graded half and the researched half on one page.
 # Reads recorded files only -- no network, no grading, nothing recomputed.

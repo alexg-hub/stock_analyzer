@@ -29,6 +29,7 @@ TESTS = [
     ("test_research_output.py", "offline -- tier-3 financials, chart, verdict cards"),
     ("test_portfolio_sim.py", "offline -- tier-4 ledger, marking, attribution"),
     ("test_enrichment.py", "offline -- the agent's record: graded, never a score"),
+    ("test_theme_screen.py", "offline -- thematic picks: named by AI, graded by Python"),
     ("test_no_model.py", "offline -- the analyzer cannot invoke a model"),
     ("test_combined_report.py", "offline -- the dossier renders, never computes"),
     ("test_signal_contract.py", "cached panel -- signal tiers, alert, hand-off"),

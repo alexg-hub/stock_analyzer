@@ -291,12 +291,32 @@ All three were resolved by the 2026-08-11 separation; kept here because each one
 | 3 — graded verdict | none |
 | 4 — virtual portfolio | none — and it grades the agent's record like any other attribute |
 | the `enrich` skill | all of it — session-only, records to `output/enrichment/` |
+| the `theme-screen` skill | all of it — session-only, records to `signals.csv` under `config_key = "theme_screen"` |
+
+The `theme-screen` skill is the one addition that goes the *other* way, and it is
+worth being precise about why it does not breach anything above. Every other
+surface here has AI **judging** something the analyzer already found; this one has
+AI **finding** something the analyzer cannot — a beneficiary of a dated real-world
+event, which no rolling window over OHLCV can reach. The boundary is unchanged
+because the direction of the numbers is unchanged: the agent supplies a ticker
+and a falsifiable mechanism, and every figure on the recorded row — the ⭐ badge,
+the 🚫 veto, both plane axes, and the tier-3 verdict if it is asked for — is
+computed by the registry *after* the pick, from a fresh download. `validate`
+rejects `conviction`, `tier`, `score`, `Verdict`, `Reward`, `Risk` and
+`price_target` by name, and the scan that grades the pick is also what proves the
+ticker is real and US-listed before it can reach a table tier 4 buys from.
+
+So the rule survives intact: **a session may call the analyzer; the analyzer may
+not call a session.** `theme_signals.py` runs no model and is in neither screen
+registry — `tests/test_theme_screen.py` pins both absences, because
+`backtest_universe.SCREENS` would enrol it in `test_signal_contract.py`, which
+demands a full-history mask a list dated today cannot honestly supply.
 
 ```powershell
-python tests
-un_all.py             # test_no_model.py is the guard
+python tests/run_all.py             # test_no_model.py is the guard
 python run_scanners.py --no-send    # all four tiers, no model in the process
 python enrichment.py show TJX       # what the agent concluded, if anything
+python theme_signals.py show        # what the thematic screen picked
 python -m portfolio_sim analyze     # the roadmap names the agent's questions
 ```
 

@@ -44,7 +44,7 @@ REDACTED = "<redacted -- pass reveal=True>"
 # every screen unable to fire while reporting zero signals rather than an error
 # -- the precise failure this file exists to prevent. It stays a hand edit.
 WRITABLE = ("quality", "ibkr", "research", "backtest", "tuning", "charts",
-            "portfolio", "enrichment", "combined")
+            "portfolio", "enrichment", "combined", "theme_screen")
 WRITABLE_SUFFIX = "_strategy"
 
 # Refused even though a prefix above would otherwise allow them.
@@ -474,7 +474,7 @@ def params_list_impl(section: str | None = None) -> dict:
             continue
         if not (name.endswith(WRITABLE_SUFFIX)
                 or name in ("charts", "backtest", "portfolio", "ibkr", "data",
-                            "enrichment", "combined")):
+                            "enrichment", "combined", "theme_screen")):
             continue
         if not want(name):
             continue
