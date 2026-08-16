@@ -167,6 +167,91 @@ cannot supply one. Four rules:
   query. Passing the news keyword soup returns zero hits, which reads as "nobody
   filed about this" — a wrong answer rather than a missing one.
 
+**The seventh surface is `industry_valuation.py`, and it is the first thing here
+that grades an *industry* rather than a company.** Tiers 1-3 ask what a ticker did
+on the tape and what its own statements say; `peers.py` compares a company to its
+sector *today*. None of them can answer "money rotated into semiconductors while
+pharmaceuticals went sideways — was the sector that did nothing actually cheap?"
+A price gap cannot answer it, because over any window the identity
+
+    dlog(Price) = dlog(P/E) + dlog(EPS)
+
+holds exactly, and it separates the two things a price move can mean. An industry
+whose **earnings grew while its multiple compressed** has been de-rated — that is
+the opportunity. One whose multiple fell *because* earnings fell has been repriced
+correctly. The module is that decomposition, per industry. On demand only
+(`scan` / `show` / `record`, plus `valuation_scan`/`valuation_read`/
+`valuation_record`), in neither `run_scanners.SCANNERS` nor
+`backtest_universe.SCREENS`; `tests/test_industry_valuation.py` pins both
+absences, as for `theme_screen`. Unlike `theme_screen` a full-history mask *is* in
+principle computable here, which is a real future option and deliberately
+deferred. Seven rules:
+- **The P/E history is genuinely reconstructable, and that is the whole premise.**
+  `research_collect.quarterly_eps` returns reported quarterly EPS indexed by
+  **announcement date** (~24 quarters from Yahoo), and `ttm_from_quarterly` rolls
+  it to TTM and forward-fills onto a 5y price panel. The forward-fill is what
+  makes it point-in-time: a figure can only ever propagate forward from the day it
+  was published. The pair was split out of the old private `_ttm_eps_series` so
+  the per-ticker `pe_percentile_2y` and the industry path can never drift on what
+  "trailing earnings on day d" means — the same single-source-of-truth rule the
+  `compute_*` screens follow. **A plain reindex there would make every historical
+  P/E clairvoyant**, silently; a test pins the step onto the announce date.
+- **Two statistics, two aggregations, and the difference is load-bearing.** The
+  *level* (`pe_now`, `pe_z`, `pe_pctile`) is a cross-sectional **median** — robust,
+  and "pharma trades at 14x" is a sentence. The *decomposition* is built from
+  equal-weight indices (**mean** of member ratios), because the identity is
+  additive in logs and a median is not: `median(a+b) != median(a)+median(b)`, so a
+  median decomposition would not add up and the one property worth testing would
+  be untestable. The `*_dlog` columns are therefore **not rounded** — rounding them
+  to 6 places broke the additivity the column set exists to make checkable from the
+  CSV, which is what the test caught. `*_chg_pct` are the readable ones and add
+  only approximately.
+- **The z-score is on log P/E**, because multiples are ratio-scaled: 10x→20x and
+  20x→40x are the same event and a linear z would not say so.
+- **Buckets are GICS sub-industry, rolling up to sector below `min_members` (6).**
+  First consumer of `sub_industry` as a grouping key — `peers.py` buckets by sector
+  only, which would lump Semiconductors with Application Software and
+  Pharmaceuticals with Health Care Equipment, hiding exactly the rotation this
+  exists to see. **The floor is 6 against `peers.min_peers` 12 deliberately**: peers
+  needs resolution for a within-bucket *percentile rank*, this needs only a
+  *central tendency*. At 12, Pharmaceuticals (9 members) would silently vanish.
+  Don't "harmonise" them; a test pins the inequality. A rolled-up bucket carries a
+  `" (other)"` suffix so it can never be read as a real GICS sub-industry.
+- **A loss-maker has no P/E — not a low one.** Non-positive EPS yields NaN, so a
+  bucket's member count varies over time, which matters most exactly where this
+  gets used (much of Biotechnology is loss-making). A day with fewer than
+  `min_members` priced members is **NaN, never a median of three and never
+  forward-filled** — the same rule `price_risk` applies with `min_obs`.
+- **The flag is a conjunction, never a z-score alone.** `cheap` needs the multiple
+  historically low **and** earnings growing over the window; `rich` needs it
+  historically high **and** reached by expanding. Deliberately not symmetric —
+  forcing symmetry ("rich = high z and earnings falling") would miss an industry
+  whose earnings grew strongly and whose multiple ran further still, which is the
+  semiconductor case. Like `peers.in_sector_tail`, the extra conjunct can only ever
+  make the flag quieter.
+- **Only a full pass writes anything; `--limit` is a probe that writes nothing.**
+  `universe_scan` learned this the hard way — its date-stamped artifacts meant a
+  thirty-ticker probe silently replaced the day's whole-index plane. A bucket-level
+  table built from a subset is meaningless anyway, so the simple rule beats
+  reproducing three artifact scopes. Two more things to keep visible: the **EPS
+  cache stores quarterly points, not the P/E path** (price moves daily, earnings
+  step quarterly, so a warm re-run rebuilds the path from a fresh panel in
+  seconds against ~20 minutes cold); and **bucket membership is today's membership
+  applied backwards**, so every historical path is survivorship-biased — hence the
+  `membership_asof` column, the chart subtitle and the MCP payload's `caveat`, the
+  same discipline `universe_scan` applies to `stage`.
+- **`record` may write numbers, unlike `theme_signals`.** There the picks are named
+  by a model, so `BANNED_FIELDS` rejects every score by name; here every figure is
+  computed in Python from a recorded panel, so `pe_z` and the decomposition belong
+  on the row — they are the attributes tier 4 exists to grade. `Verdict`/
+  `Conviction` still stay out (`protect=VERDICT_COLS`). Everything else follows
+  `theme_signals.record`: graded through `scan_ticker` **before** anything is
+  written, a name with no bars refused, and the **batch atomic** — half an industry
+  on the record is a misleading cohort, not a partial answer. **Forward P/E is a
+  level, not a path**: Yahoo serves one value with no history and nothing here had
+  ever stored it, so `valuation_history.csv` is the only thing that ever builds it
+  into a series.
+
 **The fifth surface is not a tier: the `enrich` skill.** Qualitative research —
 competitive position, whether a tripped rule is a sector artifact, what the
 filings and the tape say — runs from a Claude Code session over the MCP tools,
@@ -259,6 +344,18 @@ python newsfeed.py datacenter --refresh
 python theme_signals.py record picks.json          # {theme, event, picks:[...]}
 python theme_signals.py record picks.json --deep   # + tier 3's verdict per pick
 python theme_signals.py show PWR
+
+# Industry valuation anomalies -- has an industry's multiple left its own
+# history, and did its earnings move with it? Reconstructs a ~5y P/E path per
+# company from announcement-dated quarterly EPS, aggregates to GICS
+# sub-industry, and splits each industry's price move into multiple change and
+# earnings change. On demand only. No Discord. ~20 min cold, seconds warm.
+# `record` writes a bucket's members into signals.csv, so tier 4 grades them.
+python industry_valuation.py scan
+python industry_valuation.py scan --limit 30        # timing probe; writes NOTHING
+python industry_valuation.py scan --no-fetch        # rebuild from cache, no network
+python industry_valuation.py show Semiconductors
+python industry_valuation.py record Pharmaceuticals --top 5
 
 # The combined dossier: the graded half and the researched half on one page.
 # Reads recorded files only -- no network, no grading, nothing recomputed.

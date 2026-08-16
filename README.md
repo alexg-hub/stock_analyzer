@@ -113,6 +113,7 @@ Current screens:
 | `newsfeed.py` | The thematic screen's evidence base: dated, sourced news events (Google News RSS) and 8-K full-text hits (EDGAR), cached per theme |
 | `theme_signals.py` | Screen 5's record: thematic picks written into `signals.csv`, validated so the agent can name a company but never write a number |
 | `.claude/skills/theme-screen/` | Finding candidates from real-world events — the identification counterpart to `enrich`, in a session, graded by the registry |
+| `industry_valuation.py` | Industry multiples against their own history: splits each GICS sub-industry's price move into multiple change and earnings change, so a de-rating is distinguishable from correct repricing |
 | `combined_report.py` | The dossier: the graded half and the researched half on one page. Renders recorded files; computes nothing |
 | `tests/` | Invariant test suite + `run_all.py` runner (no test dependency; plain scripts) |
 
@@ -633,6 +634,9 @@ python research_report.py verdicts PGR               # ...and the graded verdict
 python enrichment.py show PGR                        # what the enrich skill concluded
 python newsfeed.py                                   # screen 5's evidence base: dated events
 python theme_signals.py show                         # what the thematic screen picked
+python industry_valuation.py scan                    # industry multiples vs their own history
+python industry_valuation.py show Semiconductors     # one industry's reading
+python industry_valuation.py record Pharmaceuticals  # its members -> signals.csv, for tier 4
 type output\logs\<run_id>.log                        # what that run actually did
 python backtest_breakout.py       # historical validation, breakout screen
 python backtest_pullback.py       # historical validation, pullback screen

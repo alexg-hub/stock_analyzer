@@ -881,3 +881,128 @@ def plot_risk_reward(table: pd.DataFrame, chart_cfg: dict, out_path: Path,
     fig.savefig(out_path, dpi=dpi, bbox_inches="tight", facecolor=C["surface"])
     plt.close(fig)
     print(f"Chart saved to {out_path}")
+
+
+# --------------------------------------------------------------------------
+# Industry valuation: what a price move was actually made of
+# --------------------------------------------------------------------------
+
+def plot_industry_valuation(table: pd.DataFrame, chart_cfg: dict, out_path: Path,
+                            dpi: int = 120, window_days: int = 126,
+                            max_rows: int = 24) -> None:
+    """Per industry, the multiple change beside the earnings change.
+
+    `table` is `industry_valuation.build_table`'s frame, already sorted with the
+    most de-rated first. Grouped horizontal bars: over the window, an industry's
+    price move splits exactly into what the market paid (the multiple) and what
+    the companies earned. The pairing is the whole point -- a bucket whose
+    earnings bar is up while its multiple bar is down has been de-rated, which is
+    a different event from one where both fell together.
+
+    **Two hues, and they carry the one genuinely categorical distinction here**:
+    multiple vs earnings. The palette has exactly two, so colouring by sector was
+    never available -- there are eleven of them. Same ruling `plot_risk_reward`
+    records for its quadrants.
+
+    With ~70 buckets the chart would be unreadable, so it shows the extremes:
+    the most de-rated and the most re-rated, which is where a dislocation lives
+    by definition. The subtitle says how many were dropped, and carries the
+    survivorship caveat -- membership is today's, applied backwards.
+    """
+    rows = table.dropna(subset=["multiple_chg_pct", "earnings_chg_pct"])
+    if rows.empty:
+        print("No bucket had a measurable decomposition -- skipping the chart.")
+        return
+
+    # Selection: **flagged buckets first, then the extremes.** Sorting by
+    # multiple change and keeping both tails looks right and is wrong -- a
+    # de-rated industry is one whose multiple fell while earnings held, which
+    # puts it in the *middle* of that sort, not at either end. The first live
+    # chart dropped Pharmaceuticals and Semiconductors for exactly that reason,
+    # i.e. it hid the two buckets the run had actually concluded something
+    # about. Whatever the module flagged has to survive the truncation.
+    total = len(rows)
+    if total > max_rows:
+        flagged = rows[rows["flag"].fillna("") != ""]
+        if len(flagged) > max_rows:         # too many to show: the most extreme
+            flagged = flagged.reindex(
+                flagged["pe_z"].abs().sort_values(ascending=False).index[:max_rows])
+        room = max_rows - len(flagged)
+        rest = rows[~rows.index.isin(flagged.index)]
+        half = room // 2
+        rows = pd.concat([rest.head(half), flagged, rest.tail(room - half)]
+                         if room > 0 else [flagged])
+        rows = rows.sort_values("multiple_chg_pct", ascending=True)
+    rows = rows.iloc[::-1]                  # most de-rated ends up on top
+
+    labels = [f"{b}{'  · ' + f if f else ''}  (n={int(n)})"
+              for b, f, n in zip(rows["bucket"], rows["flag"].fillna(""),
+                                 rows["window_members_n"])]
+    y = np.arange(len(rows))
+    height = 0.38
+
+    fig, ax = plt.subplots(figsize=(11, 2.2 + 0.52 * len(rows)))
+    fig.patch.set_facecolor(C["surface"])
+    ax.set_facecolor(C["surface"])
+    for side in ("top", "right", "left"):
+        ax.spines[side].set_visible(False)
+    ax.spines["bottom"].set_color(C["axis"])
+    ax.tick_params(colors=C["muted"], labelsize=9)
+    ax.grid(axis="x", color=C["grid"], linewidth=0.8)
+    ax.set_axisbelow(True)
+    ax.set_yticks(y)
+    ax.set_yticklabels(labels, color=C["ink2"], fontsize=9.5)
+
+    multiple = rows["multiple_chg_pct"].astype(float).tolist()
+    earnings = rows["earnings_chg_pct"].astype(float).tolist()
+    ax.barh(y + height / 2, multiple, height=height, color=C["event"],
+            label="multiple (P/E)")
+    ax.barh(y - height / 2, earnings, height=height, color=C["close"],
+            label="earnings (TTM EPS)")
+    ax.axvline(0, color=C["axis"], linewidth=1.0)
+
+    span = (max(max(multiple), max(earnings), 0)
+            - min(min(multiple), min(earnings), 0)) or 1
+    for offset, values in ((height / 2, multiple), (-height / 2, earnings)):
+        for i, v in enumerate(values):
+            sign = 1 if v >= 0 else -1
+            ax.text(v + 0.012 * span * sign, y[i] + offset, f"{v:+.1f}%",
+                    va="center", ha="left" if v >= 0 else "right",
+                    fontsize=8.5, color=C["ink"])
+    lo = min(min(multiple), min(earnings), 0)
+    hi = max(max(multiple), max(earnings), 0)
+    ax.set_xlim(lo - 0.14 * span, hi + 0.14 * span)
+    ax.set_xlabel(f"Change over the last {window_days} trading days (%)",
+                  color=C["ink2"], fontsize=10)
+
+    dropped = total - len(rows)
+    scan_date = str(table["scan_date"].iat[0]) if "scan_date" in table else ""
+    # Not `_title`: it offsets the subtitle by a fixed *axes fraction*, and this
+    # panel's height grows with the bucket count, so at 30 rows that fraction is
+    # a third of an inch and the lines collide. Both go in offset points, which
+    # is invariant to the panel height, and the subtitle needs two lines here --
+    # so the title is stacked above it rather than left to `set_title`, which
+    # reserves only one.
+    ax.annotate(f"price = multiple x earnings, split in logs · {total} bucket(s)"
+                + (f", {dropped} unflagged mid-range not shown" if dropped else "")
+                + f"\nmembership as of {scan_date}, applied backwards "
+                  "(survivorship-biased)",
+                xy=(0, 1), xycoords="axes fraction", xytext=(0, 8),
+                textcoords="offset points", fontsize=9.5, color=C["ink2"],
+                va="bottom")
+    ax.annotate("Industry valuation -- what the price move was made of",
+                xy=(0, 1), xycoords="axes fraction", xytext=(0, 40),
+                textcoords="offset points", fontsize=13, color=C["ink"],
+                fontweight="bold", va="bottom")
+
+    fig.tight_layout()
+    # Below the whole figure, never inside the axes: the longest bar is by
+    # construction at one end of the sort, so every in-axes corner is a corner
+    # some bucket reaches. Figure coordinates, so it does not drift as the
+    # panel grows with the bucket count.
+    fig.legend(*ax.get_legend_handles_labels(), loc="lower center",
+               bbox_to_anchor=(0.5, -0.03), ncol=2, frameon=False,
+               fontsize=9.5, labelcolor=C["ink2"])
+    fig.savefig(out_path, dpi=dpi, bbox_inches="tight", facecolor=C["surface"])
+    plt.close(fig)
+    print(f"Chart saved to {out_path}")

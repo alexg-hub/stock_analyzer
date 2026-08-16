@@ -58,7 +58,7 @@ Add three rows to `ROWS` and these open up too:
 | **EV/EBITDA** | `evToEbitda` | Comparable across capital structures, unlike PE. | 🟨 |
 | EV/Revenue | `evToRevenue` | Works on unprofitable names, where PE is undefined. | 🟨 |
 | P/B, P/S | `priceToBook`, `priceToSales` | P/B is the one valuation metric that means something for financials. | 🟨 |
-| Forward PE | `forwardPE` | Collected, unused. | 🟨 |
+| Forward PE | `forwardPE` | Was collected on every deep pass and dropped unmapped by `quality.deep_metrics`. `industry_valuation.py` now reads it per constituent and records a dated **industry median** to `output/valuation/valuation_history.csv`. Still no registry parameter, and note it can only ever be a *level*: Yahoo serves one value with no history, so that file is the only thing that builds it into a series — from now, not backwards. | 🟨 |
 | Shareholder yield | `dividendYield` + `shares_change_2y_pct` | Both present; the pair is what actually returns cash. | 🟨 |
 | Institutional / insider ownership | `institutions_pct`, `insiders_pct` | Collected, unused. | 🟨 |
 

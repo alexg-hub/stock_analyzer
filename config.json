@@ -1391,6 +1391,28 @@
             {"name": "defense", "query": "defense procurement contract award", "filing_query": "Department of Defense", "chain": ["prime", "subsystem", "materials"]}
         ]
     },
+    "industry_valuation": {
+        "enabled": true,
+        "dir": "valuation",
+        "table_csv": "industry_valuation",
+        "history_csv": "valuation_history.csv",
+        "chart_path": "industry_valuation.png",
+        "chart_dpi": 120,
+        "eps_cache": "eps_cache.pkl",
+        "cache_max_age_days": 7,
+        "price_period": "5y",
+        "request_delay_s": 0.2,
+        "retries": 2,
+        "progress_every": 25,
+        "bucket_field": "sub_industry",
+        "fallback_field": "sector",
+        "min_members": 6,
+        "lookback_days": 756,
+        "change_window_days": 126,
+        "min_history_days": 252,
+        "z_threshold": 1.0,
+        "max_picks_per_run": 10
+    },
     "combined": {
         "dir": "reports"
     }

@@ -76,20 +76,64 @@ def _profile(info: dict) -> dict:
     }
 
 
-def _ttm_eps_series(tk: yf.Ticker, index: pd.DatetimeIndex):
+def ttm_eps_series(tk: yf.Ticker, index: pd.DatetimeIndex):
     """Daily trailing-twelve-month EPS aligned to `index`, from reported
-    quarterly EPS (rolling 4). None if not reconstructable."""
+    quarterly EPS (rolling 4). None if not reconstructable.
+
+    Public because `industry_valuation.py` reconstructs the same P/E path at
+    industry scale, and one definition of "what were this company's trailing
+    earnings on day d" is what keeps the per-ticker `pe_percentile_2y` and the
+    industry median comparable -- the same single-source-of-truth rule the
+    `compute_*` screen functions follow.
+
+    Two properties are load-bearing:
+      * the index is the earnings **announcement** date, so a forward-fill onto
+        a price index never uses an EPS figure before it was public;
+      * fewer than 4 quarters returns None, never a partial sum -- a
+        three-quarter "TTM" is a wrong number, not a small one.
+    """
+    return ttm_from_quarterly(quarterly_eps(tk), index)
+
+
+def quarterly_eps(tk: yf.Ticker):
+    """Reported quarterly EPS, ascending, indexed by **announcement date**.
+
+    Split from the TTM roll so a caller can cache the expensive half. This is
+    the only network call in the pair; `ttm_from_quarterly` is pure arithmetic
+    over its result, which is what lets `industry_valuation.py` cache the
+    quarterly points and rebuild a daily path from a fresh price panel for free.
+    """
     ed = _df(getattr(tk, "earnings_dates", None))
     if ed is None or "Reported EPS" not in ed.columns:
         return None
     eps = ed["Reported EPS"].dropna()
-    if len(eps) < 4:
+    if eps.empty:
         return None
     eps = eps.sort_index()
     eps.index = pd.DatetimeIndex(eps.index).tz_localize(None).normalize()
+    return eps
+
+
+def ttm_from_quarterly(eps, index: pd.DatetimeIndex):
+    """Roll quarterly EPS to TTM and forward-fill onto `index`. None if thin.
+
+    The forward-fill is what makes this point-in-time: `eps` is indexed by the
+    date each figure was *announced*, so a value can only ever propagate
+    forward, never onto a bar that preceded its publication.
+    """
+    if eps is None or len(eps) < 4:
+        return None
     ttm = eps.rolling(4).sum().dropna()
     if ttm.empty:
         return None
+    # Two announcements can share a date -- a company reporting two quarters
+    # together after a delay, or Yahoo simply serving a duplicate row. The
+    # rolling sum above is positional so every TTM value is still right; it is
+    # `reindex` that refuses a duplicated axis. Keep the LAST reading for the
+    # date, which is the trailing-twelve-month figure as of that day once both
+    # quarters are in. Dropping duplicates *before* the roll would instead lose
+    # a quarter out of the sum.
+    ttm = ttm[~ttm.index.duplicated(keep="last")]
     return ttm.reindex(index, method="ffill")
 
 
@@ -117,7 +161,7 @@ def _valuation(info: dict, tk: yf.Ticker, close: pd.Series | None) -> dict:
     if hi > lo:
         out["price_percentile_2y"] = round(100 * (last - lo) / (hi - lo), 1)
     try:
-        ttm = _ttm_eps_series(tk, px.index)
+        ttm = ttm_eps_series(tk, px.index)
         if ttm is not None:
             pe = (px / ttm).replace([float("inf"), float("-inf")], pd.NA).dropna()
             pe = pe[pe > 0]
