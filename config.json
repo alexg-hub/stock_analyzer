@@ -36,7 +36,7 @@
         "alert_only_on_band_entry": true
     },
     "reclaim_strategy": {
-        "enabled": false,
+        "enabled": true,
         "sma_days": 180,
         "below_lookback_days": 200,
         "min_days_below_pct": 0.8,
@@ -188,17 +188,17 @@
             "enabled": true,
             "badge": "⭐",
             "rules": {
-                "trailingPE": {"max": 37},
-                "trailingPegRatio": {"max": 2.1},
+                "trailingPE": {"max": 50},
+                "trailingPegRatio": {"max": 1.8},
                 "debtToEquity": {"max": 71},
-                "revenueGrowth": {"min": 10},
+                "revenueGrowth": {"min": 7},
                 "dividendYield": {"min": 0},
                 "payoutRatio": {"max": 60},
-                "roe": {"min": 12},
-                "roic": {"min": 12},
-                "operating_margin": {"min": 10, "increasing": true},
-                "profit_margin": {"min": 10, "increasing": true},
-                "fcf": {"min": 0, "increasing": true}
+                "roe": {"min": 10},
+                "roic": {"min": 10},
+                "operating_margin": {"min": 10, "increasing": false},
+                "profit_margin": {"min": 10, "increasing": false},
+                "fcf": {"min": 0, "increasing": false}
             }
         }
     },
@@ -373,7 +373,7 @@
                 "enabled": true, "label": "ROA", "source": "yahoo_deep.return_on_assets",
                 "group": "financial_quality", "stage": "deep", "weight": 1.0,
                 "display": false, "format": "pct",
-                "gate": null, "score": {"good": 15, "bad": 2}
+                "gate": null, "score": {"good": 9.1, "bad": 1.3}
             },
             "gross_margin": {
                 "sector_relative": true,
@@ -762,7 +762,7 @@
                 }
             },
             "shelf_registration": {
-                "enabled": true,
+                "enabled": false,
                 "label": "Shelf S-3",
                 "source": "sec_flags.shelf_registration",
                 "group": "risk",

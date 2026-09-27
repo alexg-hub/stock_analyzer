@@ -717,10 +717,40 @@ real send.
         manufacturers; modern large caps run lean working capital on purpose,
         which is the same argument that makes Altman Z structurally low for
         financials. MSFT moved 0.15 → 0.52 on that metric alone.
-      Note `shelf_registration` was the *suspected* fourth and turns out to be
-      fine: like the other three `sec_flags` it reads 0 → normalizes to a clean
-      1.00, so it never enters a worst-k slice. Don't disable it on the old
-      suspicion.
+      Two more were found on 2026-09-27 by re-running that same diagnostic, and
+      the first of them **reverses what this file used to say**:
+      - `shelf_registration` — recorded here as the *suspected* fourth that
+        "turns out to be fine", on the reasoning that like the other `sec_flags`
+        it reads 0 → a clean 1.00 and so never enters a worst-k slice. True for
+        78% of names and false for the rest: measured over the 175 tickers
+        carrying a `_facts.json`, **22.2% have a shelf**, and for those the
+        reading is 0.00 — the minimum possible, so it does not merely
+        *sometimes* enter the slice, it **always claims one**, displacing a real
+        distress metric. Cost to the affected names: risk **+7.9 median, +16.6
+        max**, and shelf=1 median risk **78.7** against **63.5** for shelf=0. An
+        S-3 is routine debt-shelf housekeeping for a large investment-grade
+        issuer — **Alphabet** carried 16.6 risk points for having one. Same
+        argument as `officer_departure`, a high-base-rate filing read as
+        distress; `enabled: false` 2026-09-27. The lesson for the next
+        `sec_flags` addition: "reads 0 for the examples I checked" is not a base
+        rate — measure it.
+      - `return_on_assets` — miscalibrated absolute anchors, the `current_ratio`
+        case again. Over the same 175: normalized median **0.25** with **50.6%
+        below 0.25**, because `good: 15` sat above the sample's *90th* percentile
+        (raw p90 13.45, median 5.23), so essentially nothing reached it.
+        Re-anchored `15 / 2` → **`9.1 / 1.3`** by the same method — `bad` at
+        roughly p10, `good` set so the median company lands near 0.5. It sits in
+        `financial_quality`, which takes a plain **mean**, so unlike the worst-k
+        cases it was a uniform drag on every company rather than a takeover:
+        sample reward median 60.6 → 61.3.
+      **Neither change moved a quadrant threshold, and the reason is the rule
+      below read in reverse.** Both parameters are `deep`, `quality.quadrant_of`
+      is only ever called at `fast` (`quality.annotate`,
+      `universe_scan.collect_one`), and the fast axes for all 903 cached
+      constituents come out **bit-identical** across both edits. So re-anchoring
+      `reward_min`/`risk_max` for them would have moved the nightly card's bar to
+      fix a tier-3 reading. Check which **stage** a parameter lives at before
+      recalibrating a threshold for it.
       Two live caveats:
       - **It shifts the LEVEL of the axis, so `quality.quadrant` must be
         recalibrated with it** — index median risk went 33 → 60, and leaving
@@ -730,13 +760,16 @@ real send.
         giving 30 → 56 and 47 buys across all 11 sectors. Same trap percentile
         scoring set off; see `peers.py`.
       - **`worst_k` is per group and therefore per *stage* too.** The `risk`
-        group carries 10 scored metrics at `fast` and 18 at `deep`, so worst-3-of-18
+        group carries 10 scored metrics at `fast` and 17 at `deep`, so worst-3-of-17
         is a harsher slice than worst-3-of-10 and a deep-graded company reads
-        riskier than the same company on the plane. Tolerable only because the 8
+        riskier than the same company on the plane. Tolerable only because the 7
         deep additions are mostly binary `sec_flags` that read clean at 1.00 and
         so never get selected — if a future deep parameter centres low, it will
         quietly take over every tier-3 risk reading. Check the median normalized
-        value before adding one.
+        value before adding one. **That hazard was never hypothetical**:
+        `shelf_registration` was one of those binary flags, and it read clean only
+        for the 78% of names that have no shelf (above). So the thing to check is
+        the flag's **base rate**, not whether a clean reading is possible.
   - **`enabled: false` makes a parameter invisible** — not gated, not scored,
     absent from `Quality Missing` and from the embed fields, and not counted in
     any weight. That is the flag's whole purpose: a company with no dividend
@@ -897,6 +930,30 @@ real send.
     unknown sector, an uncollected parameter and a bucket under `min_peers` (12)
     all return None and the absolute anchor stands. That is what keeps a fresh
     install, a thin sector and a cold cache behaving exactly as before.
+  - **`sector_relative: true` is inert on every `deep`-stage parameter**, and
+    silently, by way of the fallback above. `peer_stats.json` is written by
+    `universe_scan`, which runs the **`fast`** stage, so the file simply holds no
+    distribution for a deep parameter and `normalized_of` takes the documented
+    None path to the absolute anchor. Measured 2026-09-27: of the 30 parameters
+    declaring `sector_relative`, the 25 that have a distribution are **all**
+    `fast` and the 5 that do not are **all** `deep` — `return_on_assets`,
+    `gross_margin`, `current_ratio`, `quick_ratio`, `net_debt_to_ebitda_veto`. So
+    tier 3 grades those five cross-sector while the plane grades everything else
+    against peers, which is how a defence prime's 25% gross margin reads 0.14
+    beside a 39% index median. Nothing violates the fallback contract; what
+    misleads is that the declaration reads as though it applies. The fix is
+    either moving those five to `fast` or having `universe_scan` collect deep
+    values for the peer file — both real options, neither done.
+  - **A peer-scored metric always reads a median of 0.50, so anchor-calibration
+    risk lives entirely in the metrics peers does *not* reach.** A percentile
+    rank is uniform on [0,1] by construction, and it shows: measured over all
+    903, every one of the 21 peer-active scored metrics reads a normalized median
+    of **0.50** with ~24.8% below 0.25, to two decimals, identically. That is
+    what makes the `worst_k` anchor diagnostic cheap — only a non-peer metric can
+    ever centre low, so those are the only ones worth re-anchoring. Both
+    2026-09-27 fixes were in that set, and the same pass **cleared**
+    `gross_margin` (normalized median 0.48 over 172; the suspicion that
+    `good: 60` described a software business did not survive measurement).
   - **Percentile scoring re-centres a metric at 0.5**, so switching it on moves
     the *level* of both axes and invalidates fixed quadrant thresholds. They were
     recalibrated once (`reward_min` 60→58, `risk_max` 25→30), again when
