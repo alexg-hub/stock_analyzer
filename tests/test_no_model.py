@@ -158,11 +158,17 @@ for banned in ("narrative_adj", "conviction", "tier", "score"):
 # --------------------------------------------------------------------------
 c.section("the entry points that remain")
 
-c.ok("run_scanner.bat runs exactly one python command",
-     sum(1 for line in (ROOT / "run_scanner.bat").read_text(
-         encoding="utf-8", errors="replace").splitlines()
-         if "python.exe" in line and not line.strip().startswith("rem")) == 2,
-     "the run-id mint and the scan itself -- nothing chained after")
+# Matches however the interpreter is spelled -- `%PYTHON%` since the .bat files
+# were made path-independent, a hardcoded `...\python.exe` before that. Keyed to
+# the spelling alone, this check passes vacuously the moment someone changes it,
+# which is exactly how it stopped testing anything once already.
+_INVOKES_PYTHON = re.compile(r'"%PYTHON%"|python(\.exe)?"', re.I)
+_bat = (ROOT / "run_scanner.bat").read_text(encoding="utf-8", errors="replace")
+_calls = [line for line in _bat.splitlines()
+          if _INVOKES_PYTHON.search(line) and not line.strip().startswith("rem")]
+c.ok("run_scanner.bat runs exactly two python commands", len(_calls) == 2,
+     "the run-id mint and the scan itself -- nothing chained after; "
+     f"found {len(_calls)}")
 c.ok("the deep-dive skill is gone",
      not (ROOT / ".claude" / "skills" / "deep-dive").exists(),
      "replaced by .claude/skills/enrich")

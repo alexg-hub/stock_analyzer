@@ -1,0 +1,43 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.10 is the floor (`X | Y` annotations, and the MCP SDK); 3.13 is
+        # what the project is developed on.
+        python-version: ["3.10", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run the suite
+        # Offline and cache-backed only -- no network, no Discord. The three
+        # tests needing the cached price panel exit 2 (skip) on a fresh clone,
+        # which run_all.py reports without failing. --network is deliberately
+        # not used here: a CI run that depends on Yahoo being up is a CI run
+        # that fails for reasons no pull request caused.
+        run: python tests/run_all.py
+
+      - name: MCP server selftest
+        # Lists every tool and calls the read-only ones. Catches an import
+        # error or a broken tool signature that the suite would not.
+        run: python mcp_server.py --selftest

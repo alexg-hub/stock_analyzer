@@ -1,11 +1,62 @@
 # S&P 500 / MidCap 400 Scanners
 
-Nightly scans of all S&P 500 stocks (via Windows Task Scheduler) with results
-sent to Discord via a webhook — a short summary line per screen, then one
-**embed card per ticker**: colored side-bar (orange = breakout, blue =
-pullback, green = reclaim, gray = a *partial* setup), a title with the ticker
-and company name, the signal description, a fundamentals field grid, and the
-ticker's chart rendered inside the card.
+A nightly equity screener over the **S&P 500 and S&P MidCap 400** (903 names)
+that does something most screeners do not: it writes down what it thought, and
+then grades itself. Four technical screens find setups on the tape; a registry
+of 77 fundamental parameters says whether the company behind one is any good and
+whether it is visibly falling over; a deterministic 0-100 verdict scores it; and
+a virtual portfolio buys **every** recorded signal and measures which recorded
+attribute actually predicted the return. Results arrive as one Discord message a
+night.
+
+**Every number in it is computed in Python.** No model writes a figure, a score
+or a thesis sentence — `tests/test_no_model.py` asserts no code path can even
+start one. That is the point: a judgment inside the score is a number nobody can
+check, so qualitative research lives in a separate record where tier 4 grades it
+like any other hypothesis. See [`AI_ROLE.md`](AI_ROLE.md) for the measurement
+that settled this, and [`CLAUDE.md`](CLAUDE.md) for the architecture.
+
+> ### ⚠️ Not investment advice
+>
+> This is a research and measurement tool, not a recommendation engine. The
+> screens produce false positives by design, the fundamental thresholds are
+> tuned against a limited history, and the "portfolio" is a bookkeeping exercise
+> that has never placed an order. Nothing here accounts for your circumstances,
+> tax position or risk tolerance. Backtested results are not indicative of
+> future returns. **Do your own research; you trade at your own risk.**
+>
+> The author has no account surface in this codebase at all — see
+> [Account boundary](#account-boundary).
+
+### Quickstart
+
+```bash
+git clone https://github.com/alexg-hub/stock_analyzer.git
+cd stock_analyzer
+pip install -r requirements.txt          # Python 3.10+; developed on 3.13
+
+cp .env.example .env                     # optional: Discord webhook, SEC contact
+python run_scanners.py --no-send         # a full scan, cards printed not posted
+python tests/run_all.py                  # the suite: offline, no network
+```
+
+Nothing is required to start. With no `.env` the scan prints its cards to the
+console instead of posting them, and the SEC calls fall back to a placeholder
+contact (with a warning). Set `STOCK_ANALYZER_DISCORD_WEBHOOK` when you want the
+Discord message, and `STOCK_ANALYZER_SEC_USER_AGENT` before leaning on tier 3 —
+SEC's fair-access policy wants a real address in the User-Agent.
+
+The first run downloads two years of daily bars for 903 tickers and takes about
+a minute. `python backtest_universe.py` caches a five-year panel that several
+other commands and three of the tests read; run it once if you want those.
+
+### What the nightly message looks like
+
+A short summary line per screen, then one **embed card per ticker**: colored
+side-bar (orange = breakout, blue = pullback, green = reclaim, gray = a
+*partial* setup), a title with the ticker and company name, the signal
+description, a fundamentals field grid, and the ticker's chart rendered inside
+the card.
 
 Each screen reports **one signal list with two tiers** (there is no separate
 "near-miss" list): `Setup` is `full` when every condition held and `partial`
@@ -46,7 +97,7 @@ the market actually did:
 
 | tier | what it asks | how | output |
 |---|---|---|---|
-| **1 — technical** | Is the chart set up? | `breakout_scanner` / `sma_pullback` / `sma_reclaim` / `trend_line`, nightly over the 503 alerting names | `Setup` (`full`/`partial`) + `Missing` |
+| **1 — technical** | Is the chart set up? | `breakout_scanner` / `sma_pullback` / `sma_reclaim` / `trend_line`, nightly over the 903 alerting names | `Setup` (`full`/`partial`) + `Missing` |
 | **2 — quality** | Are the fundamentals sound? | the `fast` half of the `quality` registry over the tier-1 hits only, one Yahoo pass | `Quality` (the ⭐ badge) + `Quality Missing` |
 | **3 — verdict** | How does the *business* grade out? | the `deep` half of the same registry, weighted to 0-100 → a tier and a conviction. Deterministic, inside the nightly scan, and nothing revises it | a tier/conviction verdict + `_facts.json` + the financials chart |
 | **4 — portfolio** | Was any of it *right*? | `portfolio_sim`: buy every recorded signal at the next open, grade every recorded attribute against the realized return, and watch the book for a double-top exit | `output/portfolio/positions.csv` + `findings.csv` + `exits.csv` |
@@ -671,31 +722,45 @@ do: run something, run it safely, or run it without blocking.
 | `deepdive_candidates` | who is worth a deep dive, per the tier-2 gate |
 | `deepdive_context` | the deterministic tier-3 research bundle |
 | `params_list` | **every tunable parameter**, its current value and the path to change it |
-| `deepdive_post_verdicts` | record verdicts, optionally post them **(prompts)** |
-| `deepdive_complete_log` | finish the log of a run that was killed mid-flight |
+| `risk_research` | the deterministic risk bundle for one ticker, plus the questions arithmetic cannot answer |
+| `combined_report` | the dossier: the graded half and the researched half on one page |
 | `portfolio_status` / `portfolio_positions` | what is on the virtual book |
 | `portfolio_open` / `portfolio_mark` | signals → positions; fill and mark them |
 | `portfolio_exit_scan` | double tops on the book **(prompts)** |
 | `portfolio_analyze` | which recorded attribute predicted the return |
+| `universe_scan` | grade tickers onto the risk/reward plane. Long job |
+| `universe_quadrant` | the plane from the cache — no network |
+| `enrichment_read` / `enrichment_record` | what the `enrich` skill concluded, and how it is recorded |
+| `theme_research` / `theme_read` / `theme_record` | screen 5: the dated evidence bundle, the record, and the picks **(record prompts)** |
+| `valuation_scan` / `valuation_read` / `valuation_record` | screen 7: industry multiples against their own history **(all prompt)** |
 | `backtest_universe` / `backtest_ticker` | the profit backtests |
 | `tune_screen` | sweep one screen's thresholds |
-| `config_get` | read config, webhook redacted |
+| `config_get` | read config, secrets redacted |
 | `config_set` / `config_edit` / `config_delete` | change one value, a batch, or remove a key **(all prompt)** |
 | `job_status` / `job_result` / `list_jobs` | poll the long runs |
+
+That is all 34 of them. Verify the list against the server rather than this
+table — `python mcp_server.py --selftest` prints every registered tool with its
+one-line description, and calls the read-only ones.
 
 Anything that takes minutes — the nightly scan, the universe backtest, tuning,
 marking, the tier-3 context bundle — returns a **`job_id`** immediately rather than
 blocking the session. Poll `job_status(job_id)`; it returns the tail of that
 run's step log, which is the only progress these runs emit.
 
-**Six tools are deliberately left off the allow-list in
+**Nine of the 34 are deliberately left off the allow-list in
 `.claude/settings.json`, so they prompt every time:** `run_nightly_scan`,
-`portfolio_exit_scan`, `deepdive_post_verdicts`, and the three config writers
-(`config_set`, `config_edit`, `config_delete`). The first three can post to the
-live Discord channel; the last three rewrite `config.json`. They also all
-default to dry-run (`send=False` / `confirm=False`), which is the guard that
-matters — a permission rule that fails to match fails silently, but a default
-cannot.
+`portfolio_exit_scan` and `theme_record`, which can post to the live Discord
+channel or write into `signals.csv`; the three config writers (`config_set`,
+`config_edit`, `config_delete`), which rewrite `config.json`; and the three
+`valuation_*` tools. They also all default to dry-run (`send=False` /
+`confirm=False`), which is the guard that matters — a permission rule that
+fails to match fails silently, but a default cannot.
+
+`valuation_read` is read-only (cache only, no network) and is on that list only
+because it was never added when screen 7 landed; allow-listing it alongside
+`theme_read` and `enrichment_read` would be consistent. Left as-is here rather
+than loosened silently.
 
 #### Editing strategy and quality parameters
 
@@ -1624,11 +1689,12 @@ small differences as noise.
 
 ## Nightly schedule (Windows Task Scheduler)
 
-The scan runs Tue–Sat at **07:00 Israel time** (= 00:00 ET, the morning after
-each US session) via the task **"SP500 Breakout Scanner"**, which executes
-`run_scanner.bat` and appends all output to `output/scanner_log.txt`. It grades
-the previous day's close: Tuesday 07:00 scans Monday's bar, Saturday 07:00
-scans Friday's.
+The scan runs Tue–Sat at **00:00 ET**, the morning after each US session, via a
+task that executes `run_scanner.bat` and appends all output to
+`output/scanner_log.txt`. It grades the previous day's close: Tuesday's run
+scans Monday's bar, Saturday's scans Friday's. Pick the local time that lands on
+00:00 ET where you are — the author's runs at 07:00 local, which is what the
+examples below use. What matters is the offset from the close, not the clock.
 
 > **It must not move back to just after the close.** It ran Mon–Fri at 23:30
 > (16:30 ET, 30 min after the bell) until 2026-08-13, and at that hour Yahoo's
@@ -1672,10 +1738,14 @@ lost.
 >     -ExecutionTimeLimit (New-TimeSpan -Hours 3))
 > ```
 
+The `.bat` files resolve their own location (`cd /d "%~dp0"`) and call `python`
+off `PATH`, so a clone anywhere works. If the Task Scheduler account resolves a
+different interpreter than your shell, set `PYTHON` to an absolute path first.
 To (re)create the task from scratch, run in PowerShell:
 
 ```powershell
-$action   = New-ScheduledTaskAction -Execute "C:\Users\Lenovo\CC\stock_analyzer\run_scanner.bat" -WorkingDirectory "C:\Users\Lenovo\CC\stock_analyzer"
+$repo     = "C:\path\to\stock_analyzer"     # wherever you cloned it
+$action   = New-ScheduledTaskAction -Execute "$repo\run_scanner.bat" -WorkingDirectory $repo
 $trigger  = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Tuesday,Wednesday,Thursday,Friday,Saturday -At 7:00am
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -WakeToRun -ExecutionTimeLimit (New-TimeSpan -Hours 3)
 Register-ScheduledTask -TaskName "SP500 Breakout Scanner" -Action $action -Trigger $trigger -Settings $settings -Description "Scans S&P 500 for breakouts from consolidation the morning after each US session, once Yahoo's volume has settled; grades and alerts via Discord webhook."
@@ -1688,12 +1758,13 @@ the part that is actionable on the day.
 
 Each scope writes its **own** files, so none can overwrite another:
 `risk_reward_*` for the full index, `signals_plane_*` for the weekly window,
-`subset_plane_*` for a named list. The full 503-ticker pass is deliberately on no
+`subset_plane_*` for a named list. The full 903-ticker pass is deliberately on no
 schedule — it is the base population for peer-relative scoring, so run
 `python universe_scan.py` when you want the whole plane refreshed.
 
 ```powershell
-$action   = New-ScheduledTaskAction -Execute "C:\Users\Lenovo\CC\stock_analyzer\run_universe.bat" -WorkingDirectory "C:\Users\Lenovo\CC\stock_analyzer"
+$repo     = "C:\path\to\stock_analyzer"     # wherever you cloned it
+$action   = New-ScheduledTaskAction -Execute "$repo\run_universe.bat" -WorkingDirectory $repo
 $trigger  = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At 18:00
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -WakeToRun -ExecutionTimeLimit (New-TimeSpan -Hours 1)
 Register-ScheduledTask -TaskName "SP500 Universe Plane" -Action $action -Trigger $trigger -Settings $settings -Description "Grades every S&P 500 constituent on the risk/reward plane and writes the table, scatter and interactive page under output/universe/. No Discord."
@@ -1734,9 +1805,10 @@ Notes:
 
 ## Notes
 
-- Both screens are fully vectorized: one bulk `yf.download` for all ~503
-  tickers, then rolling-window math across the whole universe at once. A full
-  scan takes about a minute.
+- All four screens are fully vectorized: one bulk `yf.download` for all ~903
+  tickers, then rolling-window math across the whole universe at once. Every
+  input and output is a `(days, tickers)` frame — there are no per-ticker loops.
+  A full scan takes about a minute.
 - Discord allows at most 10 embeds / 10 attachments / ~6000 embed characters
   per webhook message; the alert is split into multiple messages
   automatically if more tickers fire.
@@ -1755,3 +1827,56 @@ Notes:
   those show as `n/a` in the alert.
 - Not investment advice; screens produce false positives. Do your own
   research before trading.
+
+## Account boundary
+
+**This codebase has no brokerage account surface, and that is enforced rather
+than promised.** `ibkr.py` talks to IB Gateway/TWS for market and reference
+data only: `reqAccountSummary`, `reqPositions`, `reqPnL` and their relatives are
+not implemented — not behind a flag, not behind a config key.
+`ibkr.FORBIDDEN_CALLS` names them and `tests/test_ibkr.py` asserts none is
+called.
+
+The reason is that it would corrupt the measurement. A security is graded on its
+own merits, and tier 4 grades a signal against a fixed-notional virtual ledger;
+what you happen to hold changes neither. A report that knew your position size
+would start reasoning about your book instead of the company. A capability that
+was never written is a stronger guarantee than an instruction, which is why this
+is an absence in the code rather than a rule in a prompt.
+
+It follows that the virtual portfolio is **virtual**: `portfolio_sim/` reads
+recorded signals, marks them against downloaded prices and writes CSVs. It has
+never placed an order and there is no code path by which it could.
+
+## Data sources, and their terms
+
+Everything here reads public, unauthenticated sources. No API keys exist in this
+project. If you run it, you are the one making these requests — check that your
+use fits each provider's terms:
+
+| Source | Used for | Via | Notes |
+|---|---|---|---|
+| Yahoo Finance | prices, fundamentals, statements | `yfinance` | Unofficial. Yahoo's terms restrict redistribution and commercial use; this project stores data only in your local git-ignored `output/`. Rate limits are undocumented and change |
+| Wikipedia | index constituent lists | `requests` + `lxml` | Needs a descriptive User-Agent. Content is CC BY-SA |
+| SEC EDGAR | filings, 8-K item codes, full-text search | `requests` | Fair-access policy **requires** a real contact in the User-Agent — set `STOCK_ANALYZER_SEC_USER_AGENT`. Limit is ~10 req/s, far above what this needs |
+| Google News RSS | dated events for the thematic screen | `requests` | Headlines and links only; no article text is fetched or stored |
+| Interactive Brokers | optional reference data | `ib_async` | Needs IB Gateway or TWS running locally. Entirely optional — every getter returns `{}` when it is down, and the scan just gets thinner |
+
+Nothing is redistributed: `output/` is git-ignored in its entirety, and no
+market data is committed to this repository.
+
+The "social media" half of the thematic screen was measured and **abandoned** —
+Reddit blocks it, StockTwits returns 403, X is paid-tier, Facebook has no public
+search and Google Trends has no API. It is a news-and-filings screen and says so.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). The short version: tests assert
+**invariants, not snapshots** (thresholds get retuned constantly, so a recorded
+count is stale within a session), every number stays computed in Python, and
+`python tests/run_all.py` must pass.
+
+## License
+
+[MIT](LICENSE). Use it, fork it, sell it — but read the warranty disclaimer,
+and read the "not investment advice" note at the top of this file again.
