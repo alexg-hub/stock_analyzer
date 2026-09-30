@@ -623,6 +623,7 @@ proves the gates and anchors reproduce the two sections they replaced.
 
 ```
 pip install -r requirements.txt
+copy .env.example .env            # then put your Discord webhook in it (optional)
 python run_scanners.py            # tiers 1+2: the alerting universe + Discord alert
 python run_scanners.py --no-send  # the same scan, cards printed instead of posted
 python universe_scan.py           # all 903 constituents on the risk/reward plane (~17 min)
@@ -722,7 +723,8 @@ only coherent as a set, so a `source` updated without its `group` would score
 nothing.
 
 The writers refuse `discord.*` and `research.auto.discord_send` outright (the
-webhook is live, and the latter gates every Discord send), and `data.*` — its
+webhook belongs in `.env`, and the latter gates every Discord send), and
+`data.*` — its
 `download_period` accepts forms the validator cannot check, and a bad one leaves
 every screen unable to fire while reporting zero signals rather than an error.
 
@@ -1493,7 +1495,7 @@ small differences as noise.
 
 | Key | Current | Meaning |
 |---|---|---|
-| `discord.webhook_url` | (set) | Discord webhook URL (Server Settings → Integrations → Webhooks → New Webhook → Copy URL). Until set, the alert prints to the console instead. |
+| `discord.webhook_url` | `""` — set in `.env` | **Not set here.** Copy `.env.example` to `.env` (git-ignored) and put the Discord webhook URL in `STOCK_ANALYZER_DISCORD_WEBHOOK` (Server Settings → Integrations → Webhooks → New Webhook → Copy URL). Precedence is environment variable → `.env` → this file. Until set, the alert prints to the console instead. |
 | `discord.send_message_when_no_breakouts` | `true` | Also send a "nothing found" message |
 | `data.download_period` | `2y` | History to download — must exceed each screen's total lookback (~21 trading days per calendar month) or its rolling windows never fill and no signal can ever fire; the scanners warn if violated |
 | `breakout_strategy.enabled` | `true` | Run the breakout screen |

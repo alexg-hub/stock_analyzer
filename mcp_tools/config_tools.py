@@ -1,9 +1,16 @@
 """Reading and (carefully) writing `config.json`.
 
-`config.json` holds the **live Discord webhook** and is committed on purpose to
-a private repo, so `config_get` redacts it by default. Everything user-facing in
-this project is config-driven, which is what makes these tools worth having --
-and also what makes the writers the most dangerous thing on this server.
+`config.json` carries **no credential**: `discord.webhook_url` ships empty and
+`scanner_common.load_config` resolves it from `.env` (see `SECRET_ENV`). It
+still arrives in the tree this module reads, so `config_get` goes on redacting
+it by default -- the value is a secret wherever it came from. Everything
+user-facing in this project is config-driven, which is what makes these tools
+worth having -- and also what makes the writers the most dangerous thing on
+this server.
+
+The writers are untouched by that resolution, and deliberately: they parse the
+raw file text (`json.loads(before_text)`) rather than `load_config()`, so the
+injected value can never reach the tree they diff and verify against.
 
 Four writers, one shape: every one previews a unified diff, validates, and
 writes **nothing** unless `confirm=True`. Every write backs the old file up to

@@ -28,6 +28,27 @@ import yfinance as yf
 # it ever moves into a package directory.
 PROJECT_ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = PROJECT_ROOT / "config.json"
+DOTENV_PATH = PROJECT_ROOT / ".env"
+
+# Secrets live OUTSIDE the tracked config. `config.json` is committed for what
+# it actually is -- the tuned parameter surface -- and a credential sitting in
+# it gets committed with them. `load_config` resolves each of these from the
+# environment or `.env` instead; see `_resolve_secrets` for the precedence.
+# {dotted config path: environment variable name}
+SECRET_ENV = {
+    "discord.webhook_url": "STOCK_ANALYZER_DISCORD_WEBHOOK",
+    # Not a credential -- a contact address. SEC's fair-access policy requires
+    # one in the User-Agent, so it cannot just be dropped, and it identifies a
+    # person, so it cannot be committed either. Same mechanism, same treatment.
+    "research.sec.user_agent": "STOCK_ANALYZER_SEC_USER_AGENT",
+}
+
+# What goes out when nobody configured a contact. `efts.sec.gov` answers 403 to
+# a request with no User-Agent at all, so a fresh clone needs *something* -- but
+# it is visibly a placeholder, and `sec_user_agent` says so once per process
+# rather than letting an anonymous-looking one leave quietly.
+SEC_UA_FALLBACK = "stock-analyzer/1.0 (research@example.com)"
+_SEC_UA_WARNED = False
 
 
 def output_dir(create: bool = True) -> Path:
@@ -122,9 +143,95 @@ AXIS_COLS = [REWARD_COL, RISK_COL, QUADRANT_COL]
 # Config
 # --------------------------------------------------------------------------
 
+def _dotenv_values(path: Path = DOTENV_PATH) -> dict:
+    """`KEY=value` lines from `.env`, or `{}` when there is no such file.
+
+    Deliberately not `python-dotenv`: this is fifteen lines of parsing against a
+    whole dependency, and the project already hand-rolls rather than pulls in
+    (see `portfolio_sim/stats.py`, which implements Mann-Whitney to avoid scipy).
+
+    It **never raises** and it does **not** touch `os.environ`. A missing file,
+    an unreadable one and a malformed line are all "no value here", which is the
+    same fail-open rule the rest of the project follows: an absent secret must
+    cost you the send, never the scan. Mutating the environment would also break
+    the rule `enable_utf8_output` documents -- a library call has no business
+    changing global state.
+    """
+    out: dict = {}
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return out
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key, value = key.strip(), value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        if key:
+            out[key] = value
+    return out
+
+
+def _resolve_secrets(cfg: dict, path: Path = DOTENV_PATH) -> dict:
+    """Fill every `SECRET_ENV` path from the environment or `.env`.
+
+    Precedence: `os.environ` if the variable is **present** (even empty), then
+    `.env`, then whatever `config.json` already held. Presence rather than
+    truthiness is what lets a caller force the value empty -- `tests/_harness`
+    exports it as `""` so no test in the suite can reach a live webhook, which
+    makes that a property of the harness rather than a habit of each test.
+
+    Mutates and returns `cfg`; it is the fresh tree `load_config` just parsed.
+    """
+    dotenv = _dotenv_values(path)
+    for dotted, var in SECRET_ENV.items():
+        if var in os.environ:
+            value = os.environ[var]
+        elif var in dotenv:
+            value = dotenv[var]
+        else:
+            continue
+        section, _, key = dotted.rpartition(".")
+        target = cfg
+        for part in section.split("."):
+            target = target.setdefault(part, {})
+        target[key] = value
+    return cfg
+
+
 def load_config(path: Path = CONFIG_PATH) -> dict:
     with open(path, encoding="utf-8") as f:
-        return json.load(f)
+        return _resolve_secrets(json.load(f))
+
+
+def sec_user_agent(cfg: dict) -> str:
+    """The contact User-Agent every SEC request must carry.
+
+    One definition because there are two callers -- `sec.py` hits `data.sec.gov`
+    and `newsfeed.py` hits `efts.sec.gov`, and both are refused without it. They
+    each held their own copy of the fallback string, which is the shape this
+    project has been bitten by before: two enumerated lists that had to stay
+    byte-identical, drifting silently (see the headless allow-lists in
+    `AI_ROLE.md`). A contact address is one fact about the operator, so it gets
+    one function.
+
+    Warns **once per process** when falling back, rather than per request: a
+    deep-dive makes dozens of these, and a line repeated dozens of times is a
+    line nobody reads.
+    """
+    global _SEC_UA_WARNED
+    ua = (cfg.get("research", {}).get("sec", {}).get("user_agent") or "").strip()
+    if ua:
+        return ua
+    if not _SEC_UA_WARNED:
+        _SEC_UA_WARNED = True
+        log_step("SEC", "warn",
+                 "no contact configured -- set STOCK_ANALYZER_SEC_USER_AGENT in "
+                 f".env; sending {SEC_UA_FALLBACK!r}", cfg=cfg)
+    return SEC_UA_FALLBACK
 
 
 def enable_utf8_output() -> None:

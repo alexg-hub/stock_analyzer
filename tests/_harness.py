@@ -10,6 +10,7 @@ The tests assert **invariants**, not snapshots of past output. The user retunes
 be stale within a session; every check here has to hold at any thresholds.
 """
 
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -24,9 +25,17 @@ if str(ROOT) not in sys.path:
 # hands them the locale codepage -- which cannot encode the quality badge a
 # check may want to print. Test scripts are entry points, so they get the same
 # treatment the production ones do.
-from scanner_common import configure_logging, enable_utf8_output  # noqa: E402
+from scanner_common import SECRET_ENV, configure_logging, enable_utf8_output  # noqa: E402
 
 enable_utf8_output()
+
+# Every secret forced empty, before any test can load a config. `_resolve_secrets`
+# keys off the variable being *present*, so an empty one beats both `.env` and
+# `config.json` -- which makes "no test can reach the live webhook" a property of
+# the harness rather than a habit each test file has to remember. The suite
+# already blanks it in the two places that could post; this closes the rest.
+for _var in SECRET_ENV.values():
+    os.environ[_var] = ""
 
 # Redirect the step log here, at the first import any test performs, and before
 # any of them touches production code. It has to be this early: loading the

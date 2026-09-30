@@ -1613,8 +1613,36 @@ real send.
 - The user frequently hand-tunes strategy values in `config.json` between
   sessions — read the file for current values; don't trust README's table or
   prior conversation, and don't revert their changes.
-- `config.json` holds the **live Discord webhook URL** and is committed on
-  purpose (private repo). Never paste it into issues/PRs or public output.
+- **Secrets resolve from `.env`, never from `config.json`.**
+  `scanner_common.SECRET_ENV` maps a dotted config path to an environment
+  variable — `discord.webhook_url` → `STOCK_ANALYZER_DISCORD_WEBHOOK` and
+  `research.sec.user_agent` → `STOCK_ANALYZER_SEC_USER_AGENT` — and
+  `load_config` fills each on every call:
+  **`os.environ` if the variable is *present* — even empty — then `.env`, then
+  whatever `config.json` held**, which now ships as `""`. Presence rather than
+  truthiness is load-bearing: `tests/_harness` exports every secret as `""`, so
+  "no test can reach the live channel" is a property of the harness rather than
+  something each test file remembers. `_dotenv_values` never raises and never
+  touches `os.environ` — a missing `.env` costs you the send, not the scan, and
+  a library call has no business mutating global state (the same rule
+  `enable_utf8_output` follows). The config *writers* are unaffected because
+  `config_tools` re-parses the raw file text, not `load_config`, so the
+  surgical-edit verification never sees the injected value.
+  `config.json` stays committed on purpose — it is the tuned parameter surface,
+  and every figure on a card traces back to it — but it now carries no
+  credential. The webhook that was live until 2026-09-29 is still in 67 of the
+  repo's 68 commits; it was rotated in Discord rather than rewritten out of
+  history, which is what makes the committed string inert.
+  **The SEC contact is in that table for a different reason and behaves
+  differently.** It is not a credential — it is the address SEC's fair-access
+  policy requires in the User-Agent, and `data.sec.gov` and `efts.sec.gov` both
+  refuse a request without one. So it cannot be dropped the way a webhook can,
+  and unset falls back to `SEC_UA_FALLBACK`, a visible placeholder, with a
+  **once-per-process** `SEC warn` rather than one line per request (a deep-dive
+  makes dozens). `scanner_common.sec_user_agent` is the one reader: `sec.py`
+  and `newsfeed.py` each used to carry their own copy of that fallback string,
+  and two enumerated things that must stay byte-identical is precisely the
+  failure the headless allow-lists already cost this project once.
 - Nightly run: Task Scheduler task **"SP500 Breakout Scanner"**, Tue–Sat 07:00
   Israel time → `run_scanner.bat` → `run_scanners.py`, all four tiers in one
   process → `output/scanner_log.txt`. One task, one command, nothing chained

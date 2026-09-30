@@ -43,7 +43,7 @@ from xml.etree import ElementTree
 
 import requests
 
-from scanner_common import log_step, output_dir
+from scanner_common import log_step, output_dir, sec_user_agent
 
 CONFIG_KEY = "theme_screen"
 
@@ -170,9 +170,8 @@ def _headers(cfg: dict) -> dict:
     without one, which is exactly how this endpoint fails when it is called from
     a generic fetcher.
     """
-    ua = (cfg.get("research", {}).get("sec", {}).get("user_agent")
-          or "stock-analyzer (research@example.com)")
-    return {"User-Agent": ua, "Accept-Encoding": "gzip, deflate"}
+    return {"User-Agent": sec_user_agent(cfg),
+            "Accept-Encoding": "gzip, deflate"}
 
 
 def _text(node, tag: str) -> str:

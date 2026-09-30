@@ -1280,7 +1280,7 @@
             "chart_dpi": 120
         },
         "sec": {
-            "user_agent": "stock-analyzer/1.0 (you@example.com)",
+            "user_agent": "",
             "forms": ["10-Q", "10-K"],
             "max_section_chars": 24000,
             "xbrl_concepts": [

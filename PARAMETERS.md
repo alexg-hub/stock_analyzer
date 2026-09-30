@@ -398,7 +398,7 @@ live, and this file is committed.
 | `research.financials.years` | `4` | research_report.py, sec.py |  |
 | `research.financials.quarters` | `4` | research_report.py, sec.py |  |
 | `research.financials.chart_dpi` | `120` | research_report.py, sec.py |  |
-| `research.sec.user_agent` | `"stock-analyzer/1.0 (you@example.com)"` | research_report.py, sec.py |  |
+| `research.sec.user_agent` | `""` — set in `.env` | research_report.py, sec.py, newsfeed.py | Resolved from `STOCK_ANALYZER_SEC_USER_AGENT`; SEC requires a contact in the UA. `scanner_common.sec_user_agent` is the one reader |
 | `research.sec.forms` | `["10-Q", "10-K"]` | research_report.py, sec.py |  |
 | `research.sec.max_section_chars` | `24000` | research_report.py, sec.py |  |
 | `research.sec.xbrl_concepts` | `["RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues"…` | research_report.py, sec.py |  |

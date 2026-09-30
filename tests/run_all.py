@@ -33,6 +33,7 @@ TESTS = [
     ("test_industry_valuation.py",
      "offline -- industry multiples: price = multiple x earnings"),
     ("test_no_model.py", "offline -- the analyzer cannot invoke a model"),
+    ("test_secrets.py", "offline -- the webhook comes from .env, never config.json"),
     ("test_combined_report.py", "offline -- the dossier renders, never computes"),
     ("test_signal_contract.py", "cached panel -- signal tiers, alert, hand-off"),
     ("test_combined_alert.py", "cached panel -- all four tiers in one message"),

@@ -21,7 +21,7 @@ from datetime import date
 import requests
 from lxml import html as lxml_html
 
-from scanner_common import fmt_bytes, load_config, log_step
+from scanner_common import fmt_bytes, load_config, log_step, sec_user_agent
 
 _TICKER_MAP = None  # {TICKER -> zero-padded CIK}, cached per process
 _SUBMISSIONS = {}   # cik -> the `filings.recent` dict, cached per process
@@ -33,9 +33,8 @@ _DOC_TEXT = {}      # (cik, accession) -> cleaned document text
 
 
 def _headers(cfg: dict) -> dict:
-    ua = (cfg.get("research", {}).get("sec", {}).get("user_agent")
-          or "stock-analyzer (research@example.com)")
-    return {"User-Agent": ua, "Accept-Encoding": "gzip, deflate"}
+    return {"User-Agent": sec_user_agent(cfg),
+            "Accept-Encoding": "gzip, deflate"}
 
 
 def _get(url: str, cfg: dict) -> requests.Response:

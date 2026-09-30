@@ -6,3 +6,9 @@ __pycache__/
 # tables/charts and the cached price panel (see scanner_common.output_dir).
 output/
 
+# Secrets -- the Discord webhook and anything else in SECRET_ENV. Copy
+# .env.example to .env and fill it in; scanner_common.load_config reads it.
+.env
+
+# Local Claude Code settings: machine-specific paths, per-clone by design.
+.claude/settings.local.json
