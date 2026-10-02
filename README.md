@@ -709,6 +709,24 @@ connected. To check it without a client:
 python mcp_server.py --selftest    # list the tools, call the read-only ones
 ```
 
+> **Restart the server after editing a module.** The client starts it once and
+> keeps the process alive, so `sys.modules` holds whatever the code looked like
+> at launch. Edit a module and the running server keeps the old one — and
+> because several modules are imported *lazily* (`sec` arrives with
+> `research_report`, which only loads when a tier-3 tool runs), the mismatch
+> surfaces as an `ImportError` on a tool call minutes or hours later rather than
+> at startup:
+>
+> ```
+> cannot import name 'sec_user_agent' from 'scanner_common'
+> ```
+>
+> That is not a broken checkout — it is a stale process, and the fix is to
+> restart the MCP server (in Claude Desktop, toggle the connector off and on or
+> restart the app; in Claude Code, `/mcp` reconnects). `--selftest` runs in a
+> fresh process, so it will pass while the live server is still failing, which
+> is the confusing part.
+
 **Reports, logs, CSVs and charts are read with `Read`/`Glob`, not through
 tools.** Everything generated lands under `output/` and is plain text or PNG, so
 a wrapper would only get in the way. The tools are the things a file read cannot

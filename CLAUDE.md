@@ -1358,8 +1358,21 @@ real send.
     every claim.
 - **`mcp_server.py` is the Claude Code surface**, flat in the repo root for the
   same reason everything else is — `PROJECT_ROOT` depends on it. `mcp_tools/` is
-  a package (like `portfolio_sim/`) and copies its `sys.path` header. Two
-  invariants hold it together, and both fail *silently* when broken:
+  a package (like `portfolio_sim/`) and copies its `sys.path` header.
+  **The server is long-lived, so editing a module does not reach it.** The client
+  launches it once and `sys.modules` pins every module as it was at launch; a
+  later edit is invisible to that process. Worse, the symptom is displaced in
+  time, because the import graph is partly lazy — `sec` arrives via
+  `research_report` (imported at its module load) and again lazily inside
+  `quality.py`, so a `scanner_common` cached before `sec_user_agent` existed
+  raises `ImportError: cannot import name 'sec_user_agent'` on the first tier-3
+  tool call, not at startup. Seen 2026-10-02 after the `.env` change landed.
+  Two things make it hard to read: `--selftest` forks a **fresh** process and so
+  passes while the live server keeps failing, and the message names the symbol
+  rather than the staleness. Restart the server; bytecode is not involved
+  (a `.pyc` is invalidated by source mtime and size, and `.mcp.json` sets
+  `PYTHONDONTWRITEBYTECODE` anyway). Two further invariants hold it together,
+  and both fail *silently* when broken:
   - **Nothing may write to stdout in the server process.** The transport speaks
     JSON-RPC over fd 1, and the production code these tools call prints freely
     (`run_scanners.main` prints hit tables, `download_price_data` prints
