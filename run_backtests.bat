@@ -17,21 +17,13 @@ set LOG=output\backtest_log.txt
 
 echo ==== Backtests started %date% %time% ==== > %LOG%
 
-echo. >> %LOG%
-echo ##### breakout -- JNJ 2025-01-01..2025-10-31 ##### >> %LOG%
-%PY% backtest_breakout.py --ticker JNJ --start 2025-01-01 --end 2025-10-31 >> %LOG% 2>&1
-
-echo. >> %LOG%
-echo ##### pullback -- MSFT 2024-01-01..2025-06-30 ##### >> %LOG%
-%PY% backtest_pullback.py --ticker MSFT --start 2024-01-01 --end 2025-06-30 >> %LOG% 2>&1
-
-echo. >> %LOG%
-echo ##### reclaim -- META 2023-01-01..2023-12-31 ##### >> %LOG%
-%PY% backtest_reclaim.py --ticker META --start 2023-01-01 --end 2023-12-31 >> %LOG% 2>&1
-
-echo. >> %LOG%
-echo ##### trend -- COST 2023-06-01..2024-06-30 ##### >> %LOG%
-%PY% backtest_trend.py --ticker COST --start 2023-06-01 --end 2024-06-30 >> %LOG% 2>&1
+rem Each script's own defaults are its documented validation case (JNJ breakout,
+rem MSFT pullback, META reclaim, COST trend), so nothing is repeated here.
+for %%S in (breakout pullback reclaim trend) do (
+    echo.>> %LOG%
+    echo ##### %%S ##### >> %LOG%
+    %PY% backtest_%%S.py >> %LOG% 2>&1
+)
 
 echo. >> %LOG%
 echo ==== Backtests finished %date% %time% ==== >> %LOG%

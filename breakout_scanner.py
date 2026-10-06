@@ -31,7 +31,8 @@ All parameters live in the `strategy` section of config.json.
 import pandas as pd
 
 import charts
-from scanner_common import ScanResult, fmt_value, log_step, single_ticker_panel
+from scanner_common import (ScanResult, fmt_value, log_step, screen_hits,
+                            single_ticker_panel)
 
 # Config section this screen reads (run_scanners.py registry contract).
 CONFIG_KEY = "breakout_strategy"
@@ -143,6 +144,9 @@ def fires_mask(data: pd.DataFrame, signals: dict, strategy: dict) -> pd.DataFram
     return signals["signal"].fillna(False) | partial_mask(data, signals, strategy)
 
 
+compute = compute_signals
+
+
 def missing_reason(close, prior_high, range_pct, vol_ratio, body_pct,
                    strategy: dict) -> str:
     """Name the condition a partial (3-of-4) setup failed.
@@ -195,28 +199,13 @@ def find_breakouts(data: pd.DataFrame, strategy: dict) -> pd.DataFrame:
             index=pd.Index(tickers, name="Ticker"),
         )
 
-    # One list: full setups plus partials (both masks are computed for every
-    # day; the scan only needs the last one).
-    full_today = last["signal"].fillna(False)
-    fires = fires_mask(data, signals, strategy).iloc[-1]
-    hits = day_stats(fires[fires].index.tolist())
-    hits["Setup"] = ["full" if full_today.get(t, False) else "partial"
-                     for t in hits.index]
-    hits["Missing"] = [
-        "" if row["Setup"] == "full" else
-        missing_reason(row["Close"], row["Range High"], row["Range %"] / 100,
-                       row["Vol Ratio"], row["Body %"] / 100, strategy)
-        for _, row in hits.iterrows()
-    ]
-    # "full" < "partial", so ascending puts complete setups first; stable keeps
-    # ticker order within each tier.
-    hits = hits.sort_values("Setup", kind="stable")
+    def reason(_ticker, row) -> str:
+        return missing_reason(row["Close"], row["Range High"],
+                              row["Range %"] / 100, row["Vol Ratio"],
+                              row["Body %"] / 100, strategy)
 
-    n_full = int((hits["Setup"] == "full").sum())
-    scan_date = data.index[-1].date()
-    log_step("SCREEN", "ok", f"{CONFIG_KEY} {scan_date}: {len(hits)} signal(s) "
-             f"({n_full} full, {len(hits) - n_full} partial)")
-    return hits
+    return screen_hits(CONFIG_KEY, data, signals,
+                       fires_mask(data, signals, strategy), day_stats, reason)
 
 
 # --------------------------------------------------------------------------

@@ -60,10 +60,10 @@ def section(title: str) -> None:
 
 def find_screen(key: str):
     """The (module, compute) pair for a config key, or a clear error."""
-    for module, compute in SCREENS:
+    for module in SCREENS:
         if module.CONFIG_KEY == key:
-            return module, compute
-    known = sorted(m.CONFIG_KEY for m, _ in SCREENS)
+            return module, module.compute
+    known = sorted(m.CONFIG_KEY for m in SCREENS)
     raise SystemExit(f"unknown screen {key!r} -- known: {known}")
 
 

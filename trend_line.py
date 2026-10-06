@@ -81,7 +81,8 @@ import numpy as np
 import pandas as pd
 
 import charts
-from scanner_common import ScanResult, fmt_value, log_step, single_ticker_panel
+from scanner_common import (ScanResult, fmt_value, log_step, screen_hits,
+                            single_ticker_panel)
 
 # Config section this screen reads (run_scanners.py registry contract).
 CONFIG_KEY = "trend_strategy"
@@ -325,6 +326,9 @@ def fires_mask(data: pd.DataFrame, signals: dict, strategy: dict) -> pd.DataFram
     return signals["signal"].fillna(False)
 
 
+compute = compute_trend_signals
+
+
 def missing_reasons(row: pd.Series, strategy: dict) -> list[str]:
     """Every confirmation test a loose (`partial_mask`) day failed, in order.
 
@@ -392,19 +396,9 @@ def find_trends(data: pd.DataFrame, strategy: dict) -> pd.DataFrame:
             index=pd.Index(tickers, name="Ticker"),
         )
 
-    fires = fires_mask(data, signals, strategy).iloc[-1]
-    hits = day_stats(fires[fires].index.tolist())
-    # This screen never alerts on a partial setup, so the tier columns every
-    # screen carries are constant here -- present so the alert, the hand-off
-    # and the backtest can treat all screens identically.
-    hits["Setup"] = "full"
-    hits["Missing"] = ""
-
-    scan_date = data.index[-1].date()
-    # No full/partial split: this screen stays strict, so every row is `full`.
-    log_step("SCREEN", "ok",
-             f"{CONFIG_KEY} {scan_date}: {len(hits)} signal(s) (all full)")
-    return hits
+    # Strict: fires == signal, so every row is `full` and no reason is needed.
+    return screen_hits(CONFIG_KEY, data, signals,
+                       fires_mask(data, signals, strategy), day_stats)
 
 
 # --------------------------------------------------------------------------

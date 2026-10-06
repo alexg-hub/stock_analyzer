@@ -17,18 +17,15 @@ Usage:
     python backtest_breakout.py --ticker MSFT --start 2024-01-01 --end 2024-12-31
 """
 
-import argparse
 import sys
 
 import pandas as pd
 
 import charts
-from breakout_scanner import build_calc_table, compute_signals, missing_reason
-from scanner_common import download_history, load_config, output_dir
-
-
-def section(title: str) -> None:
-    print(f"\n{'=' * 72}\n{title}\n{'=' * 72}")
+import breakout_scanner
+import single_backtest
+from breakout_scanner import missing_reason
+from single_backtest import section
 
 
 # --------------------------------------------------------------------------
@@ -107,29 +104,11 @@ def log_run(table: pd.DataFrame, strategy: dict, ticker: str) -> None:
 # --------------------------------------------------------------------------
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Backtest the breakout screen on one ticker.")
-    parser.add_argument("--ticker", default="JNJ")
-    parser.add_argument("--start", default="2025-01-01", help="analysis window start")
-    parser.add_argument("--end", default="2025-10-31", help="analysis window end")
-    args = parser.parse_args()
-
-    ticker = args.ticker.upper()
-    start, end = pd.Timestamp(args.start), pd.Timestamp(args.end)
-    strategy = load_config()["breakout_strategy"]
-
-    data = download_history(ticker, start, end, strategy["consolidation_window_days"])
-    signals = compute_signals(data, strategy)
-    table = build_calc_table(data, signals, ticker).loc[start:end]
-
-    log_run(table, strategy, ticker)
-
-    out_dir = output_dir()
-    csv_path = out_dir / f"backtest_{ticker}.csv"
-    table.round(4).to_csv(csv_path)
-    print(f"\nFull per-day calculation table saved to {csv_path}")
-
-    charts.plot_breakout(table, strategy, ticker, out_dir / f"backtest_{ticker}.png")
-    return 0
+    return single_backtest.run(
+        breakout_scanner, log_run, charts.plot_breakout,
+        ticker="JNJ", start="2025-01-01", end="2025-10-31",
+        description="Backtest the breakout screen on one ticker.",
+        prefix="backtest")
 
 
 if __name__ == "__main__":

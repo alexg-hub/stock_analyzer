@@ -49,7 +49,8 @@ All parameters live in the `reclaim_strategy` section of config.json.
 import pandas as pd
 
 import charts
-from scanner_common import ScanResult, fmt_value, log_step, single_ticker_panel
+from scanner_common import (ScanResult, fmt_value, log_step, screen_hits,
+                            single_ticker_panel)
 
 # Config section this screen reads (run_scanners.py registry contract).
 CONFIG_KEY = "reclaim_strategy"
@@ -183,6 +184,9 @@ def fires_mask(data: pd.DataFrame, signals: dict, strategy: dict) -> pd.DataFram
     return signals["signal"].fillna(False) | partial_mask(data, signals, strategy)
 
 
+compute = compute_reclaim_signals
+
+
 def missing_reasons(row: pd.Series, strategy: dict) -> list[str]:
     """Every confirmation test a fresh-cross day failed, in condition order.
 
@@ -256,39 +260,20 @@ def find_reclaims(data: pd.DataFrame, strategy: dict) -> pd.DataFrame:
             index=pd.Index(tickers, name="Ticker"),
         )
 
-    # One list: fresh crosses out of a downtrend, whether every confirmation
-    # held (full) or one or two failed (partial). Both masks are computed for
-    # every day; the scan only needs the last one.
-    full_today = last["signal"].fillna(False)
-    fires = fires_mask(data, signals, strategy).iloc[-1]
-    hits = day_stats(fires[fires].index.tolist())
-    if not hits.empty:
-        hits["Setup"] = ["full" if full_today.get(t, False) else "partial"
-                         for t in hits.index]
-        hits["Missing"] = [
-            "" if hits.at[ticker, "Setup"] == "full" else missing_reason(
-                pd.Series({
-                    "R2_TimeBelow": last["is_downtrend"].get(ticker, False),
-                    "R3_VolumeSurge": last["is_volume_surge"].get(ticker, False),
-                    "R5_StrongDay": last["is_strong_day"].get(ticker, False),
-                    "BelowPct": hits.at[ticker, "Below %"],
-                    "VolRatio": hits.at[ticker, "Vol Ratio"],
-                    "SmaSlopePct": hits.at[ticker, "SMA Slope %"],
-                    "BodyPct": hits.at[ticker, "Body %"],
-                    "GainPct": hits.at[ticker, "Day %"],
-                }),
-                strategy,
-            )
-            for ticker in hits.index
-        ]
-        # "full" < "partial", so ascending puts complete setups first.
-        hits = hits.sort_values("Setup", kind="stable")
+    def reason(ticker, row) -> str:
+        return missing_reason(pd.Series({
+            "R2_TimeBelow": last["is_downtrend"].get(ticker, False),
+            "R3_VolumeSurge": last["is_volume_surge"].get(ticker, False),
+            "R5_StrongDay": last["is_strong_day"].get(ticker, False),
+            "BelowPct": row["Below %"],
+            "VolRatio": row["Vol Ratio"],
+            "SmaSlopePct": row["SMA Slope %"],
+            "BodyPct": row["Body %"],
+            "GainPct": row["Day %"],
+        }), strategy)
 
-    n_full = int((hits["Setup"] == "full").sum()) if not hits.empty else 0
-    scan_date = data.index[-1].date()
-    log_step("SCREEN", "ok", f"{CONFIG_KEY} {scan_date}: {len(hits)} signal(s) "
-             f"({n_full} full, {len(hits) - n_full} partial)")
-    return hits
+    return screen_hits(CONFIG_KEY, data, signals,
+                       fires_mask(data, signals, strategy), day_stats, reason)
 
 
 # --------------------------------------------------------------------------

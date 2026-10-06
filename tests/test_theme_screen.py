@@ -332,7 +332,7 @@ c.ok("not in run_scanners.SCANNERS",
      "news-driven pick")
 c.ok("not in backtest_universe.SCREENS",
      theme_signals.CONFIG_KEY not in
-     [getattr(m, "CONFIG_KEY", None) for m, _ in backtest_universe.SCREENS],
+     [getattr(m, "CONFIG_KEY", None) for m in backtest_universe.SCREENS],
      "that list is what _harness.screens() reads, and test_signal_contract "
      "then demands a full-history mask a list dated today cannot supply")
 c.ok("not in backtest.screens",

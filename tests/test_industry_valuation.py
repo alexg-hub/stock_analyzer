@@ -336,7 +336,7 @@ c.ok("not in run_scanners.SCANNERS",
      "bucket-level reading")
 c.ok("not in backtest_universe.SCREENS",
      iv.CONFIG_KEY not in [getattr(m, "CONFIG_KEY", None)
-                           for m, _ in backtest_universe.SCREENS],
+                           for m in backtest_universe.SCREENS],
      "that list is what _harness.screens() reads, and test_signal_contract "
      "then demands a full-history mask")
 c.ok("not in backtest.screens",

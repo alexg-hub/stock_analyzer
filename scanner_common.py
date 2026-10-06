@@ -973,6 +973,33 @@ def single_ticker_panel(data: pd.DataFrame, ticker: str) -> pd.DataFrame:
 # gated, scored and displayed -- live in `quality.py`. What stays here is the
 # n/a-tolerant plumbing every layer shares.
 
+def screen_hits(key: str, data: pd.DataFrame, signals: dict,
+                fires: pd.DataFrame, day_stats, reason=None) -> pd.DataFrame:
+    """Today's alert list for one screen, full setups first.
+
+    The skeleton every `find_*` shares: take the last row of the screen's
+    `fires_mask`, build its per-screen columns with `day_stats(tickers)`, tag
+    each hit `full` or `partial`, and name the failing leg of a partial with
+    `reason(ticker, row)`. A strict screen (fires == signal) never calls it.
+    """
+    today = fires.iloc[-1]
+    full_today = signals["signal"].iloc[-1].fillna(False)
+    hits = day_stats(today[today].index.tolist())
+    hits["Setup"] = ["full" if full_today.get(t, False) else "partial"
+                     for t in hits.index]
+    hits["Missing"] = ["" if setup == "full" else reason(t, hits.loc[t])
+                       for t, setup in zip(hits.index, hits["Setup"])]
+    # "full" < "partial", so a stable ascending sort puts complete setups
+    # first and keeps ticker order within each tier.
+    hits = hits.sort_values("Setup", kind="stable")
+    n_full = int((hits["Setup"] == "full").sum())
+    split = ("all full" if n_full == len(hits)
+             else f"{n_full} full, {len(hits) - n_full} partial")
+    log_step("SCREEN", "ok", f"{key} {data.index[-1].date()}: "
+             f"{len(hits)} signal(s) ({split})")
+    return hits
+
+
 def stmt_value(df: pd.DataFrame, row_name: str, column) -> float | None:
     """One cell of a financial statement, or None when it isn't there.
 

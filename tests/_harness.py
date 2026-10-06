@@ -158,7 +158,7 @@ def cached_panel_or_skip():
 def screens(cfg):
     """(module, compute, strategy) for every screen with a config section."""
     from backtest_universe import SCREENS
-    return [(m, c, cfg[m.CONFIG_KEY]) for m, c in SCREENS if cfg.get(m.CONFIG_KEY)]
+    return [(m, m.compute, cfg[m.CONFIG_KEY]) for m in SCREENS if cfg.get(m.CONFIG_KEY)]
 
 
 def busiest_day(panel, cfg, min_signals: int = 3):

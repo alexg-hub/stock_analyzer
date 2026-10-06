@@ -16,23 +16,15 @@ Usage:
     python backtest_trend.py --ticker COST --start 2023-06-01 --end 2024-06-30
 """
 
-import argparse
 import sys
 
 import pandas as pd
 
 import charts
-from scanner_common import download_history, load_config, output_dir
-from trend_line import (
-    build_calc_table,
-    compute_trend_signals,
-    missing_reason,
-    required_history,
-)
-
-
-def section(title: str) -> None:
-    print(f"\n{'=' * 72}\n{title}\n{'=' * 72}")
+import trend_line
+import single_backtest
+from single_backtest import section
+from trend_line import missing_reason
 
 
 # --------------------------------------------------------------------------
@@ -118,31 +110,11 @@ def log_run(table: pd.DataFrame, strategy: dict, ticker: str) -> None:
 # --------------------------------------------------------------------------
 
 def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Backtest the near-linear trend screen on one ticker.")
-    parser.add_argument("--ticker", default="COST")
-    parser.add_argument("--start", default="2023-06-01", help="analysis window start")
-    parser.add_argument("--end", default="2024-06-30", help="analysis window end")
-    args = parser.parse_args()
-
-    ticker = args.ticker.upper()
-    start, end = pd.Timestamp(args.start), pd.Timestamp(args.end)
-    strategy = load_config()["trend_strategy"]
-
-    data = download_history(ticker, start, end, required_history(strategy))
-    signals = compute_trend_signals(data, strategy)
-    table = build_calc_table(data, signals, ticker).loc[start:end]
-
-    log_run(table, strategy, ticker)
-
-    out_dir = output_dir()
-    csv_path = out_dir / f"backtest_trend_{ticker}.csv"
-    table.round(4).to_csv(csv_path)
-    print(f"\nFull per-day calculation table saved to {csv_path}")
-
-    charts.plot_trend(table, strategy, ticker,
-                      out_dir / f"backtest_trend_{ticker}.png")
-    return 0
+    return single_backtest.run(
+        trend_line, log_run, charts.plot_trend,
+        ticker="COST", start="2023-06-01", end="2024-06-30",
+        description="Backtest the near-linear trend screen on one ticker.",
+        prefix="backtest_trend")
 
 
 if __name__ == "__main__":

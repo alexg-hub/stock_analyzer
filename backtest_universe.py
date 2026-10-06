@@ -51,16 +51,10 @@ from scanner_common import (
     warmup_months,
 )
 
-# Every screen the backtest can run, paired with its compute function. The
-# modules also supply required_history(), fires_mask() and partial_mask() --
-# the same functions the nightly scan uses, so there is one source of truth
-# per screen.
-SCREENS = [
-    (breakout_scanner, breakout_scanner.compute_signals),
-    (sma_pullback, sma_pullback.compute_pullback_signals),
-    (sma_reclaim, sma_reclaim.compute_reclaim_signals),
-    (trend_line, trend_line.compute_trend_signals),
-]
+# Every screen the backtest can run. Each module supplies compute(),
+# required_history(), fires_mask() and partial_mask() -- the same functions the
+# nightly scan uses, so there is one source of truth per screen.
+SCREENS = [breakout_scanner, sma_pullback, sma_reclaim, trend_line]
 
 BASELINE_LABEL = "ALL stock-days (random entry)"
 
@@ -461,12 +455,12 @@ def main() -> int:
     # when it is underperforming -- which is when you most need to measure it.
     # `backtest.screens` is this tool's own selector. (tune_screen.py ignores
     # `enabled` for the same reason.)
-    known = {module.CONFIG_KEY for module, _ in SCREENS}
+    known = {module.CONFIG_KEY for module in SCREENS}
     for key in wanted:
         if key not in known:
             raise SystemExit(f"unknown screen {key!r} -- known: {sorted(known)}")
     active = []
-    for module, compute in SCREENS:
+    for module in SCREENS:
         strategy = cfg.get(module.CONFIG_KEY)
         if not strategy:
             print(f"No '{module.CONFIG_KEY}' section in config.json -- skipping.")
@@ -476,7 +470,7 @@ def main() -> int:
             if not strategy.get("enabled", True):
                 print(f"note: '{module.CONFIG_KEY}' is disabled for the nightly "
                       f"alert -- backtesting it anyway.")
-            active.append((module, compute, strategy))
+            active.append((module, module.compute, strategy))
     if not active:
         raise SystemExit("No screens to run.")
 

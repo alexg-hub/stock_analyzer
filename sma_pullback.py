@@ -32,7 +32,8 @@ All parameters live in the `pullback_strategy` section of config.json.
 import pandas as pd
 
 import charts
-from scanner_common import ScanResult, fmt_value, log_step, single_ticker_panel
+from scanner_common import (ScanResult, fmt_value, log_step, screen_hits,
+                            single_ticker_panel)
 
 # Config section this screen reads (run_scanners.py registry contract).
 CONFIG_KEY = "pullback_strategy"
@@ -141,6 +142,9 @@ def fires_mask(data: pd.DataFrame, signals: dict, strategy: dict) -> pd.DataFram
     return signals["signal"].fillna(False)
 
 
+compute = compute_pullback_signals
+
+
 def touch_miss_reason(row: pd.Series, strategy: dict) -> str:
     """Explain why a touch day (T3 true) did not fire the signal.
 
@@ -181,31 +185,23 @@ def find_pullbacks(data: pd.DataFrame, strategy: dict) -> pd.DataFrame:
     signals = compute_pullback_signals(data, strategy)
     last = {name: df.iloc[-1] for name, df in signals.items()}
 
-    fires = fires_mask(data, signals, strategy).iloc[-1]
-    tickers = fires[fires].index.tolist()
-    hits = pd.DataFrame(
-        {
-            "Close": data["Close"].iloc[-1][tickers].round(2),
-            "SMA": last["sma"][tickers].round(2),
-            "Dist %": (last["dist_pct"][tickers] * 100).round(2),
-            "Above %": (last["pct_days_above"][tickers] * 100).round(1),
-            "SMA Slope %": (last["sma_slope_pct"][tickers] * 100).round(2),
-            "Body %": (last["body_pct"][tickers] * 100).round(2),
-            "Range %": (last["range_pct"][tickers] * 100).round(2),
-        },
-        index=pd.Index(tickers, name="Ticker"),
-    )
-    # This screen never alerts on a partial setup, so the tier columns every
-    # screen carries are constant here -- present so the alert, the hand-off
-    # and the backtest can treat all screens identically.
-    hits["Setup"] = "full"
-    hits["Missing"] = ""
+    def day_stats(tickers: list[str]) -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "Close": data["Close"].iloc[-1][tickers].round(2),
+                "SMA": last["sma"][tickers].round(2),
+                "Dist %": (last["dist_pct"][tickers] * 100).round(2),
+                "Above %": (last["pct_days_above"][tickers] * 100).round(1),
+                "SMA Slope %": (last["sma_slope_pct"][tickers] * 100).round(2),
+                "Body %": (last["body_pct"][tickers] * 100).round(2),
+                "Range %": (last["range_pct"][tickers] * 100).round(2),
+            },
+            index=pd.Index(tickers, name="Ticker"),
+        )
 
-    scan_date = data.index[-1].date()
-    # No full/partial split: this screen stays strict, so every row is `full`.
-    log_step("SCREEN", "ok",
-             f"{CONFIG_KEY} {scan_date}: {len(hits)} signal(s) (all full)")
-    return hits
+    # Strict: fires == signal, so every row is `full` and no reason is needed.
+    return screen_hits(CONFIG_KEY, data, signals,
+                       fires_mask(data, signals, strategy), day_stats)
 
 
 # --------------------------------------------------------------------------
