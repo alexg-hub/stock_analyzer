@@ -50,7 +50,7 @@ go in it. `tests/test_secrets.py` will catch it.
 
 **No new dependency without a good reason.** This project hand-rolls where the
 alternative is a package for fifteen lines: `portfolio_sim/stats.py` implements
-Mann-Whitney, Welch, Spearman, bootstrap CI and BH-FDR rather than take scipy.
+Mann-Whitney, Spearman, bootstrap CI and BH-FDR rather than take scipy.
 
 **Config is the surface.** All user-facing text, thresholds and labels are built
 from `config.json` at runtime. Never hardcode a threshold or a literal like
@@ -58,20 +58,21 @@ from `config.json` at runtime. Never hardcode a threshold or a literal like
 
 ## Where things live
 
-`CLAUDE.md` is the architecture document and is unusually detailed — it records
-*why* each decision was made and what measurement settled it. If you are
-changing behaviour, read the relevant section first; it probably explains why
-the obvious simplification was already tried and reverted. `PARAMETERS.md` maps
-every tunable, `RESEARCH_DATA.md` what each data source can supply, and
-`DETERMINISTIC_GAPS.md` what is not computed yet and what it would cost.
+`CLAUDE.md` lists the rules that keep the code correct, one line each, with a
+pointer to the docstring or test that explains it. If you are changing
+behaviour, read the relevant rule and that docstring first: the obvious
+simplification has often been tried and reverted. `RESEARCH_DATA.md` maps what
+each data source can supply, `DETERMINISTIC_GAPS.md` what is not computed yet,
+and `params_list` (MCP) or `config.json` every tunable value.
 
 Generated artifacts go to `output/` via `scanner_common.output_dir()` — there
-are no exceptions, and never `Path(__file__).parent`.
+are no exceptions, and never `Path(__file__).parent`. Before adding a helper,
+check whether one already exists (`CLAUDE.md` lists the shared ones): this
+codebase's worst bugs came from two copies of the same logic drifting apart.
 
 ## Pull requests
 
 Describe what you measured, not just what you changed. A threshold change
 without a number behind it is hard to accept, because the whole design is built
 on preferring a measurement to an intuition. If you found that something here is
-wrong, that is a valuable PR — several sections of `CLAUDE.md` exist because a
-confident claim turned out not to survive measurement.
+wrong, that is a valuable PR.

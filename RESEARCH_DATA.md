@@ -1,4 +1,4 @@
-# Research data-availability matrix — Yahoo + IBKR
+# Research data-availability matrix — Yahoo, SEC, IBKR
 
 Go/no-go inventory for the investment-case layer, produced by probing both
 sources on a deliberate spread: **AAPL, MSFT** (mega-cap tech), **JNJ**
@@ -32,40 +32,7 @@ Collected by `research_collect.collect_yahoo(ticker)` → nested dict. yfinance
 moat/competitor/product/geography graph (→ IBKR). `LTG` 5-yr growth is
 structurally sparse.
 
-## Tier B1 — IBKR over the TWS API (`ibkr.py`, usable in the nightly job)
-
-Added 2026-08-01. `ib_async` against IB Gateway/TWS on localhost, wired into the
-`quality` registry as the `ibkr.*` resolver. **Optional by construction** —
-retail IBKR has no headless API (OAuth 1.0a is institutional-only), so the
-gateway has to be logged in on this box; when it is not, every value resolves
-to `n/a` and the run completes normally with one `IBKR skip` line.
-
-| Layer | Call | Status | Notes |
-|---|---|:--:|---|
-| Contract resolution | `reqContractDetails` | ✅ | `SMART`/`USD` + `primaryExchange`, exact-symbol match. AAPL→265598, MSFT→272093 — same conids the MCP connector returned |
-| 52/26/13-week range, avg volume | `reqMktData` tick **165** | ✅ | Verified live 2026-08-02 on **delayed** data (`market_data_type: 3`) |
-| Historical volatility | tick **104** | ✅ | annualized |
-| Implied volatility | tick **106** | ✅ | AAPL 0.172 |
-| Refinitiv ratios | `reqFundamentalData(ReportSnapshot)` | ❌ | **Error 10358 "Fundamentals data is not allowed"** — needs the *Reuters Worldwide Fundamentals* market-data add-on, which this account does not hold. `ibkr.reports: []` switches the request off |
-| Refinitiv ratios (market-data route) | tick **258** | ❌ | Same data over the market-data channel, same denial — **and worse**: with 258 in the request the snapshot returns *nothing at all*, losing the range and volume that would otherwise arrive. Excluded by default; `ibkr.fundamental_ticks: true` opts in |
-| Statements / estimates | `ReportsFinStatements`, `RESC` | ❌ | Same subscription gate. Yahoo remains the source of truth for both regardless |
-| IV **percentile** | — | ❌ | The MCP connector returned one; the TWS API does not. It was a Reflexivity computation, not an IBKR field. Deliberately absent rather than approximated — a percentile needs a stored history |
-| Moat / competitors / themes | — | ❌ | `get_company_connections`, `get_company_themes`, `search_investment_topics` are Reflexivity products with **no public-API equivalent**. Still MCP-only (Tier B2) |
-| Account context | — | 🚫 | **Not implemented, at all.** See `ibkr.FORBIDDEN_CALLS`; a test asserts none is called |
-
-**Net position today:** IBKR contributes *market statistics only* — 52-week
-range, average volume, historical and implied volatility. That is one enabled
-parameter (`ibkr_implied_volatility`). The two ratio-based parameters
-(`ibkr_return_on_equity`, `ibkr_revenue_growth_rate`) stay configured but
-**disabled**, documenting what would become available if the fundamentals
-add-on is ever purchased — flip `enabled` and set `ibkr.reports` back to
-`["ReportSnapshot"]`.
-
-Sentinel to know about: Refinitiv reports "not reported" as **-99999**. Left
-alone it reads as a real, catastrophically bad number in any score that touches
-it; `_number` drops it.
-
-## Tier B2 — IBKR qualitative graph (the `enrich` skill only — never in the analyzer)
+## Tier B — IBKR's MCP connector (sessions only — never in the analyzer)
 
 Resolve conid first via `search_contracts` → exact-symbol + US-primary row
 (`country_code=US`, `STK` section). Resolved cleanly: AAPL 265598, MSFT 272093,
@@ -79,30 +46,15 @@ JNJ 8719, JPM 1520593.
 | Market stats & IV | `get_price_snapshot` | ✅ | working: 52w hi/lo range, historical_vol (annualized), IV percentile (13/26/52w), avg_90d_usd_volume, dividend_yield, change, volume |
 | Market stats (gated) | `get_price_snapshot` | ❌ | `cumulative_perf_*`, `year_to_date_change`, `prior_close` came back **empty on every name** — market-data-subscription gated; do not depend |
 | Options / sentiment | `get_option_parameters` → `get_option_data` → snapshot IV/OI | ✅ | chain + IV/open-interest via the same snapshot path |
-| Account context | `get_account_summary` / `get_account_positions` / `get_account_balances` / `get_account_trades` / `get_pa_*` | 🚫 | **Out of scope — do not call.** They work, and they return the user's live book (net-liq, buying power, margin, positions), but the user asked for the real portfolio to stay out of the analysis: a deep-dive grades the *security* and tier 4 grades the signal against a fixed-notional virtual ledger, so what is already held changes neither. `SKILL.md` step 2 states the same prohibition. |
+| Account context | `get_account_*` / `get_pa_*` | 🚫 | **Out of scope — never call.** A security is graded on its own merits and tier 4 uses a virtual ledger, so what is actually held changes neither. |
 
 **IBKR does not provide:** financial statements, analyst EPS/revenue estimates,
 earnings dates/surprise, or a news feed (→ all Yahoo's job).
 
-## Source-of-truth split (settled)
+## Source-of-truth split
 
-- Price history / 52-week range → **Yahoo** for the screens (nightly); IBKR cross-check only.
-- Statements / estimates / earnings / news → **Yahoo only**.
-- Valuation multiples → **Yahoo** (IBKR's are an independent corroboration, not a replacement).
-- Moat / competitors / products / geography / themes/peers → **IBKR MCP only**, and only from the `enrich` skill in a session.
-- Implied volatility → **IBKR TWS API** (raw); the *percentile* is unavailable from either.
-
-Where a metric exists on both sides, Yahoo stays the source of truth and the
-IBKR parameter is a separate registry entry (`ibkr_return_on_equity`, not a
-second writer of `roe`). Two sources reconciled silently into one number is a
-number nobody can check; two parameters that disagree is information.
-
-## Verdict
-
-Both sources are exhausted and their reliable surfaces are mapped. Nothing
-blocks the next step. Yahoo alone covers the quantitative investment case
-end-to-end (valuation-in-context, forward estimates + revision trend, analyst,
-earnings cadence, balance sheet, ownership/buybacks, news). IBKR adds the
-qualitative moat/competitive/thematic graph plus positioning (IV) and account
-context — interactive deep-dive only. Only genuinely missing without an external
-provider: **earnings-call transcripts**.
+- Prices, statements, estimates, earnings, news → **Yahoo** (the analyzer).
+- Filings and filing flags → **SEC EDGAR** (the analyzer, `deep` stage).
+- Moat / competitors / products / geography / themes → **IBKR MCP**, only from
+  the `enrich` and `theme-screen` skills in a session.
+- Missing from every free source: **earnings-call transcripts**.

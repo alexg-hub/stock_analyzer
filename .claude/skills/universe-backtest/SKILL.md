@@ -29,8 +29,8 @@ cache — run this once before either.
 
 ## How it works
 
-It reuses the **production** `compute_*` + `fires_mask` unchanged (its own
-`SCREENS` registry pairs each module with its compute function) — one cohort per
+It reuses each screen's **production** `compute` + `fires_mask` unchanged (its
+`SCREENS` list holds the screen modules) — one cohort per
 screen, or `full` vs `partial` under `--split-by-tier` / `backtest.split_by_tier`
 — and reuses `scanner_common.download_price_data` / `warmup_months`. Never
 reimplement the condition math here. The simulation itself is a few `shift()`s

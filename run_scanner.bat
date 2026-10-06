@@ -23,17 +23,6 @@ rem 2>&1 matters: the step log writes to stderr, so scanner_log.txt keeps it.
 "%PYTHON%" run_scanners.py >> output\scanner_log.txt 2>&1
 echo ==== Scan finished %date% %time% (exit %errorlevel%) ==== >> output\scanner_log.txt
 
-rem That ONE line is the whole night. All four tiers run inside run_scanners.py
-rem -- the screens, the quality check, the veto, the graded verdict, the ledger
-rem and the exit scan -- so they can go out in ONE Discord message: the signal,
-rem what it graded out at, and what to sell, together instead of three posts at
-rem three different times. Each step is individually fail-safe (see run_ledger /
-rem run_verdicts): a broken ledger or a failed verdict costs its own section of
-rem the alert and nothing more.
-rem
-rem Nothing is chained after it, and nothing here invokes a model. Every number
-rem the scan produces is computed in Python, which is what makes a re-run
-rem reproducible and every figure checkable -- `tests/test_no_model.py` asserts
-rem no code path can start one. Qualitative research is the `enrich` skill, run
-rem from a Claude Code session on the tickers you choose; it records to
-rem output/enrichment/ and cannot alter a verdict. See AI_ROLE.md.
+rem That one line is the whole night: all four tiers run inside run_scanners.py
+rem and post one Discord message. Nothing is chained after it, and nothing here
+rem can start a model (tests/test_no_model.py). See AI_ROLE.md.
