@@ -30,10 +30,26 @@ def _table(cfg: dict, tickers: list[str] | None = None):
     cache = universe_scan.load_cache(cfg)
     if not cache:
         return None, pd.DataFrame()
+    import peers
+
     wanted = [t.upper() for t in tickers] if tickers else list(cache)
     view = {t: cache[t] for t in wanted if t in cache}
-    sectors = pd.DataFrame({"ticker": list(view),
-                            "sector": "", "sub_industry": ""})
+    # Regrading needs each ticker's sector, or every `sector_relative`
+    # parameter silently falls back to absolute anchors and the quadrants
+    # disagree with the published plane (294 of 903 did). Offline sources only:
+    # the last whole-index table for sub-industry and index, peers for sector.
+    meta = pd.DataFrame(columns=["ticker", "sector", "sub_industry", "index_name"])
+    latest = sorted(universe_scan.universe_dir(cfg).glob(
+        f"{universe_scan.section(cfg).get('table_csv', 'risk_reward')}_*.csv"))
+    if latest:
+        table = pd.read_csv(latest[-1])
+        meta = table[[c for c in meta.columns if c in table.columns]]
+    sectors = (pd.DataFrame({"ticker": list(view)})
+               .merge(meta, on="ticker", how="left")
+               .reindex(columns=["ticker", "sector", "sub_industry", "index_name"])
+               .fillna(""))
+    sectors["sector"] = [s or peers.sector_of(t, cfg)
+                         for t, s in zip(sectors["ticker"], sectors["sector"])]
     return cache, universe_scan.build_table(cfg, view, sectors)
 
 
@@ -47,14 +63,7 @@ def quadrant_impl(quadrant: str | None = None, sector: str | None = None,
         return {"rows": [], "note": ("no universe cache yet -- run universe_scan "
                                      "first (it takes ~15 minutes)")}
 
-    # Sector lives in the CSV, not the cache, so re-read the latest table when a
-    # sector filter is asked for rather than silently ignoring the argument.
     if sector:
-        latest = sorted(universe_scan.universe_dir(cfg).glob(
-            f"{universe_scan.section(cfg).get('table_csv', 'risk_reward')}_*.csv"))
-        if latest:
-            import pandas as pd
-            table = pd.read_csv(latest[-1])
         table = table[table["sector"].astype(str).str.lower()
                       == sector.lower()]
     if quadrant:

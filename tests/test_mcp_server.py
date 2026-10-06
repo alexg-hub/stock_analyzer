@@ -152,6 +152,29 @@ c.ok("server exposes the stdio runner that quarantines fd 1",
      callable(getattr(mcp_server, "_serve_stdio", None)))
 
 # --------------------------------------------------------------------------
+c.section("universe tools regrade with each ticker's sector")
+
+# `_table` regrades the cache at read time. It used to pass a blank sector for
+# every ticker, so every `sector_relative` parameter fell back to absolute
+# anchors: universe_quadrant reported 178 "buy" names against the plane's 82.
+import peers as _peers  # noqa: E402
+import universe_scan as _us  # noqa: E402
+
+_seen = {}
+_saved = (_us.load_cache, _us.build_table, _peers.sector_of)
+_us.load_cache = lambda _cfg: {"ZZZTEST": {"values": {}}}
+_us.build_table = lambda _cfg, _view, sectors: _seen.setdefault("frame", sectors)
+_peers.sector_of = lambda _t, _cfg: "Utilities"
+try:
+    universe._table(config())
+finally:
+    _us.load_cache, _us.build_table, _peers.sector_of = _saved
+_frame = _seen.get("frame")
+c.ok("a cached ticker is regraded with its sector, never a blank one",
+     _frame is not None and _frame["sector"].tolist() == ["Utilities"],
+     f"{None if _frame is None else _frame['sector'].tolist()}")
+
+# --------------------------------------------------------------------------
 c.section("dry-run defaults")
 
 # Signatures, not calls: these are precisely the tools that must never fire
