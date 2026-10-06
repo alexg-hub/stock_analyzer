@@ -1,9 +1,4 @@
-"""Tier 4: the virtual portfolio.
-
-`portfolio_status` reimplements `portfolio_sim.__main__._status` as a dict
-rather than calling it: that function prints, and this process must not write
-to stdout.
-"""
+"""Tier 4: the virtual portfolio."""
 
 import math
 
@@ -20,46 +15,12 @@ def _clean(value):
 
 
 def status_impl() -> dict:
-    from portfolio_sim import analysis, ledger
+    from portfolio_sim import analysis
 
-    cfg = load_config()
-    positions = ledger.load_positions(cfg)
-    if positions.empty:
-        return {"positions": 0, "note": "ledger is empty -- run portfolio_open first"}
-
-    horizons = ledger.horizons_of(cfg.get("portfolio", {}))
-    counts = (positions["status"].astype(str).value_counts().to_dict()
-              if "status" in positions else {})
-    out = {
-        "positions": len(positions),
-        "by_status": {str(k): int(v) for k, v in counts.items()},
-        "scan_dates": {
-            "distinct": int(positions["scan_date"].nunique()),
-            "first": str(positions["scan_date"].min()),
-            "last": str(positions["scan_date"].max()),
-        },
-        "tickers": int(positions["ticker"].nunique()),
-        "settled_by_horizon": {str(h): len(analysis.closed(positions, h))
-                               for h in horizons},
-    }
-
-    # The exit side, reported next to the horizons because that is the
-    # comparison it exists to support: the same positions, exited two ways.
-    if ledger.EXIT_FLAG_COL in positions.columns:
-        flagged = positions[positions[ledger.EXIT_FLAG_COL].notna()]
-        sold = (int((flagged["dt_status"].astype(str) == ledger.EXIT_FILLED).sum())
-                if "dt_status" in flagged.columns else 0)
-        out["double_tops"] = {"flagged": len(flagged), "sold": sold}
-
-    min_n = int(cfg.get("portfolio", {}).get("analysis", {}).get("min_n", 20))
-    best = max((len(analysis.closed(positions, h)) for h in horizons), default=0)
-    out["attribution_ready"] = best >= min_n
-    if not out["attribution_ready"]:
-        out["attribution_note"] = (
-            f"needs n>={min_n} per cohort; the deepest horizon has {best}. "
-            f"analyze still reports every question with sufficient_n=False.")
-    return out
-
+    status = analysis.book_status(load_config())
+    if not status["positions"]:
+        status["note"] = "ledger is empty -- run portfolio_open first"
+    return status
 
 def positions_impl(status: str | None = None, ticker: str | None = None,
                    limit: int = 100) -> dict:

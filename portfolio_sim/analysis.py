@@ -32,6 +32,8 @@ from backtest_universe import describe
 from scanner_common import findings_csv_path, portfolio_dir, step
 
 from .ledger import (
+    EXIT_FILLED,
+    EXIT_FLAG_COL,
     IDENTITY_COLS,
     ON_DEMAND_KEY,
     QR_PREFIX,
@@ -707,6 +709,45 @@ def _predictor_columns(frame: pd.DataFrame, horizons: list[int]) -> list[str]:
         if values.notna().sum() >= 3 and values.nunique() > 1:
             out.append(column)
     return sorted(out)
+
+
+def book_status(cfg: dict) -> dict:
+    """What is on the book and what can be asked of it yet, as plain data.
+
+    The CLI prints it and the MCP tool returns it, so the two cannot disagree.
+    """
+    positions = load_positions(cfg)
+    if positions.empty:
+        return {"positions": 0}
+    port_cfg = cfg.get("portfolio", {})
+    horizons = horizons_of(port_cfg)
+    counts = (positions["status"].astype(str).value_counts().to_dict()
+              if "status" in positions else {})
+    settled = {h: len(closed(positions, h)) for h in horizons}
+    out = {
+        "positions": len(positions),
+        "by_status": {str(k): int(v) for k, v in counts.items()},
+        "scan_dates": {"distinct": int(positions["scan_date"].nunique()),
+                       "first": str(positions["scan_date"].min()),
+                       "last": str(positions["scan_date"].max())},
+        "tickers": int(positions["ticker"].nunique()),
+        "settled_by_horizon": {str(h): n for h, n in settled.items()},
+    }
+    # The exit side sits beside the horizons because that is the comparison it
+    # exists to support: the same positions, exited two ways.
+    if EXIT_FLAG_COL in positions.columns:
+        flagged = positions[positions[EXIT_FLAG_COL].notna()]
+        sold = (int((flagged["dt_status"].astype(str) == EXIT_FILLED).sum())
+                if "dt_status" in flagged.columns else 0)
+        out["double_tops"] = {"flagged": len(flagged), "sold": sold}
+    min_n = int(port_cfg.get("analysis", {}).get("min_n", 20))
+    deepest = max(settled.values(), default=0)
+    out["attribution_ready"] = deepest >= min_n
+    if not out["attribution_ready"]:
+        out["attribution_note"] = (
+            f"needs n>={min_n} per cohort; the deepest horizon has {deepest}. "
+            "analyze still reports every question with sufficient_n=False.")
+    return out
 
 
 def analyze(cfg: dict, baseline: bool = True) -> pd.DataFrame:

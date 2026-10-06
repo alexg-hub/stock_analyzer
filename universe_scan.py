@@ -55,10 +55,8 @@ still needs and is re-run deliberately rather than automatically.
 
 import argparse
 import json
-import pickle
 import sys
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -66,7 +64,9 @@ import pandas as pd
 import charts
 import peers
 import quality
+import ticker_cache
 from scanner_common import (
+    closes_with_benchmark,
     enable_utf8_output,
     load_config,
     log_step,
@@ -75,6 +75,9 @@ from scanner_common import (
 )
 
 CONFIG_KEY = "universe"
+
+# The cache entry's timestamp key. Older entries on disk carry it, so it stays.
+STAMP = "collected_at"
 
 #: Re-exported from `quality`, which owns the plane's definition so the nightly
 #: card, this table and the interactive page cannot disagree about where "buy" is.
@@ -166,50 +169,17 @@ def cache_path(cfg: dict) -> Path:
 # --------------------------------------------------------------------------
 
 def load_cache(cfg: dict) -> dict:
-    """Ticker -> entry. A missing or unreadable cache is an empty one.
-
-    Never raises: a corrupt pickle must cost you the cache, not the run. The
-    entries are re-fetchable by definition, so the safe failure is to refetch.
-    """
-    path = cache_path(cfg)
-    if not path.exists() or path.stat().st_size == 0:
-        return {}
-    try:
-        with path.open("rb") as fh:
-            data = pickle.load(fh)
-        return data if isinstance(data, dict) else {}
-    except Exception as exc:  # noqa: BLE001 - a bad cache is a cold cache
-        log_step("UNIVERSE", "warn", f"cache unreadable, starting cold: {exc}",
-                 cfg=cfg)
-        return {}
+    return ticker_cache.load(cache_path(cfg), "UNIVERSE", cfg)
 
 
 def save_cache(cfg: dict, cache: dict) -> Path:
-    path = cache_path(cfg)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with tmp.open("wb") as fh:
-        pickle.dump(cache, fh, protocol=pickle.HIGHEST_PROTOCOL)
-    tmp.replace(path)               # atomic, so a kill mid-write cannot truncate
-    return path
-
-
-def _age_days(entry: dict) -> float:
-    stamp = pd.to_datetime(entry.get("collected_at"), errors="coerce", utc=True)
-    if pd.isna(stamp):
-        return float("inf")
-    return (pd.Timestamp.now(tz="UTC") - stamp).total_seconds() / 86400.0
+    return ticker_cache.save(cache_path(cfg), cache)
 
 
 def is_stale(entry: dict, cfg: dict) -> bool:
-    """Whether this ticker needs re-fetching.
-
-    An entry that errored is always stale -- a transient Yahoo failure should not
-    pin a ticker out of the table for a week.
-    """
-    if not entry or entry.get("error"):
-        return True
-    max_age = float(section(cfg).get("cache_max_age_days", 7))
-    return _age_days(entry) > max_age
+    """Whether this ticker needs re-fetching; an errored entry always does."""
+    return ticker_cache.is_stale(
+        entry, float(section(cfg).get("cache_max_age_days", 7)), STAMP)
 
 
 # --------------------------------------------------------------------------
@@ -219,138 +189,67 @@ def is_stale(entry: dict, cfg: dict) -> bool:
 def load_prices(cfg: dict, tickers: list[str]):
     """One bulk price download for the whole universe, plus the benchmark.
 
-    This is why the `price_risk` metrics are free at universe scale: `yf.download`
-    batches server-side, so 500 tickers of history is one threaded call rather
-    than 500 -- the same asymmetry that makes the nightly price scan cheap and
-    the per-ticker fundamentals pass expensive.
-
-    Deliberately not `backtest_universe.cached_panel`: that pickle is keyed to a
-    fixed universe and is a day stale at best (13 days, as it happens), and a
-    volatility reading two weeks out of date is wrong in a way nobody would
-    notice. Returns `(closes, benchmark)`, either possibly None -- with no panel
-    the price metrics simply read as missing and the axis says so.
+    This is why the `price_risk` metrics are free at universe scale:
+    `yf.download` batches server-side. Deliberately not
+    `backtest_universe.cached_panel`, which is keyed to a fixed universe and
+    days stale, so its volatility readings would be quietly wrong.
     """
-    from scanner_common import download_price_data
-    bench = cfg.get("backtest", {}).get("benchmark_ticker", "SPY")
-    period = str(section(cfg).get("price_period", "5y"))
-    interval = cfg.get("data", {}).get("download_interval", "1d")
-    try:
-        panel = download_price_data(sorted(set(tickers) | {bench}), period,
-                                    interval)
-        closes = panel["Close"]
-        series = closes[bench] if bench in closes.columns else None
-        log_step("UNIVERSE", "ok",
-                 f"prices for {closes.shape[1]} ticker(s), {closes.shape[0]} bars"
-                 + ("" if series is not None else f" -- no {bench}, no beta"),
-                 cfg=cfg)
-        return closes, series
-    except Exception as exc:  # noqa: BLE001 - fail open; price metrics go missing
-        log_step("UNIVERSE", "failed",
-                 f"price panel: {exc} -- price risk will read as missing",
-                 cfg=cfg)
-        return None, None
+    return closes_with_benchmark(tickers, cfg,
+                                 str(section(cfg).get("price_period", "5y")),
+                                 phase="UNIVERSE")
 
 
 def collect_one(ticker: str, cfg: dict, retries: int = 2,
-                backoff_s: float = 1.5, close=None, benchmark=None) -> dict:
-    """One ticker's `fast`-stage values and axis coordinates.
+                close=None, benchmark=None) -> dict:
+    """One ticker's `fast`-stage values and axis coordinates."""
+    def fetch():
+        bundle = quality.collect(ticker, cfg, quality.STAGE_FAST,
+                                 close=close, benchmark=benchmark)
+        values = quality.resolve(bundle, cfg, quality.STAGE_FAST)
+        # `regrade` recomputes this at render time, but the cache should hold
+        # the same answer the table shows -- graded with the sector, or the
+        # stored veto count disagrees with the rendered one.
+        result = quality.evaluate(values, cfg, quality.STAGE_FAST,
+                                  peers.sector_of(ticker, cfg))
+        return {
+            STAMP: ticker_cache.now_stamp(),
+            "stage": quality.STAGE_FAST,
+            "company": bundle.get(quality.COMPANY_COL),
+            "values": values,
+            "reward": result.reward,
+            "risk": result.risk,
+            "safety": result.safety,
+            "groups": result.groups,
+            "vetoed": result.vetoed,
+            "veto_reasons": list(result.veto_reasons or []),
+            "quality_passed": result.passed,
+            "score": result.score,
+            "error": None,
+        }
 
-    Retries are new to this repo and exist only because of the volume: a single
-    ticker failing in the nightly scan is one missing row, while a rate-limit
-    wall at ticker 200 of 500 would silently halve the universe. `collect`
-    itself already swallows per-source failures, so what is caught here is the
-    harder kind -- a throttle or a socket error taking the whole ticker down.
-    """
-    last_error = None
-    for attempt in range(retries + 1):
-        try:
-            bundle = quality.collect(ticker, cfg, quality.STAGE_FAST,
-                                     close=close, benchmark=benchmark)
-            values = quality.resolve(bundle, cfg, quality.STAGE_FAST)
-            # `regrade` recomputes all of this at render time, so the axes stored
-            # here are never what gets plotted -- but they are what a reader of
-            # the cache sees, and grading them without the sector made the stored
-            # veto count disagree with the rendered one (92 against 59). Store the
-            # same answer the table will show.
-            result = quality.evaluate(values, cfg, quality.STAGE_FAST,
-                                      peers.sector_of(ticker, cfg))
-            return {
-                "collected_at": datetime.now(timezone.utc).isoformat(
-                    timespec="seconds"),
-                "stage": quality.STAGE_FAST,
-                "company": bundle.get(quality.COMPANY_COL),
-                "values": values,
-                "reward": result.reward,
-                "risk": result.risk,
-                "safety": result.safety,
-                "groups": result.groups,
-                "vetoed": result.vetoed,
-                "veto_reasons": list(result.veto_reasons or []),
-                "quality_passed": result.passed,
-                "score": result.score,
-                "error": None,
-            }
-        except Exception as exc:  # noqa: BLE001 - one ticker never kills the pass
-            last_error = f"{type(exc).__name__}: {exc}"
-            if attempt < retries:
-                time.sleep(backoff_s * (attempt + 1))
-    log_step("UNIVERSE", "failed", f"{ticker}: {last_error}", cfg=cfg)
-    return {"collected_at": datetime.now(timezone.utc).isoformat(
-                timespec="seconds"),
-            "stage": quality.STAGE_FAST, "error": last_error,
-            "values": {}, "reward": None, "risk": None, "safety": None,
-            "groups": {}, "vetoed": None, "veto_reasons": []}
+    entry, error = ticker_cache.with_retries(fetch, retries)
+    if entry is not None:
+        return entry
+    log_step("UNIVERSE", "failed", f"{ticker}: {error}", cfg=cfg)
+    return {STAMP: ticker_cache.now_stamp(), "stage": quality.STAGE_FAST,
+            "error": error, "values": {}, "reward": None, "risk": None,
+            "safety": None, "groups": {}, "vetoed": None, "veto_reasons": []}
 
 
 def scan(cfg: dict, tickers: list[str], refresh: bool = False,
          fetch: bool = True) -> dict:
-    """Fill the cache for `tickers`, returning it. Progress logged as it goes.
-
-    The per-N progress line is not cosmetic: `mcp_tools.backtests.run_script`
-    kills a child whose log is still empty after 60s, and `quality.fetch_fast`
-    logs once *after* its whole loop -- which at universe scale would look
-    exactly like the stalled interpreter that watchdog exists to catch.
-    """
-    cache = load_cache(cfg)
-    every = max(1, int(section(cfg).get("progress_every", 10)))
-    delay = float(section(cfg).get("request_delay_s", 0.2))
-    retries = int(section(cfg).get("retries", 2))
-
-    todo = [t for t in tickers if refresh or is_stale(cache.get(t, {}), cfg)]
-    log_step("UNIVERSE", "ok",
-             f"{len(tickers)} ticker(s); {len(todo)} to fetch, "
-             f"{len(tickers) - len(todo)} cached", cfg=cfg)
-    if not fetch:
-        if todo:
-            log_step("UNIVERSE", "skip",
-                     f"--no-fetch: {len(todo)} stale ticker(s) left as they are",
-                     cfg=cfg)
-        return cache
-
-    closes, benchmark = load_prices(cfg, todo) if todo else (None, None)
-
-    started = time.time()
-    for i, ticker in enumerate(todo, start=1):
+    """Fill the cache for `tickers` and return it, logging progress as it goes."""
+    def fetch_one(ticker, retries, prices):
+        closes, benchmark = prices or (None, None)
         close = (closes[ticker] if closes is not None
                  and ticker in closes.columns else None)
-        cache[ticker] = collect_one(ticker, cfg, retries=retries,
-                                    close=close, benchmark=benchmark)
-        if i % every == 0 or i == len(todo):
-            rate = (time.time() - started) / i
-            left = rate * (len(todo) - i)
-            log_step("UNIVERSE", "ok",
-                     f"{i}/{len(todo)} fetched ({rate:.2f}s/ticker, "
-                     f"~{left/60:.1f}min left)", cfg=cfg)
-            save_cache(cfg, cache)      # checkpoint, so a kill loses ~10 tickers
-        if delay and i < len(todo):
-            time.sleep(delay)
+        return collect_one(ticker, cfg, retries=retries, close=close,
+                           benchmark=benchmark)
 
-    save_cache(cfg, cache)
-    ok = sum(1 for t in todo if not cache.get(t, {}).get("error"))
-    log_step("UNIVERSE", "ok" if ok == len(todo) else "partial",
-             f"fetched {ok}/{len(todo)} in {time.time() - started:.0f}s",
-             cfg=cfg)
-    return cache
+    return ticker_cache.fill(
+        cache_path(cfg), tickers, fetch_one, cfg, phase="UNIVERSE",
+        section=section(cfg), stamp_key=STAMP, refresh=refresh, fetch=fetch,
+        prepare=lambda todo: load_prices(cfg, todo))
 
 
 # --------------------------------------------------------------------------

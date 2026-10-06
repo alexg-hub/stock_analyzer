@@ -29,11 +29,10 @@ table, plus a prose report beside it that nothing in the pipeline reads.
 """
 
 import json
-from datetime import date
 from pathlib import Path
 
-import pandas as pd
-
+from agent_records import JudgmentSchema
+from agent_records import read_one as _read_one
 from scanner_common import (
     count_csv_rows,
     log_step,
@@ -77,6 +76,14 @@ COLUMNS = ["scan_date", "ticker", "stance", "moat_view", "social_sentiment",
            "conviction_note", "concerns", "catalysts", "rule_disputes",
            "sources", "sources_n", "concerns_n", "report", "agent_date",
            "model"]
+
+SCHEMA = JudgmentSchema(
+    columns=tuple(COLUMNS), required=REQUIRED, vocabularies=VOCABULARIES,
+    list_fields=LIST_FIELDS,
+    banned=("narrative_adj", "conviction", "tier", "score"),
+    banned_reason="enrichment records judgment, it never adjusts a verdict",
+    counts={"sources_n": "sources", "concerns_n": "concerns"},
+    numeric=("sources_n", "concerns_n"))
 
 
 # --------------------------------------------------------------------------
@@ -135,75 +142,13 @@ def report_path(ticker: str, scan_date: str, cfg: dict,
 # --------------------------------------------------------------------------
 
 def validate(row: dict) -> list[str]:
-    """Everything wrong with a proposed row; empty means it is recordable.
-
-    Deliberately strict where `quality.validate` is strict, and for the same
-    reason: every case here fails *silently* downstream. An unknown `stance`
-    reaches `analyze` as its own cohort of one; a missing `scan_date` produces
-    a row no position can ever join to.
-    """
-    problems = []
-    for field in REQUIRED:
-        if not str(row.get(field) or "").strip():
-            problems.append(f"{field} is required")
-
-    for field, allowed in VOCABULARIES.items():
-        value = row.get(field)
-        if value in (None, ""):
-            continue
-        if str(value).lower() not in allowed:
-            problems.append(
-                f"{field}={value!r} is not one of {', '.join(allowed)}")
-
-    for field in LIST_FIELDS:
-        value = row.get(field)
-        if value in (None, ""):
-            continue
-        if not isinstance(value, (list, tuple)):
-            problems.append(f"{field} must be a list, got {type(value).__name__}")
-
-    # The one number, and it is a count of evidence rather than a judgment.
-    for field in ("sources_n", "concerns_n"):
-        value = row.get(field)
-        if value is not None and not isinstance(value, (int, float)):
-            problems.append(f"{field} must be a number")
-
-    unknown = set(row) - set(COLUMNS)
-    if unknown:
-        problems.append(f"unknown field(s): {', '.join(sorted(unknown))}")
-
-    # The field that must never exist. Someone re-adding a numeric adjustment
-    # is the exact regression this module was built to prevent, so name it.
-    for banned in ("narrative_adj", "conviction", "tier", "score"):
-        if banned in row:
-            problems.append(
-                f"{banned!r} is not an enrichment field -- enrichment records "
-                "judgment, it never adjusts a verdict")
-
-    return problems
+    """Everything wrong with a proposed row; empty means it is recordable."""
+    return SCHEMA.validate(row)
 
 
 def normalize(row: dict) -> dict:
     """A validated row in storage form: vocabularies lowered, lists JSON."""
-    out = {}
-    for key, value in row.items():
-        if key in VOCABULARIES and value not in (None, ""):
-            value = str(value).lower()
-        elif key in LIST_FIELDS:
-            value = json.dumps(list(value or []), ensure_ascii=False)
-        out[key] = value
-
-    out.setdefault("sources_n", len(row.get("sources") or []))
-    out.setdefault("concerns_n", len(row.get("concerns") or []))
-    # Stamped here rather than asked for: provenance is the one field the caller
-    # has no reason to think about and every reason to want later -- "when was
-    # this judgment formed" is what separates a stale read from a current one,
-    # and `scan_date` cannot answer it (a name researched weeks after it fired
-    # shares the signal's date, not the research's).
-    out.setdefault("agent_date", date.today().isoformat())
-    out["ticker"] = str(out.get("ticker", "")).upper()
-    out["scan_date"] = str(out.get("scan_date", ""))
-    return {c: out.get(c) for c in COLUMNS if c in out or c in REQUIRED}
+    return SCHEMA.normalize(row)
 
 
 # --------------------------------------------------------------------------
@@ -248,40 +193,13 @@ def record(row: dict, cfg: dict) -> Path | None:
 
 
 def read_one(ticker: str, scan_date: str, cfg: dict) -> dict:
-    """One enrichment row as a plain dict, or `{}` when there is none.
-
-    `{}` is the answer tier 4 needs for "never enriched", which is a legitimate
-    cohort and not a gap to fill -- the same distinction `load_facts` draws for
-    a ticker that was never deep-dived.
-    """
-    path = enrichment_csv_path(cfg, create=False)
-    if not path.exists():
-        return {}
-    try:
-        frame = read_table(path)
-    except Exception:  # noqa: BLE001 - an unreadable record is an absent one
-        return {}
-    if frame.empty or not {"ticker", "scan_date"} <= set(frame.columns):
-        return {}
-    hit = frame[(frame["ticker"].astype(str).str.upper() == ticker.upper())
-                & (frame["scan_date"].astype(str) == str(scan_date))]
-    if hit.empty:
-        return {}
-    row = hit.iloc[-1].to_dict()
-    return {k: (None if pd.isna(v) else v) for k, v in row.items()}
+    """One enrichment row as a plain dict, or `{}` when it was never enriched."""
+    return _read_one(enrichment_csv_path(cfg, create=False), ticker, scan_date)
 
 
 def decode_lists(row: dict) -> dict:
     """The stored row with its JSON list columns decoded, for display."""
-    out = dict(row)
-    for field in LIST_FIELDS:
-        raw = out.get(field)
-        if isinstance(raw, str) and raw:
-            try:
-                out[field] = json.loads(raw)
-            except json.JSONDecodeError:
-                pass
-    return out
+    return SCHEMA.decode_lists(row)
 
 
 # --------------------------------------------------------------------------

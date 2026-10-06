@@ -39,39 +39,23 @@ PHASE = {"open": "LEDGER", "mark": "MARK", "exit-scan": "EXIT",
 
 
 def _status(cfg: dict) -> int:
-    positions = ledger.load_positions(cfg)
-    if positions.empty:
+    status = analysis.book_status(cfg)
+    if not status["positions"]:
         print("Ledger is empty. Run `python -m portfolio_sim open`.")
         return 0
-
-    horizons = ledger.horizons_of(cfg.get("portfolio", {}))
-    counts = positions["status"].astype(str).value_counts() if "status" in positions else {}
-    print(f"positions: {len(positions)}  "
-          + "  ".join(f"{k}={v}" for k, v in dict(counts).items()))
-    print(f"scan dates: {positions['scan_date'].nunique()} "
-          f"({positions['scan_date'].min()} .. {positions['scan_date'].max()})")
-    print(f"tickers:    {positions['ticker'].nunique()}")
-
-    for horizon in horizons:
-        settled = len(analysis.closed(positions, horizon))
-        print(f"  {horizon:>3}d horizon: {settled} settled return(s)")
-
-    # The exit side. Reported next to the horizons because that is the
-    # comparison it exists to support: the same positions, exited two ways.
-    if ledger.EXIT_FLAG_COL in positions.columns:
-        flagged = positions[positions[ledger.EXIT_FLAG_COL].notna()]
-        sold = (flagged["dt_status"].astype(str) == ledger.EXIT_FILLED).sum() \
-            if "dt_status" in flagged.columns else 0
-        print(f"  double tops: {len(flagged)} flagged, {sold} sold")
-
-    min_n = int(cfg.get("portfolio", {}).get("analysis", {}).get("min_n", 20))
-    best = max((len(analysis.closed(positions, h)) for h in horizons), default=0)
-    if best < min_n:
-        print(f"\nAttribution needs n>={min_n} per cohort; the deepest horizon "
-              f"has {best}. `analyze` will still report every question with "
-              f"sufficient_n=False so you can see what is coming.")
+    print(f"positions: {status['positions']}  " + "  ".join(
+        f"{k}={v}" for k, v in status["by_status"].items()))
+    dates = status["scan_dates"]
+    print(f"scan dates: {dates['distinct']} ({dates['first']} .. {dates['last']})")
+    print(f"tickers:    {status['tickers']}")
+    for horizon, n in status["settled_by_horizon"].items():
+        print(f"  {horizon:>3}d horizon: {n} settled return(s)")
+    if "double_tops" in status:
+        tops = status["double_tops"]
+        print(f"  double tops: {tops['flagged']} flagged, {tops['sold']} sold")
+    if not status["attribution_ready"]:
+        print(f"\nAttribution {status['attribution_note']}")
     return 0
-
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(

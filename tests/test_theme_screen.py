@@ -98,7 +98,7 @@ GRADED = {"Close": 100.0, "Company": "Stub Corp", "Quality": False,
           "Reward": 61.0, "Risk": 44.0, "Quadrant": "buy"}
 
 
-def fake_scan_ticker(ticker: str, _cfg: dict) -> dict:
+def fake_scan_ticker(ticker: str, _cfg: dict, **_) -> dict:
     ticker = ticker.upper()
     if ticker not in KNOWN:
         raise ValueError(f"no price data for {ticker}")
@@ -115,7 +115,7 @@ def fake_scan_ticker(ticker: str, _cfg: dict) -> dict:
 
 
 run_scanners.scan_ticker = fake_scan_ticker
-theme_signals.universe_constituents = lambda _cfg: pd.DataFrame(
+scanner_common.universe_constituents = lambda _cfg: pd.DataFrame(
     {"ticker": ["PWR", "HUBB"], "index_name": ["sp500", "sp400"]})
 
 
@@ -481,6 +481,49 @@ c.ok("...with the count recorded on the row too",
 c.ok("a theme with no events writes no snapshot rather than an empty one",
      theme_signals.snapshot_evidence("nonesuch", "2026-01-05", cfg) == ("", 0),
      "an empty file would claim the pick was made from no evidence at all")
+
+
+# --------------------------------------------------------------------------
+c.section("--deep grades each pick from the row it just recorded")
+
+# `record` already ran tiers 1+2 for every pick. The verdict pass used to look
+# the ticker up through `resolve_trigger`, miss `latest_hits.json` and scan it
+# all over again -- two downloads and two Yahoo passes per pick.
+import research_report  # noqa: E402
+
+scans, triggers = [], {}
+_fake, _saved = run_scanners.scan_ticker, (
+    research_report.price_inputs, research_report.deterministic_verdict,
+    research_report.record_verdict)
+
+
+def _counting_scan(ticker, cfg_, **kw):
+    scans.append(ticker.upper())
+    return _fake(ticker, cfg_, **kw)
+
+
+def _verdict(ticker, cfg_, trigger, scan_date, source, close=None, benchmark=None):
+    triggers[ticker] = trigger
+    return {"ticker": ticker, "scan_date": scan_date, "tier": "WATCH",
+            "conviction": 50}
+
+
+run_scanners.scan_ticker = _counting_scan
+research_report.price_inputs = lambda tickers, cfg_: (None, None)
+research_report.deterministic_verdict = _verdict
+research_report.record_verdict = lambda verdict, cfg_: None
+try:
+    deep = theme_signals.record("datacenter", "operator announces a campus",
+                                [PICK], cfg, deep=True)
+finally:
+    run_scanners.scan_ticker = _fake
+    (research_report.price_inputs, research_report.deterministic_verdict,
+     research_report.record_verdict) = _saved
+
+c.ok("each pick is scanned exactly once", scans == ["PWR"], f"{scans}")
+c.ok("the verdict is graded from the recorded row",
+     (triggers.get("PWR") or {}).get("row", {}).get("Quadrant") == "buy"
+     and len(deep.get("verdicts", [])) == 1, f"{triggers.get('PWR')}")
 
 
 # --------------------------------------------------------------------------

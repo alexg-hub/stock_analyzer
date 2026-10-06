@@ -54,29 +54,26 @@ panel. `Verdict`/`Conviction` still stay out -- tier 3 owns those.
 
 from __future__ import annotations
 
-import json
 import math
-import pickle
-import time
-from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from scanner_common import (INDEX_COL, HISTORY_KEYS, VERDICT_COLS, log_step,
-                            merge_history_csv, output_dir, signals_csv_path,
-                            universe_constituents)
+import scanner_common
+import ticker_cache
+from scanner_common import (TRIGGER_NONE, log_step,  # noqa: F401 - re-exported
+                            closes_with_benchmark, merge_history_csv,
+                            output_dir, universe_constituents)
 
 CONFIG_KEY = "industry_valuation"
+
+# The EPS cache entry's timestamp key. Older entries on disk carry it.
+STAMP = "fetched_at"
 
 # The value written into signals.csv's `Setup` column -- distinct from the
 # screens' full/partial/none and from theme_screen's "theme".
 SETUP_VALUE = "valuation"
-
-# An empty Trigger round-trips through CSV as NaN and `groupby` drops NaN
-# silently, which would discard exactly the cohort the column exists to isolate.
-TRIGGER_NONE = "none"
 
 FLAG_CHEAP = "cheap"
 FLAG_RICH = "rich"
@@ -150,85 +147,44 @@ def chart_path(cfg: dict, scan_date: str) -> Path:
 # take seconds against ~20 minutes cold.
 
 def load_cache(cfg: dict) -> dict:
-    """Ticker -> entry. A missing or unreadable cache is an empty one; the
-    entries are re-fetchable by definition, so the safe failure is to refetch."""
-    path = eps_cache_path(cfg)
-    if not path.exists() or path.stat().st_size == 0:
-        return {}
-    try:
-        with path.open("rb") as fh:
-            data = pickle.load(fh)
-        return data if isinstance(data, dict) else {}
-    except Exception as exc:  # noqa: BLE001 - a bad cache is a cold cache
-        log_step("VALUATION", "warn", f"cache unreadable, starting cold: {exc}",
-                 cfg=cfg)
-        return {}
-
-
-def save_cache(cfg: dict, cache: dict) -> Path:
-    path = eps_cache_path(cfg)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with tmp.open("wb") as fh:
-        pickle.dump(cache, fh, protocol=pickle.HIGHEST_PROTOCOL)
-    tmp.replace(path)               # atomic, so a kill mid-write cannot truncate
-    return path
-
-
-def _age_days(entry: dict) -> float:
-    stamp = pd.to_datetime(entry.get("fetched_at"), errors="coerce", utc=True)
-    if pd.isna(stamp):
-        return float("inf")
-    return (pd.Timestamp.now(tz="UTC") - stamp).total_seconds() / 86400.0
+    return ticker_cache.load(eps_cache_path(cfg), "VALUATION", cfg)
 
 
 def is_stale(entry: dict, cfg: dict) -> bool:
-    """An entry that errored is always stale -- a transient Yahoo failure must
-    not pin a ticker out of the table for a week."""
-    if not entry or entry.get("error"):
-        return True
-    max_age = float(section(cfg).get("cache_max_age_days", 7))
-    return _age_days(entry) > max_age
+    """Whether this ticker needs re-fetching; an errored entry always does."""
+    return ticker_cache.is_stale(
+        entry, float(section(cfg).get("cache_max_age_days", 7)), STAMP)
 
 
-def fetch_one(ticker: str, cfg: dict, retries: int = 2,
-              backoff_s: float = 1.5) -> dict:
-    """One ticker's quarterly EPS points plus today's two multiples.
-
-    Both come off a single `yf.Ticker`, so the forward multiple rides along on a
-    pass that had to happen anyway. Retries exist for the same reason
-    `universe_scan.collect_one` has them: one ticker failing is one missing row,
-    but a throttle at ticker 200 of 903 would silently halve the table.
-    """
+def fetch_one(ticker: str, cfg: dict, retries: int = 2) -> dict:
+    """One ticker's quarterly EPS points plus today's two multiples, both off a
+    single `yf.Ticker`, so the forward multiple rides on a pass that had to
+    happen anyway."""
     import research_collect
     import yfinance as yf
 
-    last_error = None
-    for attempt in range(retries + 1):
+    def fetch():
+        tk = yf.Ticker(ticker)
+        eps = research_collect.quarterly_eps(tk)
         try:
-            tk = yf.Ticker(ticker)
-            eps = research_collect.quarterly_eps(tk)
-            points = ([[d.isoformat(), float(v)] for d, v in eps.items()]
-                      if eps is not None else [])
-            try:
-                info = tk.info or {}
-            except Exception:  # noqa: BLE001 - the multiples are the optional half
-                info = {}
-            return {
-                "fetched_at": datetime.now(timezone.utc).isoformat(
-                    timespec="seconds"),
-                "eps": points,
-                "forward_pe": _finite(info.get("forwardPE")),
-                "trailing_pe": _finite(info.get("trailingPE")),
-                "error": None,
-            }
-        except Exception as exc:  # noqa: BLE001 - one ticker never kills the pass
-            last_error = f"{type(exc).__name__}: {exc}"
-            if attempt < retries:
-                time.sleep(backoff_s * (attempt + 1))
-    log_step("VALUATION", "failed", f"{ticker}: {last_error}", cfg=cfg)
-    return {"fetched_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "eps": [], "forward_pe": None, "trailing_pe": None,
-            "error": last_error}
+            info = tk.info or {}
+        except Exception:  # noqa: BLE001 - the multiples are the optional half
+            info = {}
+        return {
+            STAMP: ticker_cache.now_stamp(),
+            "eps": ([[d.isoformat(), float(v)] for d, v in eps.items()]
+                    if eps is not None else []),
+            "forward_pe": _finite(info.get("forwardPE")),
+            "trailing_pe": _finite(info.get("trailingPE")),
+            "error": None,
+        }
+
+    entry, error = ticker_cache.with_retries(fetch, retries)
+    if entry is not None:
+        return entry
+    log_step("VALUATION", "failed", f"{ticker}: {error}", cfg=cfg)
+    return {STAMP: ticker_cache.now_stamp(), "eps": [], "forward_pe": None,
+            "trailing_pe": None, "error": error}
 
 
 def _finite(value):
@@ -246,69 +202,21 @@ def _finite(value):
 
 def scan_eps(cfg: dict, tickers: list[str], refresh: bool = False,
              fetch: bool = True) -> dict:
-    """Fill the EPS cache for `tickers`, returning it.
-
-    The per-N progress line is not cosmetic: `mcp_tools.backtests.run_script`
-    kills a child whose log is still empty after 60s, and this loop runs for
-    ~20 minutes cold.
-    """
-    cache = load_cache(cfg)
-    every = max(1, int(section(cfg).get("progress_every", 25)))
-    delay = float(section(cfg).get("request_delay_s", 0.2))
-    retries = int(section(cfg).get("retries", 2))
-
-    todo = [t for t in tickers if refresh or is_stale(cache.get(t, {}), cfg)]
-    log_step("VALUATION", "ok",
-             f"{len(tickers)} ticker(s); {len(todo)} to fetch, "
-             f"{len(tickers) - len(todo)} cached", cfg=cfg)
-    if not fetch:
-        if todo:
-            log_step("VALUATION", "skip",
-                     f"--no-fetch: {len(todo)} stale ticker(s) left as they are",
-                     cfg=cfg)
-        return cache
-
-    started = time.time()
-    for i, ticker in enumerate(todo, start=1):
-        cache[ticker] = fetch_one(ticker, cfg, retries=retries)
-        if i % every == 0 or i == len(todo):
-            rate = (time.time() - started) / i
-            left = rate * (len(todo) - i)
-            log_step("VALUATION", "ok",
-                     f"{i}/{len(todo)} fetched ({rate:.2f}s/ticker, "
-                     f"~{left/60:.1f}min left)", cfg=cfg)
-            save_cache(cfg, cache)      # checkpoint, so a kill loses ~25 tickers
-        if delay and i < len(todo):
-            time.sleep(delay)
-
-    save_cache(cfg, cache)
-    ok = sum(1 for t in todo if not cache.get(t, {}).get("error"))
-    log_step("VALUATION", "ok" if ok == len(todo) else "partial",
-             f"fetched {ok}/{len(todo)} in {time.time() - started:.0f}s", cfg=cfg)
-    return cache
+    """Fill the EPS cache for `tickers` and return it (~20 min cold)."""
+    return ticker_cache.fill(
+        eps_cache_path(cfg), tickers,
+        lambda ticker, retries, _: fetch_one(ticker, cfg, retries=retries),
+        cfg, phase="VALUATION", section=section(cfg), stamp_key=STAMP,
+        refresh=refresh, fetch=fetch, default_every=25)
 
 
 def load_prices(cfg: dict, tickers: list[str]):
-    """One bulk close panel. Returns a (days x tickers) frame, or None.
-
-    Deliberately not `backtest_universe.cached_panel`, for the reason
-    `universe_scan.load_prices` records: that pickle is keyed to a fixed
-    universe. Bulk download already routes through `drop_unsettled_bars` and
-    `drop_open_session_bar`, so both guards apply here for free.
-    """
-    from scanner_common import download_price_data
-    period = str(section(cfg).get("price_period", "5y"))
-    interval = cfg.get("data", {}).get("download_interval", "1d")
-    try:
-        panel = download_price_data(sorted(set(tickers)), period, interval)
-        closes = panel["Close"]
-        log_step("VALUATION", "ok",
-                 f"prices for {closes.shape[1]} ticker(s), {closes.shape[0]} bars",
-                 cfg=cfg)
-        return closes
-    except Exception as exc:  # noqa: BLE001
-        log_step("VALUATION", "failed", f"price panel: {exc}", cfg=cfg)
-        return None
+    """One bulk close panel (days x tickers), or None. Not
+    `backtest_universe.cached_panel`, which is keyed to a fixed universe."""
+    closes, _ = closes_with_benchmark(
+        tickers, cfg, str(section(cfg).get("price_period", "5y")),
+        phase="VALUATION", benchmark=False)
+    return closes
 
 
 # --------------------------------------------------------------------------
@@ -792,74 +700,25 @@ def record(bucket: str, cfg: dict, top: int = 0) -> dict:
     if len(members) > limit:
         members = members[:limit]
 
-    graded, problems = [], []
-    for ticker in members:
-        try:
-            payload = run_scanners.scan_ticker(ticker, cfg)
-        except Exception as exc:  # noqa: BLE001
-            problems.append(f"{ticker}: could not be scanned ({exc})")
-            continue
-        merged, fired = {}, []
-        for screen in payload.get("screens") or []:
-            hit = (screen.get("hits") or {}).get(ticker.upper())
-            if hit is None:
-                continue
-            key = screen.get("config_key")
-            if key and key != run_scanners.NO_SIGNAL_KEY:
-                fired.append(key)
-            merged.update(hit)
-        scan_date = str(payload.get("scan_date") or "")
-        if not merged or not scan_date:
-            problems.append(f"{ticker}: refused -- no bars to grade it on")
-            continue
-        graded.append((ticker, merged, scan_date, ",".join(fired)))
-
+    graded, problems = run_scanners.grade_batch(members, cfg)
     if problems:
         return {"recorded": False, "picks": 0, "problems": problems,
                 "note": "nothing was written -- the batch is atomic"}
 
-    index_map = _index_map(cfg)
-    rows = []
-    for ticker, merged, scan_date, fired in graded:
-        rows.append({
-            # Lists as JSON, exactly as `history_rows` writes them: a bare list
-            # reaches the CSV as Python repr, which `ledger._as_list` cannot read
-            # back, so a vetoed pick would lose its veto on the position.
-            **{k: (json.dumps(v) if isinstance(v, list) else v)
-               for k, v in merged.items()},
-            "scan_date": scan_date,
-            "config_key": CONFIG_KEY,
-            "ticker": ticker,
-            "Setup": SETUP_VALUE,
-            "Missing": "",
-            "Trigger": fired or TRIGGER_NONE,
+    rows = [scanner_common.signal_row(
+        merged, scan_date, CONFIG_KEY, ticker, SETUP_VALUE, fired, **{
             "Industry": row[BUCKET_COL],
             "Industry Flag": row["flag"],
             "Industry PE Z": row["pe_z"],
             "Industry Multiple Chg %": row["multiple_chg_pct"],
             "Industry Earnings Chg %": row["earnings_chg_pct"],
-            INDEX_COL: index_map.get(ticker, ""),
-        })
-
-    path = signals_csv_path(cfg)
-    merge_history_csv(path, rows, HISTORY_KEYS, protect=VERDICT_COLS)
+        }) for ticker, merged, scan_date, fired in graded]
+    path = scanner_common.record_signal_rows(rows, cfg)
     log_step("VALUATION", "ok",
              f"{row[BUCKET_COL]}: {len(rows)} pick(s) -> {path.name}", cfg=cfg)
     return {"recorded": True, "picks": len(rows), "bucket": row[BUCKET_COL],
             "flag": row["flag"], "tickers": [t for t, _, _, _ in graded],
             "signals_csv": str(path), "note": ""}
-
-
-def _index_map(cfg: dict) -> dict:
-    """ticker -> index_name, for the `Index` column. Fail-open to blank: S&P
-    rewrites membership at every rebalance, so this is not reconstructable
-    later -- but losing it must not cost the whole record."""
-    try:
-        frame = universe_constituents(cfg)
-        return dict(zip(frame["ticker"], frame["index_name"]))
-    except Exception as exc:  # noqa: BLE001
-        log_step("VALUATION", "warn", f"index map: {exc}", cfg=cfg)
-        return {}
 
 
 # --------------------------------------------------------------------------

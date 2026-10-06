@@ -644,6 +644,25 @@ def universe_tickers(cfg: dict, alert_only: bool = False) -> list[str]:
     return universe_constituents(cfg, alert_only=alert_only)["ticker"].tolist()
 
 
+def index_map(cfg: dict, constituents: pd.DataFrame | None = None) -> dict:
+    """ticker -> index name, for the `Index` column every signal row records.
+
+    Pass `constituents` when the caller already fetched them; otherwise this
+    fetches. Fail-open to `{}`: S&P rewrites membership at every rebalance, so
+    the column cannot be reconstructed later, but losing it must never cost the
+    record. A ticker outside every index maps to nothing, which reads as "".
+    """
+    try:
+        frame = (universe_constituents(cfg) if constituents is None
+                 else constituents)
+    except Exception as exc:  # noqa: BLE001 - a missing label is not a failure
+        log_step("UNIVERSE", "warn", f"no index membership ({exc})", cfg=cfg)
+        return {}
+    if frame.empty:
+        return {}
+    return dict(zip(frame["ticker"], frame["index_name"]))
+
+
 # The US equity session, in exchange-local time. Named constants because the
 # rule below is about a *session*, not about a clock reading on this box --
 # the scanner runs in Israel, seven hours ahead, which is exactly how an
@@ -877,6 +896,36 @@ def download_price_data(tickers: list[str], period: str, interval: str) -> pd.Da
         # on-demand single-ticker scan.
         data.columns = pd.MultiIndex.from_product([data.columns, list(tickers)])
     return drop_unsettled_bars(data)
+
+
+def closes_with_benchmark(tickers: list[str], cfg: dict, period: str,
+                          phase: str = "DOWNLOAD", benchmark: bool = True,
+                          download=None):
+    """One bulk close panel for `tickers`, plus the benchmark series.
+
+    Returns `(closes, benchmark_series)`; both are None when the download
+    fails, and the series is None when the benchmark is not in the panel. Fail
+    open: the price-risk metrics then read as missing, and the risk axis says
+    so, rather than the run stopping. `download` lets a caller pass its own
+    (patchable) reference to `download_price_data`.
+    """
+    download = download or download_price_data
+    bench = cfg.get("backtest", {}).get("benchmark_ticker", "SPY")
+    wanted = sorted(set(tickers) | ({bench} if benchmark else set()))
+    try:
+        panel = download(wanted, period,
+                         cfg.get("data", {}).get("download_interval", "1d"))
+        closes = panel["Close"]
+    except Exception as exc:  # noqa: BLE001 - costs the price metrics, nothing else
+        log_step(phase, "failed", f"{period} closes: {exc} -- price risk will "
+                 "read as missing", cfg=cfg)
+        return None, None
+    series = (closes[bench] if benchmark and bench in closes.columns else None)
+    log_step(phase, "ok", f"{period} closes for {closes.shape[1]} ticker(s), "
+             f"{closes.shape[0]} bars"
+             + (f" -- no {bench}, no beta" if benchmark and series is None
+                else ""), cfg=cfg)
+    return closes, series
 
 
 def warmup_months(window: int) -> int:
@@ -1388,6 +1437,44 @@ def read_table(path) -> pd.DataFrame:
     except pd.errors.EmptyDataError:
         return pd.DataFrame()
     return frame.dropna(how="all")
+
+
+# A named pick (theme or industry valuation) records which screens also fired
+# for it. "No screen fired" is spelled out because "" round-trips through CSV
+# as NaN and `groupby` silently drops NaN -- the very cohort the column exists
+# to isolate, the picks found before the tape did.
+TRIGGER_COL = "Trigger"
+TRIGGER_NONE = "none"
+
+
+def signal_row(hit: dict, scan_date: str, config_key: str, ticker: str,
+               setup: str, trigger: str = "", **extra) -> dict:
+    """One `signals.csv` row for a *named* pick, encoded exactly as
+    `history_rows` encodes a screen's row.
+
+    Lists go in as JSON. A bare list reaches the CSV as Python repr, which the
+    ledger cannot parse back, so a vetoed pick would silently lose its veto on
+    the position. `extra` holds the recording module's own columns.
+    """
+    row = {"scan_date": scan_date, "config_key": config_key, "ticker": ticker}
+    row.update({k: (json.dumps(v) if isinstance(v, list) else v)
+                for k, v in hit.items()})
+    row.update({"Setup": setup, "Missing": "",
+                TRIGGER_COL: trigger or TRIGGER_NONE})
+    row.update(extra)
+    return row
+
+
+def record_signal_rows(rows: list[dict], cfg: dict) -> Path:
+    """Merge named-pick rows into `signals.csv`; return its path.
+
+    `protect=VERDICT_COLS` for the reason `archive_scan` passes it: tier 3 may
+    already have written a verdict into one of these rows, and a re-record must
+    not erase it.
+    """
+    path = signals_csv_path(cfg)
+    merge_history_csv(path, rows, HISTORY_KEYS, protect=VERDICT_COLS)
+    return path
 
 
 def merge_history_csv(path: Path, rows: list[dict], keys: list[str],

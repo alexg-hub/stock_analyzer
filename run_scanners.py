@@ -46,6 +46,7 @@ from scanner_common import (
     archive_scan,
     build_embeds,
     build_hits_payload,
+    closes_with_benchmark,
     download_price_data,
     enable_utf8_output,
     load_config,
@@ -53,6 +54,7 @@ from scanner_common import (
     output_dir,
     prune_run_logs,
     run_id,
+    index_map,
     send_discord_alert,
     universe_constituents,
     universe_label,
@@ -83,22 +85,72 @@ def parse_args(argv: list[str] | None = None):
     return parser.parse_args(argv)
 
 
-def scan_ticker(ticker: str, cfg: dict) -> dict:
+def run_screens(data: pd.DataFrame, cfg: dict, on_demand: bool = False) -> list:
+    """Every registered screen over one panel, as `(module, ScanResult)` pairs.
+
+    The nightly path keeps a screen that fired nothing (the alert says "nothing
+    today") and skips a disabled one. The on-demand path is the reverse: it runs
+    a disabled screen too -- you asked about this ticker, and a screen is
+    switched off precisely when you most want to see what it would have said --
+    and keeps only the screens that fired.
+    """
+    results = []
+    for module in SCANNERS:
+        strategy = cfg.get(module.CONFIG_KEY)
+        if not strategy:
+            log_step("SCREEN", "skip",
+                     f"no '{module.CONFIG_KEY}' section in config.json", cfg=cfg)
+            continue
+        enabled = strategy.get("enabled", True)
+        if not enabled and not on_demand:
+            # Recorded, not silent: a screen switched off is the most likely
+            # explanation for a night that found nothing.
+            log_step("SCREEN", "off", f"{module.CONFIG_KEY} disabled in config",
+                     cfg=cfg)
+            continue
+        result = module.scan(data, strategy)
+        if on_demand:
+            if result.hits.empty:
+                continue
+            if not enabled:
+                result.title += " [screen disabled nightly]"
+        results.append((module, result))
+    return results
+
+
+def grade(results: list, cfg: dict, data: pd.DataFrame, index_of: dict) -> None:
+    """Tier 2, once, onto every hit: fundamentals, `Index`, badge, veto, plane.
+
+    The one grading pass both paths share. The badge, the hand-off and the
+    Discord card all read the columns written here, so they cannot disagree.
+    `Index` is recorded on every row because S&P rewrites membership at each
+    rebalance, so it cannot be reconstructed later.
+    """
+    wanted = list(dict.fromkeys(t for _, r in results for t in r.hits.index))
+    closes, benchmark = price_history(wanted, cfg, data)
+    fundamentals = quality.fetch_fast(wanted, cfg, closes=closes,
+                                      benchmark=benchmark)
+    for _, result in results:
+        if not fundamentals.empty:
+            result.hits = result.hits.join(fundamentals)
+        if not result.hits.empty:
+            result.hits[INDEX_COL] = [index_of.get(t, "")
+                                      for t in result.hits.index]
+        quality.annotate(result.hits, cfg)
+    log_quality(results, cfg)
+
+
+def scan_ticker(ticker: str, cfg: dict, index_of: dict | None = None) -> dict:
     """Run tiers 1 and 2 for one named ticker, on demand.
 
     Returns a payload in exactly the `latest_hits.json` shape, so
     `research_report.find_ticker` and everything behind it handle an ad-hoc
-    look and a nightly signal without knowing which they got.
+    look and a nightly signal without knowing which they got. Tier 2 is graded
+    whether or not a screen fires: when nothing fires the payload carries one
+    `Setup: "none"` row holding the fundamentals.
 
-    Two deliberate differences from the nightly scan:
-
-    * **`enabled` is ignored**, as `backtest_universe.py` and `tune_screen.py`
-      already ignore it. That flag gates the nightly *alert*; here you asked
-      about this ticker specifically, and a screen is switched off precisely
-      when you most want to see what it would have said. Its title says so.
-    * **Tier 2 is graded whether or not a screen fires.** The quality check is
-      the point of an on-demand look, so when nothing fires the payload still
-      carries one row -- `Setup: "none"` -- holding the fundamentals.
+    `index_of` saves a batch caller one Wikipedia fetch per ticker; without it
+    this fetches the index membership itself.
     """
     ticker = ticker.upper()
     data = download_price_data(
@@ -107,24 +159,11 @@ def scan_ticker(ticker: str, cfg: dict) -> dict:
         interval=cfg["data"]["download_interval"],
     )
     # From the price data, never from latest_hits.json: this is the last
-    # *settled* bar (drop_unsettled_bars already ran), and it makes a re-look
-    # next week a new row rather than a collision with today's.
+    # *settled* bar, and it makes a re-look next week a new row rather than a
+    # collision with today's.
     scan_date = data.index[-1].date()
 
-    results = []
-    for module in SCANNERS:
-        strategy = cfg.get(module.CONFIG_KEY)
-        if not strategy:
-            log_step("SCREEN", "skip",
-                     f"no '{module.CONFIG_KEY}' section in config.json", cfg=cfg)
-            continue
-        result = module.scan(data, strategy)
-        if result.hits.empty:
-            continue
-        if not strategy.get("enabled", True):
-            result.title += " [screen disabled nightly]"
-        results.append((module, result))
-
+    results = run_screens(data, cfg, on_demand=True)
     if not results:
         log_step("SCREEN", "none", f"{ticker}: no screen fires -- tier 2 only",
                  cfg=cfg)
@@ -134,20 +173,60 @@ def scan_ticker(ticker: str, cfg: dict) -> dict:
         results = [(SimpleNamespace(CONFIG_KEY=NO_SIGNAL_KEY),
                     ScanResult(title=NO_SIGNAL_TITLE, hits=row))]
 
-    # -- tier 2, the same two steps and the same single grading call as main() --
-    # Same price-history call as the nightly path, so an ad-hoc look and a
-    # signalling night put the same ticker at the same point on the plane.
-    closes, benchmark = price_history([ticker], cfg, data)
-    fundamentals = quality.fetch_fast([ticker], cfg, closes=closes,
-                                      benchmark=benchmark)
-    if not fundamentals.empty:
-        for _, result in results:
-            result.hits = result.hits.join(fundamentals)
-    for _, result in results:
-        quality.annotate(result.hits, cfg)
-    log_quality(results, cfg)
-
+    grade(results, cfg, data, index_map(cfg) if index_of is None else index_of)
     return build_hits_payload(scan_date, results)
+
+
+def grade_named(ticker: str, cfg: dict, index_of: dict) -> tuple[dict, str, str]:
+    """Tiers 1+2 for a ticker someone *named*: `(row, scan_date, fired)`.
+
+    The theme screen and the industry-valuation screen both record picks this
+    way. Every number on the row is computed here, after the pick was made.
+    `fired` lists the screens that also fired, which is what lets tier 4 split
+    "found before the tape did" from "found after". Raises `ValueError` for a
+    symbol with no bars -- a foreign listing or one that does not exist is
+    refused rather than written into a table tier 4 buys from.
+    """
+    ticker = ticker.upper()
+    try:
+        payload = scan_ticker(ticker, cfg, index_of=index_of)
+    except Exception as exc:  # noqa: BLE001 - a bad symbol is a refusal, not a crash
+        raise ValueError(f"{ticker}: could not be scanned ({exc})") from exc
+    merged, fired = {}, []
+    for screen in payload.get("screens") or []:
+        hit = (screen.get("hits") or {}).get(ticker)
+        if hit is None:
+            continue
+        key = screen.get("config_key")
+        if key and key != NO_SIGNAL_KEY:
+            fired.append(key)
+        # Union across screens: the tier-2 columns are identical, the
+        # per-screen stat columns are not, and the row may as well carry both.
+        merged.update(hit)
+    scan_date = str(payload.get("scan_date") or "")
+    if not merged or not scan_date:
+        raise ValueError(f"{ticker}: no price data -- not US-listed, or does "
+                         "not exist")
+    merged.setdefault(INDEX_COL, index_of.get(ticker, ""))
+    return merged, scan_date, ",".join(fired)
+
+
+def grade_batch(tickers: list[str], cfg: dict) -> tuple[list, list]:
+    """`grade_named` over a batch: `(graded, problems)`, every problem listed.
+
+    `graded` holds `(ticker, row, scan_date, fired)`. The caller writes nothing
+    unless `problems` is empty -- a theme is a chain and an industry a cohort,
+    so half of one on the record is misleading rather than partial. One index
+    fetch for the whole batch.
+    """
+    index_of = index_map(cfg)
+    graded, problems = [], []
+    for ticker in tickers:
+        try:
+            graded.append((ticker.upper(), *grade_named(ticker, cfg, index_of)))
+        except ValueError as exc:
+            problems.append(str(exc))
+    return graded, problems
 
 
 def price_history(tickers: list[str], cfg: dict, fallback=None):
@@ -169,27 +248,13 @@ def price_history(tickers: list[str], cfg: dict, fallback=None):
     back to the scan's panel with no benchmark, which costs the long-window and
     beta readings and nothing else.
     """
-    if not tickers:
-        return (fallback.get("Close") if fallback is not None else None), None
-    benchmark_ticker = cfg.get("backtest", {}).get("benchmark_ticker", "SPY")
-    period = quality.price_history_period(cfg)
-    try:
-        panel = download_price_data(
-            sorted(set(tickers) | {benchmark_ticker}), period,
-            cfg["data"]["download_interval"])
-        closes = panel["Close"]
-        series = (closes[benchmark_ticker]
-                  if benchmark_ticker in closes.columns else None)
-        log_step("DOWNLOAD", "ok",
-                 f"{period} closes for price risk: {closes.shape[1]} ticker(s)"
-                 + ("" if series is not None
-                    else f" -- no {benchmark_ticker}, no beta"), cfg=cfg)
-        return closes, series
-    except Exception as exc:  # noqa: BLE001 - never costs more than two metrics
-        log_step("DOWNLOAD", "failed",
-                 f"price-risk history: {exc} -- falling back to the scan panel",
-                 cfg=cfg)
-        return (fallback.get("Close") if fallback is not None else None), None
+    if tickers:
+        closes, series = closes_with_benchmark(
+            tickers, cfg, quality.price_history_period(cfg),
+            download=download_price_data)
+        if closes is not None:
+            return closes, series
+    return (fallback.get("Close") if fallback is not None else None), None
 
 
 def log_quality(results: list, cfg: dict) -> None:
@@ -255,32 +320,6 @@ def run_ledger(cfg: dict) -> tuple[list, list]:
     except Exception as exc:  # noqa: BLE001
         log_step("EXIT", "failed", f"{type(exc).__name__}: {exc}", cfg=cfg)
         return [], []
-
-
-def carry_verdicts_to_ledger(cfg: dict) -> None:
-    """Re-sync the ledger after the verdicts are recorded.
-
-    Ordering problem this closes: `run_ledger` has to run *before*
-    `run_verdicts` (the exit cards must exist before the message is built, and
-    the exit scan needs filled entry prices), but the verdict is written to
-    `signals.csv` after that -- so without this the tier and conviction would
-    sit on the position only from tomorrow's run. The verdict is exactly the
-    attribute tier 4 exists to grade. A trailing `mark` in the old narrative
-    `.bat` used to carry it across; that file is gone, so this is the only thing
-    that does.
-
-    `sync` alone, not `mark`: it copies the source row verbatim (verdict
-    columns included) and needs no network, which the prices already had.
-    """
-    if not cfg.get("portfolio", {}).get("enabled", True):
-        return
-    from portfolio_sim import ledger
-
-    try:
-        ledger.sync(cfg)
-    except Exception as exc:  # noqa: BLE001 - bookkeeping must not sink the alert
-        log_step("LEDGER", "failed",
-                 f"verdict carry: {type(exc).__name__}: {exc}", cfg=cfg)
 
 
 def run_verdicts(payload: dict, cfg: dict) -> tuple[list, list, list]:
@@ -356,51 +395,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     scan_date = data.index[-1].date()
 
-    # -- run every enabled screen on the one shared download --
-    results = []  # (module, ScanResult)
-    for module in SCANNERS:
-        strategy = cfg.get(module.CONFIG_KEY)
-        if not strategy:
-            log_step("SCREEN", "skip",
-                     f"no '{module.CONFIG_KEY}' section in config.json", cfg=cfg)
-            continue
-        if not strategy.get("enabled", True):
-            # Recorded, not silent: a screen switched off is the most likely
-            # explanation for a night that found nothing.
-            log_step("SCREEN", "off", f"{module.CONFIG_KEY} disabled in config",
-                     cfg=cfg)
-            continue
-        results.append((module, module.scan(data, strategy)))
-
-    # -- one `fast` quality pass for every signalling ticker of every screen --
-    wanted = []
-    for _, result in results:
-        for ticker in result.hits.index:
-            if ticker not in wanted:
-                wanted.append(ticker)
-    closes, benchmark = price_history(wanted, cfg, data)
-    fundamentals = quality.fetch_fast(wanted, cfg, closes=closes,
-                                      benchmark=benchmark)
-    if not fundamentals.empty:
-        for _, result in results:
-            result.hits = result.hits.join(fundamentals)
-
-    # -- which index each signal came from, recorded on the row. Same rule as
-    #    `Setup`: index membership is rewritten by S&P at every rebalance, so
-    #    it is not recoverable after the fact, and it is the only thing that
-    #    lets tier 4 ever ask whether mid-cap signals behaved differently --
-    index_of = dict(zip(constituents["ticker"], constituents["index_name"])) \
-        if not constituents.empty else {}
-    for _, result in results:
-        if not result.hits.empty:
-            result.hits[INDEX_COL] = [index_of.get(t, "")
-                                      for t in result.hits.index]
-
-    # -- tier 2: grade the fundamentals once, here. Both the Discord badge and
-    #    the hand-off read the recorded verdict, so they cannot disagree --
-    for _, result in results:
-        quality.annotate(result.hits, cfg)
-    log_quality(results, cfg)
+    results = run_screens(data, cfg)   # (module, ScanResult)
+    grade(results, cfg, data, index_map(cfg, constituents))
 
     for _, result in results:
         if not result.hits.empty:
@@ -417,13 +413,11 @@ def main(argv: list[str] | None = None) -> int:
     payload = write_latest_hits(hits_path, scan_date, results)
     archive_scan(payload, cfg)
 
-    # -- tiers 4 and 3, in this process, before anything is posted. Everything
-    #    from here on is deterministic, so it can all go out together; see
-    #    run_ledger / run_verdicts for why each is individually fail-safe --
-    exit_embeds, exit_charts = run_ledger(cfg)
+    # -- tiers 3 and 4, in this process, before anything is posted. Verdicts
+    #    first, so the ledger opens tonight's positions with tonight's verdict
+    #    already on the row. Each step is individually fail-safe --
     verdicts, verdict_embeds, verdict_charts = run_verdicts(payload, cfg)
-    if verdicts:
-        carry_verdicts_to_ledger(cfg)
+    exit_embeds, exit_charts = run_ledger(cfg)
 
     all_empty = all(r.hits.empty for _, r in results)
     if (all_empty and not exit_embeds

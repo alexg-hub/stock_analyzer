@@ -55,16 +55,17 @@ from pathlib import Path
 
 import pandas as pd
 
+import scanner_common
+from agent_records import JudgmentSchema
+from agent_records import read_one as _read_one
 from newsfeed import is_enabled, section, theme_names, themes_dir
 from scanner_common import (
-    HISTORY_KEYS,
     INDEX_COL,
-    VERDICT_COLS,
+    TRIGGER_COL,  # noqa: F401 - re-exported for callers of this module
+    TRIGGER_NONE,
     log_step,
     merge_history_csv,
     read_table,
-    signals_csv_path,
-    universe_constituents,
 )
 
 # The `config_key` every theme row carries. Not a `*_strategy` section: there
@@ -133,14 +134,6 @@ EXPOSURE_COL = "Exposure"
 HORIZON_COL = "Horizon"
 CONFIDENCE_COL = "Confidence"
 EVIDENCE_COL = "Evidence"
-TRIGGER_COL = "Trigger"
-
-# What `Trigger` says when no technical screen fired on a pick. An explicit
-# value rather than "", because "" round-trips through CSV as NaN and pandas
-# `groupby` drops NaN silently -- which would discard exactly the cohort this
-# column exists to isolate, the picks the AI found *before* the tape did. Same
-# rule the registry draws everywhere else: not-measured must be nameable.
-TRIGGER_NONE = "none"
 
 SIGNAL_FIELDS = {
     "theme": THEME_COL,
@@ -158,6 +151,14 @@ SIGNAL_FIELDS = {
 BANNED_FIELDS = ("conviction", "tier", "score", "narrative_adj", "Verdict",
                  "Conviction", "Quality", "Reward", "Risk", "Quadrant",
                  "price_target", "target_price")
+
+SCHEMA = JudgmentSchema(
+    columns=tuple(COLUMNS), required=REQUIRED, vocabularies=VOCABULARIES,
+    list_fields=LIST_FIELDS, banned=BANNED_FIELDS,
+    banned_reason=("this screen identifies candidates, it never grades them; "
+                   "every number on a theme row is computed by the registry "
+                   "after the pick"),
+    counts={"sources_n": "sources", "risks_n": "risks"})
 
 
 # --------------------------------------------------------------------------
@@ -227,38 +228,11 @@ def snapshot_evidence(theme: str, scan_date: str, cfg: dict) -> tuple[str, int]:
 def validate(row: dict, cfg: dict | None = None) -> list[str]:
     """Everything wrong with a proposed pick; empty means it is recordable.
 
-    Strict for the reason `enrichment.validate` is strict: every case here
-    fails *silently* downstream. An unknown `chain_role` reaches `analyze` as
-    its own cohort of one; a single-source event is an unverified rumour that
-    reads exactly like a corroborated fact once it is a row in a CSV.
+    The shared schema check, plus two rules only a theme has: corroboration
+    (an event with one source is a rumour) and a configured theme name.
     """
-    problems = []
-    for field in REQUIRED:
-        value = row.get(field)
-        if isinstance(value, (list, tuple)):
-            if not value:
-                problems.append(f"{field} is required")
-            continue
-        if not str(value or "").strip():
-            problems.append(f"{field} is required")
+    problems = SCHEMA.validate(row)
 
-    for field, allowed in VOCABULARIES.items():
-        value = row.get(field)
-        if value in (None, ""):
-            continue
-        if str(value).lower() not in allowed:
-            problems.append(
-                f"{field}={value!r} is not one of {', '.join(allowed)}")
-
-    for field in LIST_FIELDS:
-        value = row.get(field)
-        if value in (None, ""):
-            continue
-        if not isinstance(value, (list, tuple)):
-            problems.append(f"{field} must be a list, got {type(value).__name__}")
-
-    # Corroboration is the whole difference between an event and a rumour, and
-    # it is the one rule here a session is most likely to want to bend.
     minimum = int((section(cfg or {}) or {}).get("min_sources", 2))
     sources = row.get("sources")
     if isinstance(sources, (list, tuple)) and 0 < len(sources) < minimum:
@@ -274,110 +248,12 @@ def validate(row: dict, cfg: dict | None = None) -> list[str]:
             problems.append(
                 f"theme={theme!r} is not configured -- one of {', '.join(known)}"
                 " (add it to theme_screen.themes in config.json first)")
-
-    unknown = set(row) - set(COLUMNS)
-    if unknown:
-        problems.append(f"unknown field(s): {', '.join(sorted(unknown))}")
-
-    for banned in BANNED_FIELDS:
-        if banned in row:
-            problems.append(
-                f"{banned!r} is not a theme field -- this screen identifies "
-                "candidates, it never grades them. Every number on a theme row "
-                "is computed after the pick, by the registry.")
-
     return problems
 
 
 def normalize(row: dict) -> dict:
     """A validated pick in storage form: vocabularies lowered, lists JSON."""
-    out = {}
-    for key, value in row.items():
-        if key in VOCABULARIES and value not in (None, ""):
-            value = str(value).lower()
-        elif key in LIST_FIELDS:
-            value = json.dumps(list(value or []), ensure_ascii=False)
-        out[key] = value
-
-    out.setdefault("sources_n", len(row.get("sources") or []))
-    out.setdefault("risks_n", len(row.get("risks") or []))
-    # Stamped rather than asked for, like `enrichment.normalize`: `scan_date` is
-    # the bar the pick was graded against and cannot answer "when was this
-    # judgment formed".
-    out.setdefault("agent_date", date.today().isoformat())
-    out["ticker"] = str(out.get("ticker", "")).upper()
-    out["scan_date"] = str(out.get("scan_date", ""))
-    return {c: out.get(c) for c in COLUMNS if c in out}
-
-
-# --------------------------------------------------------------------------
-# Grading a pick -- the deterministic half
-# --------------------------------------------------------------------------
-
-def _graded(ticker: str, cfg: dict) -> tuple[dict, str, str]:
-    """Run tiers 1+2 for one pick. Returns `(row, scan_date, trigger)`.
-
-    Raises `ValueError` when the ticker has no price data -- which is the guard
-    against a hallucinated symbol and against the foreign listings IBKR's theme
-    graph returns. Everything numeric on a theme row originates here, *after*
-    the pick was made, so the record cannot influence its own grade.
-
-    A ticker that also fired a screen keeps that screen's name in `trigger`:
-    free at record time, and the natural cohort split for "did the AI find it
-    before or after the tape did".
-    """
-    import run_scanners
-
-    try:
-        payload = run_scanners.scan_ticker(ticker, cfg)
-    except Exception as exc:  # noqa: BLE001 - a bad symbol is a refusal, not a crash
-        raise ValueError(
-            f"{ticker}: could not be scanned ({exc}). A symbol with no bars is "
-            "either not US-listed or does not exist -- refused rather than "
-            "recorded.") from exc
-    screens = payload.get("screens") or []
-
-    merged: dict = {}
-    fired = []
-    for screen in screens:
-        key = screen.get("config_key")
-        hit = (screen.get("hits") or {}).get(ticker.upper())
-        if hit is None:
-            continue
-        if key and key != run_scanners.NO_SIGNAL_KEY:
-            fired.append(key)
-        # Union across screens: the tier-2 columns are identical, the per-screen
-        # stat columns are not, and a theme row may as well carry both.
-        merged.update(hit)
-
-    if not merged:
-        raise ValueError(
-            f"{ticker}: no price data -- refused. A symbol with no bars is "
-            "either not US-listed (the theme graph returns Milan, Copenhagen "
-            "and NSE listings) or does not exist.")
-
-    return merged, str(payload.get("scan_date") or ""), ",".join(fired)
-
-
-def _index_map(cfg: dict) -> dict:
-    """ticker -> index name, for the `Index` column the nightly scan records.
-
-    A theme pick may sit outside the S&P 500/400 entirely -- that is the point
-    of allowing any US listing -- and an empty `Index` is exactly how a row says
-    so. Recording it is what makes "did the off-index picks pay?" answerable
-    later; S&P rewrites membership at every rebalance, so it is not
-    reconstructable after the fact. Same argument as `Setup`.
-
-    Fail-open: an unreachable index page costs the column, never the record.
-    """
-    try:
-        constituents = universe_constituents(cfg)
-        if constituents.empty:
-            return {}
-        return dict(zip(constituents["ticker"], constituents["index_name"]))
-    except Exception as exc:  # noqa: BLE001 - a missing label is not a failure
-        log_step("THEME", "warn", f"no index membership ({exc})", cfg=cfg)
-        return {}
+    return SCHEMA.normalize(row)
 
 
 # --------------------------------------------------------------------------
@@ -429,17 +305,18 @@ def record(theme: str, event: str, picks: list[dict], cfg: dict,
     if problems:
         raise ValueError("; ".join(problems))
 
-    # -- grade every pick before writing anything, for the same reason --------
-    graded = []
-    for row in rows:
-        ticker = str(row["ticker"]).upper()
-        hit, scan_date, trigger = _graded(ticker, cfg)
-        if not scan_date:
-            raise ValueError(f"{ticker}: no settled bar to date the pick from")
-        graded.append((dict(row, ticker=ticker, scan_date=scan_date), hit,
-                       trigger))
+    # -- grade every pick before writing anything, for the same reason. This is
+    #    also the tradeability guard: IBKR's theme graph returns Milan,
+    #    Copenhagen and NSE listings, and a symbol with no bars is refused --
+    import run_scanners
 
-    index_of = _index_map(cfg)
+    scanned, refused = run_scanners.grade_batch(
+        [str(row["ticker"]) for row in rows], cfg)
+    if refused:
+        raise ValueError("refused: " + "; ".join(refused))
+    graded = [(dict(row, ticker=ticker, scan_date=scan_date), hit, fired)
+              for row, (ticker, hit, scan_date, fired) in zip(rows, scanned)]
+
     # One snapshot per (theme, scan_date), taken once for the batch: every pick
     # in it was made from the same events, and writing it per ticker would be
     # the same file five times.
@@ -452,33 +329,18 @@ def record(theme: str, event: str, picks: list[dict], cfg: dict,
                            "evidence_n": evidence_n})
         theme_rows.append(clean)
 
-        signal_row = {
-            "scan_date": clean["scan_date"],
-            "config_key": CONFIG_KEY,
-            "screen": f"AI theme: {theme}",
-            "ticker": clean["ticker"],
-        }
-        for key, value in hit.items():
-            signal_row[key] = (json.dumps(value) if isinstance(value, list)
-                               else value)
-        signal_row["Setup"] = SETUP_VALUE
-        signal_row["Missing"] = ""
-        for field, column in SIGNAL_FIELDS.items():
-            signal_row[column] = clean.get(field) or ""
-        signal_row[TRIGGER_COL] = trigger or TRIGGER_NONE
-        signal_row[INDEX_COL] = index_of.get(clean["ticker"], "")
+        signal_row = scanner_common.signal_row(
+            hit, clean["scan_date"], CONFIG_KEY, clean["ticker"], SETUP_VALUE,
+            trigger, screen=f"AI theme: {theme}",
+            **{column: clean.get(field) or ""
+               for field, column in SIGNAL_FIELDS.items()})
         signal_rows.append(signal_row)
         recorded.append({"ticker": clean["ticker"],
                          "scan_date": clean["scan_date"],
                          "trigger": trigger or TRIGGER_NONE,
                          "index": signal_row[INDEX_COL] or "off-index"})
 
-    # `protect=VERDICT_COLS` for the same reason `archive_scan` passes it: tier
-    # 3 writes the verdict into a row this created, and a re-record must not
-    # erase it.
-    signals_path = signals_csv_path(cfg)
-    merge_history_csv(signals_path, signal_rows, HISTORY_KEYS,
-                      protect=VERDICT_COLS)
+    signals_path = scanner_common.record_signal_rows(signal_rows, cfg)
     themes_path = themes_csv_path(cfg)
     merge_history_csv(themes_path, theme_rows, THEME_KEYS)
 
@@ -488,7 +350,8 @@ def record(theme: str, event: str, picks: list[dict], cfg: dict,
              + (f"; {evidence_n} event(s) frozen in {evidence_file}"
                 if evidence_file else "; evidence NOT snapshotted"), cfg=cfg)
 
-    verdicts = _record_verdicts(recorded, cfg) if deep else []
+    hits = {row["ticker"]: hit for row, hit, _ in graded}
+    verdicts = _record_verdicts(recorded, hits, theme, cfg) if deep else []
 
     return {
         "recorded": True,
@@ -507,7 +370,8 @@ def record(theme: str, event: str, picks: list[dict], cfg: dict,
     }
 
 
-def _record_verdicts(recorded: list[dict], cfg: dict) -> list[dict]:
+def _record_verdicts(recorded: list[dict], hits: dict, theme: str,
+                     cfg: dict) -> list[dict]:
     """Tier 3's deterministic verdict for each pick, routed to `signals.csv`.
 
     `source=SOURCE_SIGNAL` is the load-bearing argument. `record_verdict` routes
@@ -517,6 +381,10 @@ def _record_verdicts(recorded: list[dict], cfg: dict) -> list[dict]:
     theme row's `Verdict` blank forever. This screen does write a `signals.csv`
     row, so `signal` is the honest answer, and reusing the existing routing
     beats hand-writing the columns.
+
+    The trigger is the row `record` already graded, read back through
+    `find_ticker` exactly as a nightly hit would be, so a pick is scanned once
+    rather than once to record and again to grade.
 
     Fail-open per pick: a verdict is a bonus here, and losing one must never
     cost the record it was meant to annotate.
@@ -529,7 +397,10 @@ def _record_verdicts(recorded: list[dict], cfg: dict) -> list[dict]:
     for entry in recorded:
         ticker = entry["ticker"]
         try:
-            trigger, _, _, _ = research_report.resolve_trigger(ticker, cfg)
+            trigger = research_report.find_ticker(
+                {"screens": [{"title": f"AI theme: {theme}",
+                              "config_key": CONFIG_KEY,
+                              "hits": {ticker: hits[ticker]}}]}, ticker, cfg)
             verdict = research_report.deterministic_verdict(
                 ticker, cfg, trigger, entry["scan_date"],
                 research_report.SOURCE_SIGNAL,
@@ -550,21 +421,7 @@ def _record_verdicts(recorded: list[dict], cfg: dict) -> list[dict]:
 
 def read_one(ticker: str, scan_date: str, cfg: dict) -> dict:
     """One theme row as a plain dict, or `{}` when there is none."""
-    path = themes_csv_path(cfg, create=False)
-    if not path.exists():
-        return {}
-    try:
-        frame = read_table(path)
-    except Exception:  # noqa: BLE001 - an unreadable record is an absent one
-        return {}
-    if frame.empty or not {"ticker", "scan_date"} <= set(frame.columns):
-        return {}
-    hit = frame[(frame["ticker"].astype(str).str.upper() == ticker.upper())
-                & (frame["scan_date"].astype(str) == str(scan_date))]
-    if hit.empty:
-        return {}
-    row = hit.iloc[-1].to_dict()
-    return {k: (None if pd.isna(v) else v) for k, v in row.items()}
+    return _read_one(themes_csv_path(cfg, create=False), ticker, scan_date)
 
 
 def read_recent(cfg: dict, ticker: str | None = None,
@@ -590,15 +447,7 @@ def read_recent(cfg: dict, ticker: str | None = None,
 
 def decode_lists(row: dict) -> dict:
     """The stored row with its JSON list columns decoded, for display."""
-    out = dict(row)
-    for field in LIST_FIELDS:
-        raw = out.get(field)
-        if isinstance(raw, str) and raw:
-            try:
-                out[field] = json.loads(raw)
-            except json.JSONDecodeError:
-                pass
-    return out
+    return SCHEMA.decode_lists(row)
 
 
 # --------------------------------------------------------------------------

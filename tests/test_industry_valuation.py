@@ -78,6 +78,7 @@ CONSTITUENTS = pd.DataFrame({
 })
 
 iv.universe_constituents = lambda _cfg: CONSTITUENTS.copy()
+scanner_common.universe_constituents = iv.universe_constituents   # index_map
 
 
 # --------------------------------------------------------------------------
@@ -438,7 +439,7 @@ GRADED = {"Close": 100.0, "Company": "Stub Corp", "Quality": False,
 KNOWN = {"AAA": "2026-01-05", "BBB": "2026-01-05"}
 
 
-def fake_scan_ticker(ticker: str, _cfg: dict) -> dict:
+def fake_scan_ticker(ticker: str, _cfg: dict, **_) -> dict:
     ticker = ticker.upper()
     if ticker not in KNOWN:
         raise ValueError(f"no price data for {ticker}")

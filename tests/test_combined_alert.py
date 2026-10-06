@@ -257,12 +257,10 @@ c.ok("...and still records the verdict",
      quiet_rows[scanner_common.VERDICT_COL].notna().sum() >= 1,
      "the record is the point; the notification is not")
 
-# The ordering trap: tier 4 has to run BEFORE the verdict pass (the exit cards
-# must exist before the message is built), but the verdict is written after --
-# so without the re-sync in `carry_verdicts_to_ledger` the tier and conviction
-# would only reach the position on tomorrow's run. The verdict is exactly the
-# attribute tier 4 exists to grade, and the trailing `mark` in the old narrative
-# .bat that used to carry it across no longer exists.
+# The verdict pass runs before the ledger, so the position opened tonight
+# copies a row that already carries tonight's verdict. If the order ever
+# flipped, the tier and conviction would only reach the position on tomorrow's
+# run -- and the verdict is exactly the attribute tier 4 exists to grade.
 from portfolio_sim import ledger as ledger_mod                 # noqa: E402
 
 book = ledger_mod.load_positions(base_cfg)
