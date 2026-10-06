@@ -750,7 +750,7 @@ do: run something, run it safely, or run it without blocking.
 | `universe_quadrant` | the plane from the cache — no network |
 | `enrichment_read` / `enrichment_record` | what the `enrich` skill concluded, and how it is recorded |
 | `theme_research` / `theme_read` / `theme_record` | screen 5: the dated evidence bundle, the record, and the picks **(record prompts)** |
-| `valuation_scan` / `valuation_read` / `valuation_record` | screen 7: industry multiples against their own history **(all prompt)** |
+| `valuation_scan` / `valuation_read` / `valuation_record` | industry multiples against their own history **(record prompts)** |
 | `backtest_universe` / `backtest_ticker` | the profit backtests |
 | `tune_screen` | sweep one screen's thresholds |
 | `config_get` | read config, secrets redacted |
@@ -766,19 +766,14 @@ marking, the tier-3 context bundle — returns a **`job_id`** immediately rather
 blocking the session. Poll `job_status(job_id)`; it returns the tail of that
 run's step log, which is the only progress these runs emit.
 
-**Nine of the 34 are deliberately left off the allow-list in
-`.claude/settings.json`, so they prompt every time:** `run_nightly_scan`,
-`portfolio_exit_scan` and `theme_record`, which can post to the live Discord
-channel or write into `signals.csv`; the three config writers (`config_set`,
-`config_edit`, `config_delete`), which rewrite `config.json`; and the three
-`valuation_*` tools. They also all default to dry-run (`send=False` /
-`confirm=False`), which is the guard that matters — a permission rule that
-fails to match fails silently, but a default cannot.
-
-`valuation_read` is read-only (cache only, no network) and is on that list only
-because it was never added when screen 7 landed; allow-listing it alongside
-`theme_read` and `enrichment_read` would be consistent. Left as-is here rather
-than loosened silently.
+**Seven tools always prompt**, because each can post to Discord, rewrite
+`config.json`, or write into `signals.csv` (the table tier 4 buys from):
+`run_nightly_scan`, `portfolio_exit_scan`, `theme_record`, `valuation_record`,
+`config_set`, `config_edit` and `config_delete`. Every other tool is on the
+allow-list in `.claude/settings.json`, and `tests/test_mcp_server.py` fails if a
+new tool is in neither list. The writers also default to dry-run
+(`send=False` / `confirm=False`), which is the guard that matters: a permission
+rule that fails to match fails silently, but a default cannot.
 
 #### Editing strategy and quality parameters
 

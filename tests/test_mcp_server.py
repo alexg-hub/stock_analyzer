@@ -60,6 +60,24 @@ readers = {"read_report", "list_reports", "tail_log", "read_run_log",
 c.ok("no pure file-reading tools crept back in", not (names & readers),
      ", ".join(sorted(names & readers)) or "none")
 
+# Every tool needs a deliberate permission decision. The rule: a tool prompts
+# when it can post to Discord, rewrite config.json, or write into signals.csv
+# (the table tier 4 buys from); everything else is allowed. A tool in neither
+# list prompts by accident, which is how the valuation tools went unlisted.
+ALWAYS_PROMPT = {"run_nightly_scan", "portfolio_exit_scan", "theme_record",
+                 "valuation_record", "config_set", "config_edit", "config_delete"}
+PREFIX = "mcp__stock_analyzer__"
+settings = json.loads((Path(mcp_server.__file__).parent / ".claude"
+                       / "settings.json").read_text(encoding="utf-8"))
+allowed = {r[len(PREFIX):] for r in settings["permissions"]["allow"]
+           if r.startswith(PREFIX)}
+c.ok("every tool is either allowed or deliberately always-prompt",
+     names == allowed | ALWAYS_PROMPT,
+     f"undecided: {sorted(names - allowed - ALWAYS_PROMPT)}; "
+     f"stale: {sorted((allowed | ALWAYS_PROMPT) - names)}")
+c.ok("no always-prompt tool is allowed", not (allowed & ALWAYS_PROMPT),
+     ", ".join(sorted(allowed & ALWAYS_PROMPT)) or "none")
+
 # --------------------------------------------------------------------------
 c.section("stdout purity -- the stdio-protocol invariant")
 

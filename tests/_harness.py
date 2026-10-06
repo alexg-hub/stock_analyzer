@@ -64,6 +64,26 @@ def redirect_logging(cfg: dict) -> dict:
 
 SKIP = 2
 
+# Under output/ but written by nothing a test exercises: notes made by hand, the
+# MCP server's job logs, config backups. Left in, any of them being touched while
+# a suite runs -- a review, an MCP session -- reads as a test leaking output.
+FINGERPRINT_IGNORE = ("review", "jobs", "config_backups", "skills_zip")
+
+
+def output_fingerprint() -> set:
+    """`(path, mtime)` for every file production code could write under output/.
+
+    Take it before a test body runs and compare after: any difference is a code
+    path that escaped its redirect into the real output directory.
+    """
+    from scanner_common import output_dir
+    root = output_dir(create=False)
+    if not root.exists():
+        return set()
+    return {(str(p.relative_to(root)), p.stat().st_mtime_ns)
+            for p in root.rglob("*")
+            if p.is_file() and p.relative_to(root).parts[0] not in FINGERPRINT_IGNORE}
+
 
 class Checks:
     """OK/FAIL reporter with a nonzero exit when anything failed."""

@@ -25,7 +25,9 @@
       "mcp__stock_analyzer__enrichment_record",
       "mcp__stock_analyzer__combined_report",
       "mcp__stock_analyzer__theme_research",
-      "mcp__stock_analyzer__theme_read"
+      "mcp__stock_analyzer__theme_read",
+      "mcp__stock_analyzer__valuation_scan",
+      "mcp__stock_analyzer__valuation_read"
     ]
   }
 }

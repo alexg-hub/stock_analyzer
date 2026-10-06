@@ -26,28 +26,20 @@ from pathlib import Path
 
 import pandas as pd
 
-from _harness import Checks, busiest_day, cached_panel_or_skip
+from _harness import (Checks, busiest_day, cached_panel_or_skip,
+                      output_fingerprint)
 
 import quality
 import research_report
 import run_scanners
 import scanner_common
-from scanner_common import output_dir
 
 c = Checks("combined alert")
 panel, cfg = cached_panel_or_skip()
 truncated, day = busiest_day(panel, cfg)
 
 
-def fingerprint():
-    root = output_dir(create=False)
-    if not root.exists():
-        return set()
-    return {(str(p.relative_to(root)), p.stat().st_mtime_ns)
-            for p in root.rglob("*") if p.is_file()}
-
-
-OUTPUT_BEFORE = fingerprint()
+OUTPUT_BEFORE = output_fingerprint()
 
 # --------------------------------------------------------------------------
 # A fully redirected config: every path main() writes goes to a temp dir.
@@ -250,6 +242,10 @@ c.ok("...with a conviction beside it",
 quiet_cfg = json.loads(json.dumps(base_cfg))
 quiet_cfg["research"]["auto"]["discord_send"] = False
 quiet_cfg["research"]["history"]["dir"] = str(sandbox / "history_quiet")
+# Charts are checked on the base run only. Every later run asserts routing and
+# fail-safety, and rendering ~165 charts per run at ~0.5 s each was two thirds
+# of the whole suite's wall time.
+quiet_cfg["charts"]["enabled"] = False
 _, quiet_calls = run(quiet_cfg)
 quiet_titles = [e["title"] for e in quiet_calls[0]["embeds"]]
 c.ok("discord_send=false withholds the verdict cards",
@@ -303,6 +299,7 @@ def run_with(broken: dict, cfg_variant):
 
 broken_cfg = json.loads(json.dumps(base_cfg))
 broken_cfg["research"]["history"]["dir"] = str(sandbox / "history_broken")
+broken_cfg["charts"]["enabled"] = False
 
 rc_v, calls_v = run_with({(research_report, "deterministic_verdict"): explode},
                          broken_cfg)
@@ -336,8 +333,12 @@ c.ok("collect=True returns a 3-tuple",
 c.ok("...and posts nothing even with send=True", not posted,
      "the caller owns delivery in the combined message")
 recorded_exits, exit_embeds, exit_charts = result
-c.ok("the frame and the cards agree about emptiness",
-     bool(exit_embeds) or recorded_exits.empty or True)
+# A pending exit gets a card and no sell row (there is no exit price yet), so
+# the invariant is one-directional: every recorded sell has its card.
+alerts_on = base_cfg.get("exit_strategy", {}).get("discord_alert", True)
+c.ok("every sell recorded on this run has a card",
+     not alerts_on or len(exit_embeds) >= len(recorded_exits),
+     f"{len(recorded_exits)} sell(s), {len(exit_embeds)} card(s)")
 
 # --------------------------------------------------------------------------
 c.section("Discord's per-message limits are still respected")
@@ -354,7 +355,7 @@ c.ok("every embed is well formed",
 
 # --------------------------------------------------------------------------
 c.section("the suite leaves the real output/ untouched")
-c.ok("no run wrote into output/", fingerprint() == OUTPUT_BEFORE,
+c.ok("no run wrote into output/", output_fingerprint() == OUTPUT_BEFORE,
      "every path redirected to a temp dir")
 
 raise SystemExit(c.finish())

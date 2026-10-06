@@ -39,7 +39,8 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 import _harness
-from _harness import Checks, busiest_day, cached_panel_or_skip, screens
+from _harness import (Checks, busiest_day, cached_panel_or_skip,
+                      output_fingerprint, screens)
 
 import quality
 import research_report
@@ -74,17 +75,6 @@ truncated, day = busiest_day(panel, cfg)
 # output directory up front so the last check can prove none of those runs
 # leaked into it -- a redirect that covers the hand-off but forgets the
 # archive files test scan days among the user's genuine ones.
-from scanner_common import output_dir
-
-
-def output_fingerprint():
-    root = output_dir(create=False)
-    if not root.exists():
-        return set()
-    return {(str(p.relative_to(root)), p.stat().st_mtime_ns)
-            for p in root.rglob("*") if p.is_file()}
-
-
 OUTPUT_BEFORE = output_fingerprint()
 
 # --------------------------------------------------------------------------

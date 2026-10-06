@@ -17,5 +17,5 @@
   the real `config.json`, and loading the cached panel already logs before a
   test body could redirect anything. Build per-section configs by deep-copying
   the one `config()` handed you, never by calling `load_config()` again.
-  `output_fingerprint()` in `test_signal_contract.py` is the backstop and does
+  `_harness.output_fingerprint()` is the backstop and does
   catch this.
