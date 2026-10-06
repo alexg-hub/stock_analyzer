@@ -22,7 +22,7 @@ these tools cannot drift -- the same arrangement `mcp_tools/enrichment.py` has
 with `enrichment.py`.
 """
 
-from scanner_common import load_config
+from scanner_common import index_map, load_config
 
 
 def research_impl(theme: str | None = None,
@@ -82,7 +82,7 @@ def research_impl(theme: str | None = None,
     # theme and set nowhere, and the ordering does the work: constituents
     # first, then by filing date. Nothing is dropped -- an off-index filer is
     # still a legitimate find, just not the one to read first.
-    index_of = theme_signals._index_map(cfg) if filings else {}
+    index_of = index_map(cfg) if filings else {}
     for hit in filings:
         hit["index"] = index_of.get(hit.get("ticker", ""), "")
     filings.sort(key=lambda h: (bool(h["index"]), h.get("filed", "")),

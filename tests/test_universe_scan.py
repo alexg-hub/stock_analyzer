@@ -297,5 +297,15 @@ c.ok("a --limit run is scoped SCOPE_SUBSET, not SCOPE_UNIVERSE",
      "scope = SCOPE_SUBSET" in after_limit.split("tickers = constituents")[0],
      "it kept the universe scope until 2026-08-13")
 
+# A source that failed to load (Wikipedia rate-limits, a moved page) leaves a
+# "full" pass covering part of the universe. It must not be treated as full.
+only_big = frame[frame["index_name"] == "big"]
+c.ok("a pass missing a configured index names it",
+     universe_scan.missing_sources(two, only_big) == ["mid"],
+     f"{universe_scan.missing_sources(two, only_big)}")
+c.ok("a complete pass is missing nothing",
+     universe_scan.missing_sources(two, frame) == [],
+     f"{universe_scan.missing_sources(two, frame)}")
+
 shutil.rmtree(tmp, ignore_errors=True)
 raise SystemExit(c.finish())

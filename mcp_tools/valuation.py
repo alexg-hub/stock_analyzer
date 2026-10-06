@@ -45,7 +45,10 @@ def read_impl(bucket: str | None = None, flagged_only: bool = False) -> dict:
     return {
         "scan_date": str(table["scan_date"].iat[0]) if len(table) else "",
         "rows": int(len(table)),
-        "buckets": table.where(table.notna(), None).to_dict("records"),
+        # object first: on a float column (an all-unflagged `flag`), `where`
+        # puts NaN back, and NaN is not JSON.
+        "buckets": table.astype(object).where(table.notna(), None)
+                        .to_dict("records"),
         "flagged": table[table["flag"].fillna("") != ""]["bucket"].tolist(),
         "reading_note":
             "price = multiple x earnings. The `*_dlog` columns are log changes "

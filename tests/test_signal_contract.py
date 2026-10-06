@@ -530,7 +530,11 @@ def with_ticker_hole(frame, tickers_, back=_HOLE_BACK):
     return out
 
 
-_few = all_tickers[:max(1, len(all_tickers) // 20)]     # ~5%, as observed
+# ~5%, as observed -- drawn from tickers with bars on both sides of the hole,
+# or a name that was not trading then yields no *interior* hole to count.
+_around = truncated["Close"].iloc[-(_HOLE_BACK + 1):]
+_tradable = [t for t in all_tickers if t in _around and _around[t].notna().all()]
+_few = _tradable[:max(1, len(all_tickers) // 20)]
 _holed = with_ticker_hole(truncated, _few)
 
 _before = _probe.read_text(encoding="utf-8")

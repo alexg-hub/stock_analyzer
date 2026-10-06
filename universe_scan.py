@@ -829,6 +829,19 @@ def write_html(table: pd.DataFrame, cfg: dict, out_path: Path,
     return out_path
 
 
+def missing_sources(cfg: dict, constituents: pd.DataFrame) -> list[str]:
+    """Configured index sources absent from `constituents` (e.g. rate-limited).
+
+    `universe_constituents` fails open per source, so a "full" pass can quietly
+    cover only part of the universe. Such a pass must not publish the
+    whole-index plane or rebuild `peer_stats.json`, which only a complete pass
+    may narrow.
+    """
+    from scanner_common import universe_sources
+    got = set(constituents.get("index_name", pd.Series(dtype=str)))
+    return [s["name"] for s in universe_sources(cfg) if s["name"] not in got]
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     parser.add_argument("--tickers", nargs="*", help="grade only these")
@@ -883,6 +896,13 @@ def main(argv=None) -> int:
             # one branch away and had not.
             scope = SCOPE_SUBSET
             constituents = _limited(constituents, args.limit)
+        lost = missing_sources(cfg, constituents) if not args.limit else []
+        if lost:
+            scope = SCOPE_SUBSET
+            log_step("UNIVERSE", "warn",
+                     f"{', '.join(lost)} could not be read -- graded as a "
+                     "subset; the whole-index plane and peer_stats.json are "
+                     "left as they were", cfg=cfg)
 
     tickers = constituents["ticker"].tolist()
     cache = scan(cfg, tickers, refresh=args.refresh, fetch=not args.no_fetch)

@@ -68,7 +68,8 @@ def quadrant_impl(quadrant: str | None = None, sector: str | None = None,
              if "stage" in table.columns and table["stage"].notna().any()
              else None)
     return {
-        "rows": table.head(limit).where(table.notna(), None).to_dict("records"),
+        "rows": table.head(limit).astype(object).where(table.notna(), None)
+                .to_dict("records"),
         "matched": len(table),
         "counts": counts,
         "stage": stage,
@@ -116,7 +117,7 @@ def risk_research_impl(ticker: str, peers: int = 6) -> dict:
             peer_rows = (group.nlargest(peers, "reward")
                          [["ticker", "company", "reward", "risk", "quadrant",
                            "vetoed"]]
-                         .where(group.notna(), None).to_dict("records"))
+                         .astype(object).where(group.notna(), None).to_dict("records"))
 
     return {
         "ticker": tick,

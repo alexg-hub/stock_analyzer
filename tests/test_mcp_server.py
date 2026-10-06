@@ -34,7 +34,7 @@ c.section("import purity")
 before = sys.stdout
 import mcp_server                                                  # noqa: E402
 from mcp_tools import (backtests, config_tools, deepdive, jobs,  # noqa: E402
-                       portfolio, signals, universe)
+                       portfolio, signals, universe, valuation)
 
 c.ok("importing the server writes nothing to stdout", sys.stdout is before)
 c.ok("import does not mutate global streams (no enable_utf8_output at import)",
@@ -59,6 +59,33 @@ readers = {"read_report", "list_reports", "tail_log", "read_run_log",
            "portfolio_findings", "backtest_results", "tune_results"}
 c.ok("no pure file-reading tools crept back in", not (names & readers),
      ", ".join(sorted(names & readers)) or "none")
+
+# Every `module.attribute` a tool body reaches into must still exist. Tool
+# bodies import project modules lazily and several (theme_research, the deep
+# dives) need the network, so a helper removed from a module surfaces only when
+# someone calls the tool -- `theme_signals._index_map` did exactly that.
+import ast  # noqa: E402
+import importlib  # noqa: E402
+
+_dangling = []
+for _path in sorted((Path(mcp_server.__file__).parent / "mcp_tools").glob("*.py")):
+    _tree = ast.parse(_path.read_text(encoding="utf-8"))
+    _modules = {}
+    for _node in ast.walk(_tree):
+        if isinstance(_node, ast.Import):
+            for _alias in _node.names:
+                _modules[_alias.asname or _alias.name] = _alias.name
+    for _node in ast.walk(_tree):
+        if (isinstance(_node, ast.Attribute) and isinstance(_node.value, ast.Name)
+                and _node.value.id in _modules):
+            try:
+                _mod = importlib.import_module(_modules[_node.value.id])
+            except ImportError:
+                continue
+            if not hasattr(_mod, _node.attr):
+                _dangling.append(f"{_path.name}: {_node.value.id}.{_node.attr}")
+c.ok("every module attribute a tool reaches into exists", not _dangling,
+     ", ".join(sorted(set(_dangling))) or "all resolve")
 
 # Every tool needs a deliberate permission decision. The rule: a tool prompts
 # when it can post to Discord, rewrite config.json, or write into signals.csv
@@ -86,6 +113,7 @@ c.section("stdout purity -- the stdio-protocol invariant")
 # portfolio readers go through pandas CSV loading.
 buffer = io.StringIO()
 errors = []
+results = {}
 with redirect_stdout(buffer):
     for label, fn in (("scan_status", signals.scan_status_impl),
                       ("deepdive_candidates", deepdive.candidates_impl),
@@ -95,14 +123,27 @@ with redirect_stdout(buffer):
                       ("list_jobs", jobs.listing),
                       # Reads a pickle and a CSV through pandas, and reports a
                       # missing cache -- both paths that print in this codebase.
-                      ("universe_quadrant", universe.quadrant_impl)):
+                      ("universe_quadrant", universe.quadrant_impl),
+                      ("valuation_read", valuation.read_impl)):
         try:
-            fn()
+            results[label] = fn()
         except Exception as exc:                      # noqa: BLE001
             errors.append(f"{label}: {type(exc).__name__}: {exc}")
 
 c.ok("read-only tools all return without raising", not errors,
-     "; ".join(errors) or f"{7} called")
+     "; ".join(errors) or f"{len(results)} called")
+
+# A pandas NaN in a tool result is not JSON: `where(notna(), None)` on a float
+# column puts NaN straight back, which is how valuation_read returned
+# `"flag": NaN` for every unflagged industry.
+_not_json = []
+for _label, _result in results.items():
+    try:
+        json.dumps(_result, allow_nan=False, default=str)
+    except ValueError as exc:
+        _not_json.append(f"{_label}: {exc}")
+c.ok("every read-only result is strict JSON (no NaN)", not _not_json,
+     "; ".join(_not_json) or "clean")
 c.ok("no tool wrote to stdout", buffer.getvalue() == "",
      repr(buffer.getvalue()[:200]) if buffer.getvalue() else "clean")
 

@@ -155,8 +155,8 @@ BANNED_FIELDS = ("conviction", "tier", "score", "narrative_adj", "Verdict",
 SCHEMA = JudgmentSchema(
     columns=tuple(COLUMNS), required=REQUIRED, vocabularies=VOCABULARIES,
     list_fields=LIST_FIELDS, banned=BANNED_FIELDS,
-    banned_reason=("this screen identifies candidates, it never grades them; "
-                   "every number on a theme row is computed by the registry "
+    banned_reason=("this screen identifies candidates and never grades them "
+                   "-- every number on a theme row is computed by the registry "
                    "after the pick"),
     counts={"sources_n": "sources", "risks_n": "risks"})
 
