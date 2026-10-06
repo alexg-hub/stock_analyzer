@@ -1372,6 +1372,24 @@ def history_rows(payload: dict) -> list[dict]:
     return rows
 
 
+def read_table(path) -> pd.DataFrame:
+    """One history CSV as a frame; empty when there is nothing to read.
+
+    Missing, zero-byte and headerless files all mean "nothing recorded yet". A
+    quiet night archives no rows, and a bare `pd.read_csv` on what that leaves
+    raises `EmptyDataError` -- which, inside `archive_scan`, would kill every
+    later nightly run. Every read of a history table goes through here.
+    """
+    path = Path(path)
+    if not path.exists() or path.stat().st_size == 0:
+        return pd.DataFrame()
+    try:
+        frame = pd.read_csv(path, dtype={"scan_date": str})
+    except pd.errors.EmptyDataError:
+        return pd.DataFrame()
+    return frame.dropna(how="all")
+
+
 def merge_history_csv(path: Path, rows: list[dict], keys: list[str],
                       protect: list[str] | None = None) -> pd.DataFrame:
     """Merge `rows` into a history table: read, concat, de-duplicate, rewrite.
@@ -1390,8 +1408,12 @@ def merge_history_csv(path: Path, rows: list[dict], keys: list[str],
     the verdict recorded against it, with no error to explain the loss.
     """
     frame = pd.DataFrame(rows)
-    if path.exists():
-        previous = pd.read_csv(path, dtype={"scan_date": str})
+    previous = read_table(path)
+    if frame.empty and previous.empty:
+        # Nothing on file and nothing to add: write nothing, rather than a
+        # headerless file every later read would have to special-case.
+        return frame
+    if not previous.empty:
         carry = [c for c in (protect or []) if c in previous.columns]
         if carry and not frame.empty:
             frame = frame.drop(columns=carry, errors="ignore").merge(
@@ -1425,9 +1447,7 @@ def count_csv_rows(path: Path, match: dict) -> int:
     Read-only, so callers can ask "is this ticker already recorded elsewhere?"
     without rewriting anything.
     """
-    if not path.exists():
-        return 0
-    frame = pd.read_csv(path, dtype={"scan_date": str})
+    frame = read_table(path)
     if frame.empty:
         return 0
     mask = _row_mask(frame, match)
@@ -1447,9 +1467,7 @@ def update_csv_rows(path: Path, match: dict, values: dict) -> int:
     absent: that is an on-demand ticker, which the caller routes to the
     on-demand table instead.
     """
-    if not path.exists():
-        return 0
-    frame = pd.read_csv(path, dtype={"scan_date": str})
+    frame = read_table(path)
     if frame.empty:
         return 0
     mask = _row_mask(frame, match)

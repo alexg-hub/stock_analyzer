@@ -62,6 +62,7 @@ from scanner_common import (
     VERDICT_COLS,
     log_step,
     merge_history_csv,
+    read_table,
     signals_csv_path,
     universe_constituents,
 )
@@ -522,6 +523,8 @@ def _record_verdicts(recorded: list[dict], cfg: dict) -> list[dict]:
     """
     import research_report
 
+    closes, benchmark = research_report.price_inputs(
+        [e["ticker"] for e in recorded], cfg)
     out = []
     for entry in recorded:
         ticker = entry["ticker"]
@@ -529,7 +532,9 @@ def _record_verdicts(recorded: list[dict], cfg: dict) -> list[dict]:
             trigger, _, _, _ = research_report.resolve_trigger(ticker, cfg)
             verdict = research_report.deterministic_verdict(
                 ticker, cfg, trigger, entry["scan_date"],
-                research_report.SOURCE_SIGNAL)
+                research_report.SOURCE_SIGNAL,
+                close=research_report.close_of(closes, ticker),
+                benchmark=benchmark)
             research_report.record_verdict(verdict, cfg)
             out.append({"ticker": ticker, "tier": verdict.get("tier"),
                         "conviction": verdict.get("conviction")})
@@ -549,7 +554,7 @@ def read_one(ticker: str, scan_date: str, cfg: dict) -> dict:
     if not path.exists():
         return {}
     try:
-        frame = pd.read_csv(path, dtype={"scan_date": str})
+        frame = read_table(path)
     except Exception:  # noqa: BLE001 - an unreadable record is an absent one
         return {}
     if frame.empty or not {"ticker", "scan_date"} <= set(frame.columns):
@@ -569,7 +574,7 @@ def read_recent(cfg: dict, ticker: str | None = None,
     if not path.exists():
         return []
     try:
-        frame = pd.read_csv(path, dtype={"scan_date": str})
+        frame = read_table(path)
     except Exception:  # noqa: BLE001
         return []
     if frame.empty:

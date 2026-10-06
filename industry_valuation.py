@@ -54,6 +54,7 @@ panel. `Verdict`/`Conviction` still stay out -- tier 3 owns those.
 
 from __future__ import annotations
 
+import json
 import math
 import pickle
 import time
@@ -821,7 +822,11 @@ def record(bucket: str, cfg: dict, top: int = 0) -> dict:
     rows = []
     for ticker, merged, scan_date, fired in graded:
         rows.append({
-            **merged,
+            # Lists as JSON, exactly as `history_rows` writes them: a bare list
+            # reaches the CSV as Python repr, which `ledger._as_list` cannot read
+            # back, so a vetoed pick would lose its veto on the position.
+            **{k: (json.dumps(v) if isinstance(v, list) else v)
+               for k, v in merged.items()},
             "scan_date": scan_date,
             "config_key": CONFIG_KEY,
             "ticker": ticker,

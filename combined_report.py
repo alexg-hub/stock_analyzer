@@ -113,7 +113,7 @@ def report_path(cfg: dict, scope: str, tickers: list[str],
 
 def _table(path: Path) -> pd.DataFrame:
     """One history table, tolerant of the headerless file a quiet night writes."""
-    from portfolio_sim.ledger import read_table
+    from scanner_common import read_table
     return read_table(path)
 
 

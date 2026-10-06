@@ -612,6 +612,50 @@ c.ok("history.enabled false disables both tables",
      and _quiet(research_report.record_on_demand, payload, TICK, off) is None)
 
 # --------------------------------------------------------------------------
+# Tier 3 must grade the price-risk axis on the same basis the card and the
+# plane do. It used to call `quality.collect` with no benchmark, so `beta` and
+# `downside_beta` never resolved on any verdict -- and with no closes either,
+# every ticker downloaded its own history twice.
+c.section("a verdict batch gets one price download, benchmark included")
+
+bench = od_cfg.get("backtest", {}).get("benchmark_ticker", "SPY")
+with_bench = falling.copy()
+for _field in ("Open", "High", "Low", "Close", "Adj Close", "Volume"):
+    with_bench[(_field, bench)] = falling[(_field, TICK)]
+downloads, seen = [], {}
+saved = (run_scanners.download_price_data, research_report.resolve_trigger,
+         research_report.quality.collect)
+
+
+def _download(tickers, period=None, interval=None):
+    downloads.append(list(tickers))
+    return with_bench
+
+
+def _collect(ticker, cfg_, stage=None, close=None, benchmark=None):
+    seen[ticker] = (close, benchmark)
+    return {}
+
+
+run_scanners.download_price_data = _download
+research_report.resolve_trigger = lambda t, c_: (
+    None, scan_date, research_report.SOURCE_ON_DEMAND, None)
+research_report.quality.collect = _collect
+try:
+    _quiet(research_report.verdicts_for, [TICK], od_cfg)
+finally:
+    (run_scanners.download_price_data, research_report.resolve_trigger,
+     research_report.quality.collect) = saved
+
+close_seen, bench_seen = seen.get(TICK, (None, None))
+c.ok("one download covers the batch and the benchmark",
+     len(downloads) == 1 and bench in downloads[0], f"{downloads}")
+c.ok("the verdict is collected with a benchmark, so beta can resolve",
+     bench_seen is not None and len(bench_seen) == len(falling))
+c.ok("...and with the ticker's own closes, so nothing refetches history",
+     close_seen is not None and len(close_seen) == len(falling))
+
+# --------------------------------------------------------------------------
 # Every tier writes one step log per run. What is pinned here is the shape of
 # the record, never its content: which phases appear, and that a failure is
 # logged *and* re-raised so a caller's existing `except` behaves as before.

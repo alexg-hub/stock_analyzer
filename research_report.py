@@ -402,9 +402,27 @@ def resolve_trigger(ticker: str, cfg: dict) -> tuple:
     return trigger, scan_date, SOURCE_ON_DEMAND, on_demand
 
 
+def price_inputs(tickers: list[str], cfg: dict):
+    """`(closes, benchmark)` for a batch of verdicts: one download, SPY included.
+
+    The same call the nightly card makes (`run_scanners.price_history`), so tier
+    3 grades `beta` and `downside_beta` on the same basis the card and the plane
+    do. Without a benchmark those two never resolve, and without closes every
+    ticker fetches its own history -- twice, once per resolver that needs it.
+    """
+    return run_scanners.price_history(list(tickers), cfg)
+
+
+def close_of(closes, ticker: str):
+    """One ticker's close series out of a `price_inputs` frame, or None."""
+    if closes is None or ticker not in getattr(closes, "columns", ()):
+        return None
+    return closes[ticker]
+
+
 def deterministic_verdict(ticker: str, cfg: dict, trigger: dict | None,
                           scan_date: str, source: str = SOURCE_SIGNAL,
-                          close=None) -> dict:
+                          close=None, benchmark=None) -> dict:
     """Everything tier 3 can decide **without a model**, for one ticker.
 
     Collects **every** stage of the quality registry, scores it, renders the
@@ -427,7 +445,7 @@ def deterministic_verdict(ticker: str, cfg: dict, trigger: dict | None,
     session that reads the bundle later can never generate either.
     """
     fin_cfg = cfg.get("research", {}).get("financials", {})
-    bundle = quality.collect(ticker, cfg, None, close=close)
+    bundle = quality.collect(ticker, cfg, None, close=close, benchmark=benchmark)
     yahoo = bundle.get("_yahoo") or {}
     quant = compute_quant_score(bundle, cfg, ticker)
     log_step("QUANT", "ok", f"{ticker} score {quant.get('score')}", cfg=cfg)
@@ -514,7 +532,7 @@ def deterministic_thesis(facts: dict) -> str:
     return veto_sentence + sentence
 
 
-def verdicts_for(tickers: list[str], cfg: dict, close=None) -> list[dict]:
+def verdicts_for(tickers: list[str], cfg: dict) -> list[dict]:
     """Deterministic verdicts for a list of tickers, recorded as they are made.
 
     Each entry is the `{ticker, scan_date, tier, conviction, thesis}` shape
@@ -522,11 +540,14 @@ def verdicts_for(tickers: list[str], cfg: dict, close=None) -> list[dict]:
     logged and skipped -- an alert missing a card is better than an alert that
     never went out.
     """
+    closes, benchmark = price_inputs(tickers, cfg)
     out = []
     for ticker in tickers:
         try:
             trigger, scan_date, source, _ = resolve_trigger(ticker, cfg)
-            verdict = deterministic_verdict(ticker, cfg, trigger, scan_date, source)
+            verdict = deterministic_verdict(
+                ticker, cfg, trigger, scan_date, source,
+                close=close_of(closes, ticker), benchmark=benchmark)
         except Exception as exc:  # noqa: BLE001 - one bad ticker must not kill the alert
             log_step("VERDICT", "failed", f"{ticker}: "
                      f"{type(exc).__name__}: {exc}", cfg=cfg)
@@ -536,7 +557,7 @@ def verdicts_for(tickers: list[str], cfg: dict, close=None) -> list[dict]:
             "scan_date": verdict["scan_date"],
             "tier": verdict["tier"],
             "conviction": verdict["conviction"],
-                "thesis": deterministic_thesis(verdict["facts"]),
+            "thesis": deterministic_thesis(verdict["facts"]),
         })
     if out:
         record_verdicts(out, cfg)
@@ -561,7 +582,10 @@ def assemble_context(ticker: str, cfg: dict | None = None) -> dict:
     log_step("CONTEXT", "start", f"{ticker}  run={run_id()}", cfg=cfg)
 
     trigger, scan_date, source, on_demand = resolve_trigger(ticker, cfg)
-    verdict = deterministic_verdict(ticker, cfg, trigger, scan_date, source)
+    closes, benchmark = price_inputs([ticker], cfg)
+    verdict = deterministic_verdict(ticker, cfg, trigger, scan_date, source,
+                                    close=close_of(closes, ticker),
+                                    benchmark=benchmark)
 
     if on_demand is not None:
         record_on_demand(on_demand, ticker, cfg)

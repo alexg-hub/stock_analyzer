@@ -179,6 +179,35 @@ c.ok("a headerless CSV from a zero-signal night reads as empty, not an error",
 c.ok("...and so does a file that does not exist at all",
      ledger.read_table(TMP / "never_written.csv").empty)
 
+# The write side of the same night. Reading was fixed first and the writers
+# were not: the *next* night's `merge_history_csv` read that file with a bare
+# `pd.read_csv` and raised inside `archive_scan`, which runs outside any try --
+# so every nightly run after a quiet first one died before the alert.
+from scanner_common import (count_csv_rows, merge_history_csv,  # noqa: E402
+                            update_csv_rows)
+
+fresh = TMP / "fresh_signals.csv"
+merge_history_csv(fresh, [], ["scan_date", "ticker"])
+c.ok("an empty merge with nothing on file writes nothing", not fresh.exists())
+for leftover in ("", "\r\n"):        # what older runs left behind
+    fresh.write_text(leftover, encoding="utf-8")
+    try:
+        merged = merge_history_csv(
+            fresh, [{"scan_date": "2026-01-02", "ticker": "AAA"}],
+            ["scan_date", "ticker"])
+        ok = len(merged) == 1
+    except Exception as exc:  # noqa: BLE001 - the regression under test
+        ok, merged = False, exc
+    c.ok(f"the next night merges over a {len(leftover)}-byte leftover", ok,
+         str(merged)[:80])
+c.ok("count and update read the merged file",
+     count_csv_rows(fresh, {"ticker": "AAA"}) == 1
+     and update_csv_rows(fresh, {"ticker": "AAA"}, {"Verdict": "WATCH"}) == 1)
+fresh.write_text("\r\n", encoding="utf-8")
+c.ok("...and a headerless one is empty to both, not an error",
+     count_csv_rows(fresh, {"ticker": "AAA"}) == 0
+     and update_csv_rows(fresh, {"ticker": "AAA"}, {"Verdict": "x"}) == 0)
+
 # --------------------------------------------------------------------------
 c.section("open -- the quality rules explode point-in-time")
 

@@ -1316,14 +1316,14 @@ real send.
     under its neckline is announced once, not nightly. Its charts go to
     `portfolio_dir(cfg)/exit_charts/`, **not** `output_dir()`, so redirecting
     the ledger in a test redirects the PNGs with it.
-  - **A zero-signal night writes a headerless `signals.csv`.** `archive_scan`
-    with no rows hands `merge_history_csv` an empty frame, which `to_csv`
-    writes as a **zero-byte** file, and `pd.read_csv` raises `EmptyDataError`
-    on it. Every read of a history table goes through `ledger.read_table`,
-    which treats missing, zero-byte and headerless alike as "nothing recorded
-    yet". Found by the 2026-07-27 nightly shakedown: a fresh install whose
-    first night was quiet would have logged a ledger failure every night until
-    something finally fired. A test pins it.
+  - **Every read of a history table goes through `scanner_common.read_table`**,
+    which treats missing, zero-byte and headerless files alike as "nothing
+    recorded yet" -- the writers (`merge_history_csv`, `count_csv_rows`,
+    `update_csv_rows`) included. Older quiet nights left a headerless
+    `signals.csv`, and a bare `pd.read_csv` on it raises `EmptyDataError`;
+    inside `archive_scan`, which runs outside any try, that killed every later
+    nightly run. An empty merge with nothing on file now writes nothing.
+    Tests pin both the read and the write side.
   - **The veto is graded like everything else, which is the point of tracking
     it.** `analyze` asks three new questions: `vetoed` as a two-group split
     (reported **inverted**, "clean minus excluded", so a positive effect means

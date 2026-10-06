@@ -474,6 +474,14 @@ c.ok("the registry grade is carried, computed after the pick",
      bool((rows["Quadrant"] == "buy").all()) and bool(rows["Reward"].notna().all()),
      "the row's numbers come from scan_ticker, not from this module")
 c.ok("Index is recorded", bool(rows[scanner_common.INDEX_COL].notna().all()))
+
+# Lists must land as JSON. A bare list reached the CSV as Python repr
+# ("['trailingPE']"), which the ledger cannot parse -- so a pick that failed a
+# rule or tripped a veto silently lost that flag on its position.
+from portfolio_sim.ledger import _as_list  # noqa: E402
+c.ok("a non-empty failed-rule list round-trips through the ledger's parser",
+     all(_as_list(v) == ["trailingPE"] for v in rows["Quality Missing"]),
+     f"{rows['Quality Missing'].tolist()}")
 c.ok("scan_date comes from the bar, not the caller",
      bool((rows["scan_date"] == "2026-01-05").all()))
 

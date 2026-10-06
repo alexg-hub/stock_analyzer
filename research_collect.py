@@ -156,6 +156,10 @@ def _valuation(info: dict, tk: yf.Ticker, close: pd.Series | None) -> dict:
         return out
     px = close.dropna()
     px.index = pd.DatetimeIndex(px.index).tz_localize(None).normalize()
+    # The `_2y` fields mean two years whatever the caller hands over: tier 3
+    # passes the 5y price-risk panel, and a percentile over five years would
+    # silently change what `pe_percentile_2y` measures.
+    px = px[px.index >= px.index[-1] - pd.DateOffset(years=2)]
     last = float(px.iloc[-1])
     lo, hi = float(px.min()), float(px.max())
     if hi > lo:

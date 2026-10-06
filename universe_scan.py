@@ -538,11 +538,10 @@ def signal_tickers(cfg: dict, days: int) -> list[str]:
     table instead, so "identified by a strategy" needs no extra filtering here.
     A ticker that fired on two screens, or on two nights, appears once.
 
-    Goes through `ledger.read_table` rather than `pd.read_csv` because a night on
-    which nothing fired writes a zero-byte file, and reading that raises.
+    Goes through `read_table` rather than `pd.read_csv` because older quiet
+    nights left a headerless file, and reading that raises.
     """
-    from portfolio_sim.ledger import read_table
-    from scanner_common import signals_csv_path
+    from scanner_common import read_table, signals_csv_path
 
     frame = read_table(signals_csv_path(cfg))
     if frame.empty or "ticker" not in frame.columns:

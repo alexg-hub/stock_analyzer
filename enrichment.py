@@ -40,6 +40,7 @@ from scanner_common import (
     merge_history_csv,
     on_demand_csv_path,
     output_dir,
+    read_table,
     signals_csv_path,
 )
 
@@ -257,7 +258,7 @@ def read_one(ticker: str, scan_date: str, cfg: dict) -> dict:
     if not path.exists():
         return {}
     try:
-        frame = pd.read_csv(path, dtype={"scan_date": str})
+        frame = read_table(path)
     except Exception:  # noqa: BLE001 - an unreadable record is an absent one
         return {}
     if frame.empty or not {"ticker", "scan_date"} <= set(frame.columns):
@@ -308,7 +309,7 @@ def _cmd_show(args: list[str], cfg: dict) -> int:
     if not path.exists():
         print(f"No enrichment recorded yet ({path}).")
         return 1
-    frame = pd.read_csv(path, dtype={"scan_date": str})
+    frame = read_table(path)
     if args:
         frame = frame[frame["ticker"].astype(str).str.upper()
                       == args[0].upper()]

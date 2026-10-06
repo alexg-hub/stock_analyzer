@@ -31,6 +31,7 @@ from scanner_common import (
     merge_history_csv,
     on_demand_csv_path,
     positions_csv_path,
+    read_table,
     signals_csv_path,
     step,
 )
@@ -152,22 +153,6 @@ def horizons_of(port_cfg: dict) -> list[int]:
 # Reading the source tables
 # --------------------------------------------------------------------------
 
-def read_table(path) -> pd.DataFrame:
-    """One CSV as a frame, or an empty frame when there is nothing to read.
-
-    Tolerant of a **headerless** file, not just a missing one: a night on which
-    no screen fires archives an empty row set, and `merge_history_csv` writes
-    that as a zero-byte `signals.csv`. Reading it raises `EmptyDataError`, so a
-    fresh install whose first night is quiet would otherwise log a ledger
-    failure every night until something finally fired.
-    """
-    if not path.exists() or path.stat().st_size == 0:
-        return pd.DataFrame()
-    try:
-        frame = pd.read_csv(path, dtype={"scan_date": str})
-    except pd.errors.EmptyDataError:
-        return pd.DataFrame()
-    return frame.dropna(how="all")
 
 
 def _as_list(value) -> list | None:
