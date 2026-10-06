@@ -209,7 +209,7 @@ def find_pullbacks(data: pd.DataFrame, strategy: dict) -> pd.DataFrame:
 
 
 # --------------------------------------------------------------------------
-# Registry contract: scan / format_section / plot_hit
+# Registry contract: scan / describe_hit / plot_hit
 # --------------------------------------------------------------------------
 
 def scan(data: pd.DataFrame, strategy: dict) -> ScanResult:

@@ -2,8 +2,6 @@
 
 from scanner_common import load_config
 
-from . import jobs
-
 
 def _hits_payload() -> dict:
     import research_report

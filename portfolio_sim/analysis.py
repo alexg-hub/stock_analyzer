@@ -45,7 +45,7 @@ from .ledger import (
     mark_columns,
     text_of,
 )
-from .marking import QUANT_METRIC_PREFIX, QUANT_PREFIX
+from .marking import QUANT_PREFIX
 from .stats import benjamini_hochberg, bootstrap_diff_ci, mann_whitney, spearman
 
 FINDINGS_COLUMNS = [
@@ -100,7 +100,7 @@ CAVEATS = [
     "closed-trade statistic, per horizon.",
     "Per-rule quality flags are exploded from the failed-rule list recorded "
     "that night, against the rule set recorded with the position -- so "
-    "retuning fundamentals.quality.rules does not rewrite past findings.",
+    "retuning quality.parameters does not rewrite past findings.",
     "This is measurement of recorded signals, not investment advice.",
 ]
 

@@ -75,25 +75,6 @@ def mann_whitney(a, b) -> dict:
     return out
 
 
-def welch_t(a, b) -> dict:
-    """Welch's t on the difference in means (normal-approximated p)."""
-    a, b = _clean(a), _clean(b)
-    out = {"diff": float("nan"), "t": float("nan"), "p": float("nan"),
-           "df": float("nan")}
-    if len(a) < 2 or len(b) < 2:
-        if len(a) and len(b):
-            out["diff"] = float(a.mean() - b.mean())
-        return out
-    va, vb = a.var(ddof=1) / len(a), b.var(ddof=1) / len(b)
-    out["diff"] = float(a.mean() - b.mean())
-    if va + vb <= 0:
-        return out
-    t = out["diff"] / math.sqrt(va + vb)
-    df = (va + vb) ** 2 / (va ** 2 / (len(a) - 1) + vb ** 2 / (len(b) - 1))
-    out["t"], out["df"], out["p"] = float(t), float(df), float(two_sided_p(t))
-    return out
-
-
 def spearman(x, y) -> dict:
     """Rank correlation and its Fisher-z p-value, over the pairs where both
     values are present."""

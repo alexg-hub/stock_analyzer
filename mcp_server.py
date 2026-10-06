@@ -36,6 +36,7 @@ from mcp_tools import (
     enrichment,
     jobs,
     portfolio,
+    reports,
     signals,
     themes,
     universe,
@@ -45,7 +46,7 @@ from mcp_tools import (
 mcp = FastMCP("stock_analyzer")
 
 for module in (signals, deepdive, portfolio, backtests, config_tools, jobs,
-               universe, enrichment, themes, valuation):
+               universe, enrichment, reports, themes, valuation):
     module.register(mcp)
 
 

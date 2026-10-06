@@ -148,7 +148,6 @@ Current screens:
 | `scanner_common.py` | Shared infra: config, tickers, downloads, statement access, Discord |
 | `quality.py` | **The one quality check**: the parameter registry, its resolvers, the gates (tier 2's ⭐) and the weighted 0-100 score (tier 3's anchor) |
 | `ibkr.py` | IBKR over the TWS API (`ib_async`) — ratios and market stats, optional, never account data |
-| `migrate_config.py` | One-shot: proves the unified `quality` section reproduces the two it replaced |
 | `charts.py` | Shared chart rendering (palette + per-screen chart builders) |
 | `backtest_breakout.py` / `backtest_pullback.py` / `backtest_reclaim.py` / `backtest_trend.py` | Single-ticker historical validators |
 | `backtest_universe.py` | Universe-wide profit backtest: every screen × all history, buy the trigger / sell N days later |
@@ -667,8 +666,7 @@ Three emptiness rules, all deliberate:
   neutral *about*.
 
 The score becomes tier 3's conviction directly: `conviction = score`,
-`tier = tier_for(score)` against the `quality.tiers` bands. `migrate_config.py`
-proves the gates and anchors reproduce the two sections they replaced.
+`tier = tier_for(score)` against the `quality.tiers` bands.
 
 ## Usage
 

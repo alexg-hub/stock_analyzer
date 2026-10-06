@@ -55,7 +55,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from newsfeed import chain_of, is_enabled, section, theme_names, themes_dir
+from newsfeed import is_enabled, section, theme_names, themes_dir
 from scanner_common import (
     HISTORY_KEYS,
     INDEX_COL,
@@ -599,11 +599,6 @@ def decode_lists(row: dict) -> dict:
             except json.JSONDecodeError:
                 pass
     return out
-
-
-def chain_for(theme: str, cfg: dict) -> list[str]:
-    """The configured beneficiary chain for a theme, for the research bundle."""
-    return chain_of(theme, cfg)
 
 
 # --------------------------------------------------------------------------

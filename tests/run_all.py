@@ -22,7 +22,6 @@ TESTS = [
     ("test_price_risk.py", "offline -- volatility, drawdown, beta, alignment"),
     ("test_peers.py", "offline -- sector-relative ranking, ties, fallbacks"),
     ("test_universe_scan.py", "offline -- plane scoping, cache, quadrants"),
-    ("test_ibkr.py", "offline -- IBKR client: no account surface, degrades"),
     ("test_mcp_server.py", "offline -- MCP tool contract, stdout purity, dry-run"),
     ("test_forward_trades.py", "offline -- synthetic panel arithmetic"),
     ("test_trend_line.py", "offline -- the trend fit, its cohorts and events"),

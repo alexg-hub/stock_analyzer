@@ -531,12 +531,12 @@ def _limited(constituents: pd.DataFrame, limit: int) -> pd.DataFrame:
 
 
 def signal_tickers(cfg: dict, days: int) -> list[str]:
-    """Tickers the screens flagged in the last `days` days, newest first.
+    """Tickers recorded as signals in the last `days` days, newest first.
 
-    Read from `signals.csv`, which holds one row per (scan_date, screen, ticker)
-    and **only** screen signals -- an ad-hoc look is recorded in the on-demand
-    table instead, so "identified by a strategy" needs no extra filtering here.
-    A ticker that fired on two screens, or on two nights, appears once.
+    Read from `signals.csv`: the nightly screens' signals plus the theme and
+    industry-valuation picks, which are recorded there deliberately because
+    they are candidates tier 4 buys too. An ad-hoc look is in the on-demand
+    table instead and is not included. A ticker recorded twice appears once.
 
     Goes through `read_table` rather than `pd.read_csv` because older quiet
     nights left a headerless file, and reading that raises.

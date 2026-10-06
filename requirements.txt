@@ -8,4 +8,3 @@ lxml>=4.9
 matplotlib>=3.8
 mcp~=1.28          # only for mcp_server.py; the scan and backtests run without it
 anyio>=4.0         # via mcp, but mcp_server.py imports it directly
-ib_async>=1.0      # optional: IBKR via TWS/IB Gateway (ibkr.py degrades cleanly when absent)

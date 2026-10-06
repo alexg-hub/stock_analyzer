@@ -162,46 +162,6 @@
                                "max_annual_slope_pct"]
         }
     },
-    "fundamentals": {
-        "enabled": true,
-        "fields": {
-            "trailingPE": "P/E",
-            "trailingPegRatio": "PEG",
-            "debtToEquity": "Total Debt/Equity",
-            "revenueGrowth": "Rev YoY %",
-            "dividendYield": "Div Yield %",
-            "payoutRatio": "Payout %"
-        },
-        "percent_fields": ["revenueGrowth", "payoutRatio"],
-        "statements": {
-            "enabled": true,
-            "years": 2,
-            "metrics": {
-                "fcf": "FCF",
-                "operating_margin": "OpM",
-                "profit_margin": "PM",
-                "roe": "ROE",
-                "roic": "ROIC"
-            }
-        },
-        "quality": {
-            "enabled": true,
-            "badge": "⭐",
-            "rules": {
-                "trailingPE": {"max": 50},
-                "trailingPegRatio": {"max": 1.8},
-                "debtToEquity": {"max": 71},
-                "revenueGrowth": {"min": 7},
-                "dividendYield": {"min": 0},
-                "payoutRatio": {"max": 60},
-                "roe": {"min": 10},
-                "roic": {"min": 10},
-                "operating_margin": {"min": 10, "increasing": false},
-                "profit_margin": {"min": 10, "increasing": false},
-                "fcf": {"min": 0, "increasing": false}
-            }
-        }
-    },
     "quality": {
         "enabled": true,
         "badge": "⭐",
@@ -369,14 +329,12 @@
                 "gate": null, "score": {"good": 1.0, "bad": 0.5}
             },
             "return_on_assets": {
-                "sector_relative": true,
                 "enabled": true, "label": "ROA", "source": "yahoo_deep.return_on_assets",
                 "group": "financial_quality", "stage": "deep", "weight": 1.0,
                 "display": false, "format": "pct",
                 "gate": null, "score": {"good": 9.1, "bad": 1.3}
             },
             "gross_margin": {
-                "sector_relative": true,
                 "enabled": true, "label": "Gross margin",
                 "source": "yahoo_deep.gross_margin",
                 "group": "financial_quality", "stage": "deep", "weight": 1.0,
@@ -403,27 +361,6 @@
                 "group": "analyst_sentiment", "stage": "deep", "weight": 1.0,
                 "display": false, "format": "number",
                 "gate": null, "score": {"good": 0.8, "bad": 0.3}
-            },
-            "ibkr_implied_volatility": {
-                "enabled": false, "label": "IV (IBKR)",
-                "source": "ibkr.implied_volatility",
-                "group": "analyst_sentiment", "stage": "deep", "weight": 1.0,
-                "display": false, "format": "number",
-                "gate": null, "score": {"good": 0.2, "bad": 0.8}
-            },
-            "ibkr_return_on_equity": {
-                "enabled": false, "label": "ROE (IBKR)",
-                "source": "ibkr.return_on_equity",
-                "group": "financial_quality", "stage": "deep", "weight": 1.0,
-                "display": false, "format": "pct",
-                "gate": null, "score": {"good": 25, "bad": 5}
-            },
-            "ibkr_revenue_growth_rate": {
-                "enabled": false, "label": "Rev growth (IBKR)",
-                "source": "ibkr.revenue_growth_rate",
-                "group": "growth", "stage": "deep", "weight": 1.0,
-                "display": false, "format": "pct",
-                "gate": null, "score": {"good": 20, "bad": 0}
             },
             "negative_equity_burn": {
                 "enabled": true,
@@ -792,7 +729,6 @@
                 }
             },
             "net_debt_to_ebitda_veto": {
-                "sector_relative": true,
                 "enabled": true,
                 "label": "NetDebt/EBITDA veto",
                 "source": "yahoo_deep.net_debt_to_ebitda",
@@ -853,7 +789,6 @@
                 "score": null
             },
             "current_ratio": {
-                "sector_relative": true,
                 "enabled": true,
                 "label": "Current ratio",
                 "source": "yahoo_deep.current_ratio",
@@ -869,7 +804,6 @@
                 }
             },
             "quick_ratio": {
-                "sector_relative": true,
                 "enabled": true,
                 "label": "Quick ratio",
                 "source": "yahoo_deep.quick_ratio",
@@ -1241,19 +1175,6 @@
         "progress_every": 10,
         "signal_window_days": 7
     },
-    "ibkr": {
-        "enabled": false,
-        "host": "127.0.0.1",
-        "port": 4001,
-        "client_id": 17,
-        "connect_timeout_seconds": 8,
-        "request_timeout_seconds": 20,
-        "market_data": true,
-        "reports": [],
-        "market_data_type": 3,
-        "snapshot_wait_seconds": 8,
-        "fundamental_ticks": false
-    },
     "research": {
         "latest_hits_path": "latest_hits.json",
         "report_subdir": "reports",
@@ -1296,58 +1217,6 @@
                 "NetCashProvidedByUsedInOperatingActivities",
                 "LongTermDebtNoncurrent"
             ]
-        },
-        "synthesis": {
-            "tiers": [
-                {"label": "STRONG", "min": 80, "color": "2E9C6B"},
-                {"label": "WATCH", "min": 45, "color": "2A78D6"},
-                {"label": "PASS", "min": 0, "color": "898781"}
-            ],
-            "dimensions": {
-                "valuation": {
-                    "weight": 0.18,
-                    "metrics": {
-                        "pe_percentile_2y": {"good": 10, "bad": 90},
-                        "analyst_upside_pct": {"good": 25, "bad": -10}
-                    }
-                },
-                "growth": {
-                    "weight": 0.18,
-                    "metrics": {
-                        "growth_this_year_pct": {"good": 20, "bad": 0},
-                        "growth_next_year_pct": {"good": 15, "bad": 0}
-                    }
-                },
-                "estimate_momentum": {
-                    "weight": 0.15,
-                    "metrics": {
-                        "eps_revision_net": {"good": 0.6, "bad": -0.4},
-                        "eps_trend_change": {"good": 0.05, "bad": -0.05}
-                    }
-                },
-                "earnings_quality": {
-                    "weight": 0.12,
-                    "metrics": {
-                        "earnings_avg_surprise": {"good": 8, "bad": -2},
-                        "earnings_beat_rate": {"good": 1.0, "bad": 0.5}
-                    }
-                },
-                "financial_quality": {
-                    "weight": 0.22,
-                    "metrics": {
-                        "return_on_assets": {"good": 15, "bad": 2},
-                        "gross_margin": {"good": 60, "bad": 20},
-                        "net_debt_to_ebitda": {"good": 0, "bad": 4},
-                        "buyback_2y": {"good": -5, "bad": 3}
-                    }
-                },
-                "analyst_sentiment": {
-                    "weight": 0.15,
-                    "metrics": {
-                        "analyst_buy_ratio": {"good": 0.8, "bad": 0.3}
-                    }
-                }
-            }
         }
     },
     "portfolio": {

@@ -1,15 +1,8 @@
 """The unified quality check -- one config-driven engine for tiers 2 and 3.
 
 Everything the pipeline knows about "is this a good company" lives in the
-`quality` section of `config.json` and is evaluated here. There used to be two
-separate systems that shared no keys, no config shape and no code path:
-
-  * `fundamentals.quality.rules` -- a strict pass/fail gate over Yahoo `info`
-    and the annual statements, producing the tier-2 badge; and
-  * `research.synthesis.dimensions` -- a weighted 0-100 score over a different
-    13 metrics, producing tier 3's quant anchor.
-
-They are one registry now. A **parameter** is one measurable thing about a
+`quality` section of `config.json` and is evaluated here: the tier-2 badge and
+tier 3's 0-100 score are two readings of one registry. A **parameter** is one measurable thing about a
 company. It declares where its value comes from (`source`), which weighted
 bucket it belongs to (`group`), when it is affordable to collect (`stage`), and
 optionally a `gate` (pass/fail) and/or a `score` (good/bad anchors). One
@@ -29,7 +22,7 @@ record that it ever existed.
 Two distinctions that look like details and are not:
 
   * **Missing is not failing.** A missing value *fails its gate* (unverifiable
-    quality does not earn the badge -- unchanged from the old rule engine) but
+    quality does not earn the badge) but
     is *skipped* in the score. A whole group with no data scores a neutral 0.5
     rather than 0, so a bank with no operating income is not driven to the
     bottom by data Yahoo simply does not publish for it.
@@ -91,7 +84,7 @@ from scanner_common import (
 CONFIG_KEY = "quality"
 
 STAGE_FAST = "fast"     # yf.Ticker.info + annual statements -- every tier-1 hit
-STAGE_DEEP = "deep"     # collect_yahoo / IBKR -- gated candidates only
+STAGE_DEEP = "deep"     # collect_yahoo / SEC -- gated candidates only
 STAGES = (STAGE_FAST, STAGE_DEEP)
 
 # A gate may only use these. Enforced by `validate` so a typo in config is a
@@ -1205,10 +1198,6 @@ def collect(ticker: str, cfg: dict, stage: str | None = STAGE_FAST,
             log_step("YAHOO", "failed", f"price risk for {ticker}: {exc}")
             bundle["price_risk"] = {}
 
-    if "ibkr" in wanted:
-        import ibkr
-        bundle["ibkr"] = ibkr.metrics(ticker, cfg)
-
     return bundle
 
 
@@ -1275,7 +1264,7 @@ def fetch_fast(tickers: list[str], cfg: dict, closes=None,
 # Validation -- used by the MCP config tools before any write
 # --------------------------------------------------------------------------
 
-RESOLVERS = ("yahoo_info", "yahoo_stmt", "yahoo_deep", "ibkr",
+RESOLVERS = ("yahoo_info", "yahoo_stmt", "yahoo_deep",
              "distress", "moat", "sec_flags", "price_risk")
 
 

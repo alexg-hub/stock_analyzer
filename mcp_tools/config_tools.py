@@ -50,7 +50,7 @@ REDACTED = "<redacted -- pass reveal=True>"
 # `<N>mo` form, so `download_period: "1y"` would sail past validation and leave
 # every screen unable to fire while reporting zero signals rather than an error
 # -- the precise failure this file exists to prevent. It stays a hand edit.
-WRITABLE = ("quality", "ibkr", "research", "backtest", "tuning", "charts",
+WRITABLE = ("quality", "research", "backtest", "tuning", "charts",
             "portfolio", "enrichment", "combined", "theme_screen")
 WRITABLE_SUFFIX = "_strategy"
 
@@ -277,23 +277,42 @@ def _insert_member(text: str, parts: list[str], new_value) -> str:
     return text[:last_end] + body + text[last_end:]
 
 
+def _skip_eol(text: str, at: int) -> int:
+    """`at` moved past one line ending, LF or CRLF -- autocrlf checks out CRLF."""
+    for eol in ("\r\n", "\n"):
+        if text.startswith(eol, at):
+            return at + len(eol)
+    return at
+
+
 def _delete_member(text: str, parts: list[str]) -> str:
-    """Remove one whole member, plus the comma that joined it to its siblings."""
+    """Remove one whole member, plus the comma that joined it to its siblings.
+
+    Three cases, because the comma moves: a member followed by a comma takes
+    that comma with it; the last of several takes the comma *before* it; the
+    only member has none. A member on its own line takes the line; one inside
+    an inline object (`{"a": 1, "b": 2}`) takes only its own text.
+    """
     start = _walk_to_parent(text, parts)
     name_start, vend = _member_full_span(text, start, parts[-1])
-    before = text.rfind(",", 0, name_start)
     line_start = text.rfind("\n", 0, name_start) + 1
-    if before >= line_start - 1 and before != -1 and not text[before + 1:name_start].strip():
-        cut_from = before                    # swallow the preceding comma
-    else:
-        cut_from = line_start                # first member: take the line
-    cut_to = vend
-    if text[cut_to:cut_to + 1] == ",":       # ...and the following one instead
-        cut_to += 1
-    tail = text[cut_to:]
-    if cut_from == line_start and tail.startswith("\n"):
-        cut_to += 1
-    return text[:cut_from] + text[cut_to:]
+    own_line = not text[line_start:name_start].strip()
+
+    if text[vend:vend + 1] == ",":
+        if own_line:
+            return text[:line_start] + text[_skip_eol(text, vend + 1):]
+        cut_to = vend + 1
+        while text[cut_to:cut_to + 1] == " ":
+            cut_to += 1
+        return text[:name_start] + text[cut_to:]
+
+    before = text.rfind(",", 0, name_start)
+    if before != -1 and not text[before + 1:name_start].strip():
+        return text[:before] + text[vend:]
+
+    if own_line:
+        return text[:line_start] + text[_skip_eol(text, vend):]
+    return text[:name_start] + text[vend:]
 
 
 # --------------------------------------------------------------------------
@@ -480,7 +499,7 @@ def params_list_impl(section: str | None = None) -> dict:
         if name in ("quality", "discord") or not isinstance(block, dict):
             continue
         if not (name.endswith(WRITABLE_SUFFIX)
-                or name in ("charts", "backtest", "portfolio", "ibkr", "data",
+                or name in ("charts", "backtest", "portfolio", "data",
                             "enrichment", "combined", "theme_screen")):
             continue
         if not want(name):
@@ -543,7 +562,7 @@ def register(mcp) -> None:
         nothing reads.
 
         Writable: the strategy sections (anything named `*_strategy`), plus
-        quality, ibkr, research, backtest, tuning, charts, portfolio,
+        quality, research, backtest, tuning, charts, portfolio,
         enrichment and data.
         `discord.*` and `research.auto.discord_send` are refused outright --
         the webhook is live, and the latter is what gates every Discord send.

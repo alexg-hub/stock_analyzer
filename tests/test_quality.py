@@ -1,7 +1,7 @@
 """The unified quality engine: the `enabled` flag, the gates, the score.
 
 Fully offline -- every check drives `quality.evaluate` with hand-built values,
-so nothing here touches Yahoo, IBKR or the cached panel.
+so nothing here touches Yahoo or the cached panel.
 
 Every check is an **invariant**, derived from whatever `config.json` currently
 says rather than from written-down thresholds; the registry is retuned

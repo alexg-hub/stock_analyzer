@@ -552,26 +552,6 @@ _quiet(research_report.record_verdict,
 c.ok("a verdict with no scan row is still recorded, not dropped",
      "CCC" in set(pd.read_csv(od_csv, dtype={"scan_date": str})["ticker"]))
 
-# The tier the model set and the bands in force can part company, because the
-# bands get retuned between the run and the record.
-bands = od_cfg["research"]["synthesis"]["tiers"]
-top = max(band["min"] for band in bands)
-drifted = {"ticker": TICK, "scan_date": scan_date, "tier": "STRONG",
-           "conviction": max(top - 10, 0), "thesis": "x"}
-buf, _stderr = io.StringIO(), sys.stderr
-sys.stderr = buf
-try:
-    _quiet(research_report.record_verdict, drifted, od_cfg)
-finally:
-    sys.stderr = _stderr
-c.ok("a tier that disagrees with the config bands is flagged",
-     "WARNING" in buf.getvalue()
-     and research_report.tier_for(drifted["conviction"], od_cfg) in buf.getvalue(),
-     buf.getvalue().strip()[:90] or "no warning emitted")
-c.ok("the flagged verdict is still recorded as the model set it",
-     pd.read_csv(od_csv, dtype={"scan_date": str}).set_index("ticker")
-     .loc[TICK, scanner_common.VERDICT_COL] == "STRONG",
-     "a drift warning informs; it never rewrites the judgment")
 
 # A veto is a deterministic rule over collected values, so whether it overrides
 # the tier is a config decision (`quality.veto_enforced`) -- but in neither mode
@@ -751,7 +731,7 @@ c.ok("logging.enabled false writes nothing", len(log_lines()) == before)
 # survive a narrow codepage.
 c.section("output encoding survives a non-UTF-8 console")
 
-badge = cfg["fundamentals"]["quality"]["badge"]
+badge = quality.badge(cfg)
 fields = research_report._verdict_fields(
     {"quality": True, "quant_score": 50.0}, {"ticker": "AAA"})
 rendered = " ".join(f["value"] for f in fields)

@@ -289,10 +289,6 @@ python tests/run_all.py --network      # adds the Yahoo round-trip test
 python run_scanners.py
 python run_scanners.py --no-send   # same run, cards printed instead of posted
 
-# The quality registry: what is tunable and what it is set to. Also the MCP
-# `params_list` tool, which is the better surface interactively.
-python migrate_config.py           # prove the unified section == the old two
-
 # Historical validation of the same logic on one ticker (no Discord send);
 # each writes output/backtest_*.csv and output/backtest_*.png
 python backtest_breakout.py --ticker JNJ  --start 2025-01-01 --end 2025-10-31
@@ -799,9 +795,6 @@ real send.
     friends call it). Every case it catches fails *silently* at runtime: an
     unknown `source` resolves to None for every company, a typo'd gate keyword
     is never applied, a group with no weight contributes nothing.
-  - `migrate_config.py` proves the translation from the old two sections and
-    can be deleted once `fundamentals` and `research.synthesis.dimensions` come
-    out of `config.json`.
 - **Tier 3's verdict is deterministic, and nothing revises it.**
   `research_report.deterministic_verdict` collects the `deep` stage, scores it,
   renders `output/reports/<TICKER>_<date>_financials.png` and writes

@@ -244,6 +244,34 @@ c.ok("config.json unchanged by the rewrite checks",
      CONFIG_PATH.read_bytes() == before_bytes)
 
 # --------------------------------------------------------------------------
+c.section("config_delete removes any member, in either line ending")
+
+# Deleting the last member of an object used to leave a trailing comma, and
+# autocrlf checks config.json out with CRLF, which defeated the comma check for
+# every position. Exercised on text only: nothing here touches config.json.
+_shapes = {
+    "own lines": '{\n  "s": {\n    "a": 1,\n    "b": {"x": 2},\n    "c": 3\n  }\n}\n',
+    "only member": '{\n  "s": {\n    "a": 1\n  },\n  "t": 2\n}\n',
+    "inline": '{\n  "s": {"a": 1, "b": 2, "c": 3}\n}\n',
+}
+_bad = []
+for _shape, _text in _shapes.items():
+    for _eol in ("\n", "\r\n"):
+        _src = _text.replace("\n", _eol)
+        for _key in json.loads(_src)["s"]:
+            _want = json.loads(_src)
+            del _want["s"][_key]
+            _out = config_tools._delete_member(_src, ["s", _key])
+            try:
+                _ok = json.loads(_out) == _want and _eol * 2 not in _out
+            except ValueError:
+                _ok = False
+            if not _ok:
+                _bad.append(f"{_shape}/{_eol!r}/{_key}")
+c.ok("first, middle, last and only members delete to valid JSON, LF and CRLF",
+     not _bad, ", ".join(_bad) or "all 14 cases")
+
+# --------------------------------------------------------------------------
 c.section("job registry")
 
 # `jobs_dir()` hangs off output_dir(), which is not config-driven, so redirect

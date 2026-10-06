@@ -3,7 +3,7 @@ Tier 3 -- the graded investment case.
 
 **The verdict is deterministic, full stop.** `deterministic_verdict` collects
 the `deep` half of the quality registry, scores it, renders the financials chart
-and sets `conviction = score`, `tier = tier_for(score)`. It runs inside the
+and sets `conviction = score`, `tier = quality.tier_for(score)`. It runs inside the
 nightly scan, so tonight's verdict travels in the same Discord message as the
 signal that produced it:
 
@@ -251,14 +251,9 @@ def compute_quant_score(bundle: dict, cfg: dict, ticker: str = "") -> dict:
     }
 
 
-def tier_for(conviction: float, cfg: dict) -> str:
-    """Map a 0-100 conviction to a tier label via the configured bands."""
-    return quality.tier_for(conviction, cfg)
-
-
 
 # --------------------------------------------------------------------------
-# The context bundle Claude reasons over
+# The verdict: facts file, chart and table for one ticker
 # --------------------------------------------------------------------------
 
 def financials_table_md(fin: dict) -> str:
@@ -305,10 +300,8 @@ def _facts(ticker: str, scan_date: str, yahoo: dict, quant: dict,
            source: str = SOURCE_SIGNAL) -> dict:
     """The deterministic values the Discord card shows.
 
-    Written to disk so `post_summary` reads them back rather than the model
-    retyping them: every figure on the notification comes from the collector,
-    and the model contributes only tier, conviction, the adjustment and the
-    thesis.
+    Written to disk so the card, the record and the dossier all read the same
+    figures back rather than recomputing them.
 
     `source` records whether the trigger came from the nightly hand-off or from
     an on-demand scan. It is the routing key for the permanent record, decided
@@ -335,7 +328,7 @@ def _facts(ticker: str, scan_date: str, yahoo: dict, quant: dict,
     # also override the tier is `quality.veto_enforced`, off by default so an
     # excluded name keeps a comparable score for tier 4 to grade.
     vetoes = quant.get("veto_reasons") or []
-    tier = tier_for(score, cfg) if score is not None else None
+    tier = quality.tier_for(score, cfg) if score is not None else None
     if vetoes and quality.veto_enforced(cfg):
         tier = quality.veto_tier(cfg)
     return {
@@ -427,7 +420,7 @@ def deterministic_verdict(ticker: str, cfg: dict, trigger: dict | None,
 
     Collects **every** stage of the quality registry, scores it, renders the
     financial-trend chart and writes `<T>_<date>_facts.json` -- and sets the
-    verdict from the score alone: `conviction = score`, `tier = tier_for(score)`.
+    verdict from the score alone: `conviction = score`, `tier = quality.tier_for(score)`.
 
     The collection stage must stay `None` (= all stages). `compute_quant_score`
     grades every stage, so collecting only `deep` leaves all eleven `fast`
@@ -888,28 +881,6 @@ def enforce_veto(verdict: dict, facts: dict, cfg: dict) -> dict:
     return verdict
 
 
-def _warn_tier_drift(verdict: dict, cfg: dict) -> None:
-    """Warn when a recorded tier and the config bands disagree.
-
-    Not an error and not a correction: the bands get retuned between a run and
-    its record, and the label the analysis actually reasoned under is the one
-    worth keeping. But a study that groups by tier deserves to know the label
-    and the bands have parted company.
-    """
-    tier, conviction = verdict.get("tier"), verdict.get("conviction")
-    if not tier or not isinstance(conviction, (int, float)):
-        return
-    band = tier_for(conviction, cfg)
-    if band != tier:
-        log_step("VERDICT", "warn",
-                 f"{verdict.get('ticker')} recorded {tier} at {conviction}, "
-                 f"config bands say {band}", cfg=cfg)
-        print(f"  WARNING: {verdict.get('ticker')} recorded as {tier} at "
-              f"conviction {conviction}, but the current config bands put "
-              f"{conviction} in {band}. Keeping {tier} as stated.",
-              file=sys.stderr)
-
-
 def record_verdict(verdict: dict, cfg: dict) -> str | None:
     """Route one verdict to its table and write it; return the file name.
 
@@ -925,7 +896,6 @@ def record_verdict(verdict: dict, cfg: dict) -> str | None:
         print(f"  cannot record a verdict without ticker and scan_date: "
               f"{verdict.get('ticker') or verdict}", file=sys.stderr)
         return None
-    _warn_tier_drift(verdict, cfg)
 
     facts = load_facts(ticker, scan_date, cfg)
     enforce_veto(verdict, facts, cfg)
