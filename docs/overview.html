@@ -103,7 +103,7 @@ td.p { white-space: nowrap; }
 .rules > div.warn { border-left-color: var(--orange); }
 .rules p { font-size: 13px; color: var(--ink2); }
 
-footer { border-top: 1px solid var(--rule); padding-top: 14px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; font-size: 13px; color: var(--ink2); }
+footer { border-top: 1px solid var(--rule); padding-top: 14px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; font-size: 13px; color: var(--ink2); }
 footer h3 { color: var(--ink); margin-bottom: 4px; }
 
 @media (max-width: 900px) {
@@ -328,10 +328,29 @@ footer h3 { color: var(--ink); margin-bottom: 4px; }
     </div>
   </section>
 
+  <section>
+    <div class="head"><h2>Data sources</h2>
+      <p>All public. If you run it, you make these requests, so check each provider's terms. Data stays in your local, git-ignored <code>output/</code>.</p></div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Source</th><th>Used for</th><th>Notes</th></tr></thead>
+        <tbody>
+          <tr><td>Yahoo Finance (<code>yfinance</code>)</td><td>Prices, fundamentals, statements, estimates</td><td>Unofficial; terms restrict redistribution</td></tr>
+          <tr><td>Wikipedia</td><td>S&amp;P 500 and MidCap 400 constituent lists</td><td>Content is CC BY-SA</td></tr>
+          <tr><td>SEC EDGAR</td><td>Filings, 8-K item flags, full-text search</td><td>Needs a real contact in <code>STOCK_ANALYZER_SEC_USER_AGENT</code></td></tr>
+          <tr><td>Google News RSS</td><td>Dated events for the theme screen</td><td>Headlines and links only</td></tr>
+          <tr><td>Interactive Brokers (Claude connector)</td><td>Company and theme graph for the research skills</td><td>Optional, sessions only</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="muted">No free source provides earnings-call transcripts.</p>
+  </section>
+
   <footer>
     <div><h3>Where files go</h3><p><code>output/history</code> signals and verdicts · <code>reports</code> facts, charts, dossiers · <code>portfolio</code> ledger and findings · <code>logs</code> one line per step.</p></div>
     <div><h3>Configuration</h3><p>Every threshold and label is in <code>config.json</code>. Secrets (Discord webhook, SEC contact) go in <code>.env</code>, never in config.</p></div>
     <div><h3>Checks</h3><p><code>python tests/run_all.py</code>, about 4 minutes, offline. Research and measurement only; not investment advice.</p></div>
+    <div><h3>Documentation</h3><p><code>README.md</code> setup and usage · <code>CLAUDE.md</code> code rules · <code>AI_ROLE.md</code> where AI is used · <code>CONTRIBUTING.md</code> how to contribute.</p></div>
   </footer>
 
 </div>
