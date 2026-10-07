@@ -9,9 +9,8 @@ engineer, the turbine maker, the CDMO, the semiconductor equipment supplier --
 have done nothing on their own charts yet. The chain runs from a dated event
 through a company's revenue, and no rolling window finds it.
 
-`DETERMINISTIC_GAPS.md` section D scoped AI to `risk_research`: the *grading*
-side, judging a ticker a screen already surfaced. This is the mirror image --
-the *identification* side -- and it keeps the same contract, stated in
+`risk_research` scopes AI to the *grading* side, judging a ticker a screen
+already surfaced. This is the mirror image -- the *identification* side -- and it keeps the same contract, stated in
 `AI_ROLE.md`: a session may call the analyzer; the analyzer may not call a
 session. Nothing here invokes a model. A session reasons over the bundle
 `mcp_tools/themes.py` assembles and calls `record()` with what it concluded.

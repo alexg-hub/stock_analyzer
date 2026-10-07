@@ -594,13 +594,14 @@ requests, so check that your use fits each provider's terms:
 | Wikipedia | index constituent lists | Content is CC BY-SA |
 | SEC EDGAR | filings, 8-K items, full-text search | Requires a real contact in the User-Agent (`STOCK_ANALYZER_SEC_USER_AGENT`) |
 | Google News RSS | dated events for the theme screen | Headlines and links only |
+| Interactive Brokers (Claude connector) | company and theme graph for the `enrich` and `theme-screen` skills | Optional, sessions only; see `docs/overview.html` |
+
+No free source provides earnings-call transcripts.
 
 Companion documents:
 
 - [`docs/overview.html`](docs/overview.html): a one-page visual overview of the
   pipeline, the capabilities and MCP management (download and open in a browser).
-- [`RESEARCH_DATA.md`](RESEARCH_DATA.md): what each data source can supply.
-- [`DETERMINISTIC_GAPS.md`](DETERMINISTIC_GAPS.md): metrics not computed yet.
 - [`AI_ROLE.md`](AI_ROLE.md): where AI is and is not used.
 
 ## Contributing

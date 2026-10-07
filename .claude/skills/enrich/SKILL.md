@@ -10,7 +10,7 @@ already computed the screen, the ⭐ quality verdict, the 🚫 veto, the 0-100 q
 score, the tier, both risk/reward axes and the ledger position. **You are not
 grading an ungraded ticker, and there is nothing here you can recompute.**
 
-What you add is the territory `DETERMINISTIC_GAPS.md` section D reserves:
+What you add is the part arithmetic cannot reach:
 competitive position and whether the moat the metrics imply is durable;
 management's capital-allocation record against what they said; regulatory, legal
 and product-cycle exposure that has not hit the statements; whether a tripped

@@ -4,7 +4,7 @@ The analyzer is deterministic end to end: tiers 1-4 compute every number, and
 no code path in it invokes a model. What a model *can* still contribute is the
 part arithmetic cannot reach -- competitive position, whether a tripped rule is
 a sector artifact, what the filings and the tape are saying that the statements
-have not caught up with. `DETERMINISTIC_GAPS.md` section D is the standing list.
+have not caught up with. `risk_research` names those questions.
 
 That contribution used to arrive as `narrative_adj`, a number the model wrote
 into the recorded conviction. Measured over its whole life it moved nine

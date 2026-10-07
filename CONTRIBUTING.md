@@ -61,9 +61,8 @@ from `config.json` at runtime. Never hardcode a threshold or a literal like
 `CLAUDE.md` lists the rules that keep the code correct, one line each, with a
 pointer to the docstring or test that explains it. If you are changing
 behaviour, read the relevant rule and that docstring first: the obvious
-simplification has often been tried and reverted. `RESEARCH_DATA.md` maps what
-each data source can supply, `DETERMINISTIC_GAPS.md` what is not computed yet,
-and `params_list` (MCP) or `config.json` every tunable value.
+simplification has often been tried and reverted. `params_list` (MCP) or
+`config.json` lists every tunable value.
 
 Generated artifacts go to `output/` via `scanner_common.output_dir()` — there
 are no exceptions, and never `Path(__file__).parent`. Before adding a helper,
