@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stock Analyzer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@87,600;87,700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+:root {
+  --bg: #fcfcfb; --surface: #ffffff; --ink: #15161a; --ink2: #4f4e4a; --muted: #85837c;
+  --rule: #e1e0d9; --blue: #2a78d6; --blue-soft: #e8f0fb; --orange: #e0612b; --orange-soft: #fcefe7;
+  --green: #2e9c6b; --green-soft: #e7f4ee; --red: #c0392b; --red-soft: #fbecea;
+  --display: "Archivo", "Arial Narrow", system-ui, sans-serif;
+  --body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #121315; --surface: #1a1b1e; --ink: #ecebe6; --ink2: #b6b4ad; --muted: #8b8983;
+    --rule: #2d2e32; --blue: #6aa6ec; --blue-soft: #1b2a3c; --orange: #f0925f; --orange-soft: #33251c;
+    --green: #55c590; --green-soft: #18291f; --red: #ec7466; --red-soft: #33201e;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #121315; --surface: #1a1b1e; --ink: #ecebe6; --ink2: #b6b4ad; --muted: #8b8983;
+  --rule: #2d2e32; --blue: #6aa6ec; --blue-soft: #1b2a3c; --orange: #f0925f; --orange-soft: #33251c;
+  --green: #55c590; --green-soft: #18291f; --red: #ec7466; --red-soft: #33201e;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--ink); font: 14.5px/1.55 var(--body); margin: 0; padding-inline: 20px; }
+.page { max-width: 1120px; margin: 0 auto; padding-block: 36px 56px; display: grid; gap: 40px; }
+h1, h2, h3 { font-family: var(--display); font-stretch: 87%; margin: 0; text-wrap: balance; }
+h1 { font-size: clamp(32px, 5vw, 46px); line-height: 1.05; }
+h2 { font-size: 21px; line-height: 1.2; }
+h3 { font-size: 15.5px; line-height: 1.3; }
+p { margin: 0; }
+code, .mono { font-family: var(--mono); font-size: 0.9em; }
+.eyebrow { font: 500 11.5px/1 var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.muted { color: var(--ink2); }
+section { display: grid; gap: 16px; }
+.head { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; flex-wrap: wrap; border-top: 2px solid var(--ink); padding-top: 12px; }
+.head p { color: var(--ink2); max-width: 70ch; }
+
+/* hero */
+.hero { display: grid; gap: 14px; }
+.hero .lede { font-size: 17px; color: var(--ink2); max-width: 72ch; }
+.facts { display: flex; flex-wrap: wrap; gap: 8px 30px; border-block: 1px solid var(--rule); padding-block: 12px; margin-top: 4px; }
+.fact { display: grid; gap: 1px; }
+.fact b { font: 700 24px/1.1 var(--display); font-stretch: 87%; font-variant-numeric: tabular-nums; }
+.fact span { font-size: 12.5px; color: var(--muted); }
+
+/* pipeline */
+.flow { display: grid; grid-template-columns: repeat(6, 1fr); gap: 0; align-items: stretch; }
+.stage { position: relative; background: var(--surface); border: 1px solid var(--rule); padding: 14px 14px 16px; display: grid; gap: 6px; align-content: start; }
+.stage + .stage { border-left: 0; }
+.stage::after { content: ""; position: absolute; right: -7px; top: 50%; width: 12px; height: 12px; background: var(--surface); border-top: 1px solid var(--rule); border-right: 1px solid var(--rule); transform: translateY(-50%) rotate(45deg); z-index: 1; }
+.stage:last-child::after { display: none; }
+.stage .tag { font: 500 11px/1 var(--mono); letter-spacing: .06em; text-transform: uppercase; color: var(--blue); }
+.stage.out .tag { color: var(--orange); }
+.stage p { font-size: 13px; color: var(--ink2); }
+.stage .rec { font: 12px/1.4 var(--mono); color: var(--muted); }
+.when { display: flex; flex-wrap: wrap; gap: 6px 22px; font-size: 13px; color: var(--ink2); }
+.when b { color: var(--ink); font-weight: 600; }
+
+/* capability grid */
+.grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+.card { background: var(--surface); border: 1px solid var(--rule); border-radius: 4px; padding: 16px; display: grid; gap: 10px; align-content: start; }
+.card ul { margin: 0; padding-left: 16px; display: grid; gap: 6px; font-size: 13.5px; }
+.card li::marker { color: var(--muted); }
+.card .k { font-family: var(--mono); font-size: 12.5px; color: var(--blue); }
+
+.legend { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip { display: inline-flex; align-items: center; gap: 6px; font: 500 12px/1 var(--mono); padding: 5px 8px; border-radius: 3px; background: var(--blue-soft); color: var(--blue); white-space: nowrap; }
+.chip.or { background: var(--orange-soft); color: var(--orange); }
+.chip.gr { background: var(--green-soft); color: var(--green); }
+.chip.rd { background: var(--red-soft); color: var(--red); }
+
+/* AI boundary */
+.boundary { display: grid; grid-template-columns: 1fr 1fr; gap: 0; border: 1px solid var(--rule); border-radius: 4px; overflow: hidden; }
+.boundary > div { padding: 16px; display: grid; gap: 8px; align-content: start; }
+.boundary .py { background: var(--surface); }
+.boundary .ai { background: var(--blue-soft); border-left: 1px solid var(--rule); }
+.boundary p { font-size: 13.5px; }
+
+/* MCP */
+.mcp { display: grid; grid-template-columns: 1fr 1.35fr; gap: 20px; align-items: start; }
+.install { display: grid; gap: 14px; }
+.step { background: var(--surface); border: 1px solid var(--rule); border-radius: 4px; padding: 14px 16px; display: grid; gap: 8px; }
+pre { margin: 0; background: var(--bg); border: 1px solid var(--rule); border-radius: 3px; padding: 10px 12px; font: 12px/1.5 var(--mono); overflow-x: auto; color: var(--ink); }
+.step ol { margin: 0; padding-left: 18px; display: grid; gap: 4px; font-size: 13.5px; }
+.table-wrap { overflow-x: auto; border: 1px solid var(--rule); border-radius: 4px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { text-align: left; padding: 8px 12px; border-top: 1px solid var(--rule); vertical-align: top; }
+thead th { border-top: 0; font: 600 11px/1.2 var(--body); letter-spacing: .07em; text-transform: uppercase; color: var(--muted); background: var(--bg); }
+td.tools { font-family: var(--mono); font-size: 12px; color: var(--blue); }
+td.p { white-space: nowrap; }
+.rules { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+.rules > div { border-left: 3px solid var(--blue); padding: 2px 0 2px 12px; display: grid; gap: 4px; }
+.rules > div.warn { border-left-color: var(--orange); }
+.rules p { font-size: 13px; color: var(--ink2); }
+
+footer { border-top: 1px solid var(--rule); padding-top: 14px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; font-size: 13px; color: var(--ink2); }
+footer h3 { color: var(--ink); margin-bottom: 4px; }
+
+@media (max-width: 900px) {
+  .flow { grid-template-columns: 1fr 1fr; gap: 10px; }
+  .stage, .stage + .stage { border-left: 1px solid var(--rule); }
+  .stage::after { display: none; }
+  .grid3, .rules, footer { grid-template-columns: 1fr; }
+  .mcp, .boundary { grid-template-columns: 1fr; }
+  .boundary .ai { border-left: 0; border-top: 1px solid var(--rule); }
+}
+@media (max-width: 480px) { .flow { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <header class="hero">
+    <span class="eyebrow">S&amp;P 500 + MidCap 400 · nightly · self-grading</span>
+    <h1>Stock Analyzer</h1>
+    <p class="lede">A nightly screener that finds technical setups, grades the company behind each one,
+    scores a 0-100 verdict, and then buys every signal on paper to measure which of those judgments
+    actually predicted the return. Every number is computed in Python. Results arrive as one Discord
+    message a night, and the whole system can be run from Claude through an MCP server.</p>
+    <div class="facts">
+      <div class="fact"><b>903</b><span>stocks screened nightly</span></div>
+      <div class="fact"><b>4</b><span>technical screens</span></div>
+      <div class="fact"><b>74</b><span>quality parameters (17 exclusion rules)</span></div>
+      <div class="fact"><b>1</b><span>Discord message a night</span></div>
+      <div class="fact"><b>34</b><span>MCP tools</span></div>
+    </div>
+  </header>
+
+  <section>
+    <div class="head"><h2>How a night works</h2>
+      <p>One process, <code>run_scanners.py</code>, runs every step in order and posts once. Each step is fail-safe: a failure costs its own section of the message, not the night.</p></div>
+    <div class="flow">
+      <div class="stage"><span class="tag">Universe</span><h3>903 constituents</h3>
+        <p>S&amp;P 500 and MidCap 400 lists from Wikipedia; two years of daily bars in one bulk download.</p>
+        <span class="rec">unsettled bars dropped</span></div>
+      <div class="stage"><span class="tag">Tier 1</span><h3>Technical screens</h3>
+        <p>Breakout, pullback, reclaim and trend run over the whole panel at once.</p>
+        <span class="rec">Setup: full / partial</span></div>
+      <div class="stage"><span class="tag">Tier 2</span><h3>Quality and exclusion</h3>
+        <p>Fast-stage registry grades each hit: ⭐ badge, 🚫 veto, and risk/reward coordinates.</p>
+        <span class="rec">Quality · Veto · Quadrant</span></div>
+      <div class="stage"><span class="tag">Tier 3</span><h3>Graded verdict</h3>
+        <p>The full registry plus SEC flags, scored 0-100 into STRONG, WATCH or PASS, with a financials chart.</p>
+        <span class="rec">Verdict · Conviction</span></div>
+      <div class="stage"><span class="tag">Tier 4</span><h3>Virtual portfolio</h3>
+        <p>Buys every signal at the next open, marks it at 10/30/60 days, and watches for a double-top exit.</p>
+        <span class="rec">positions · exits</span></div>
+      <div class="stage out"><span class="tag">Output</span><h3>One message</h3>
+        <p>Signal cards with charts, verdict cards, and exit warnings, posted together.</p>
+        <span class="rec">output/ + Discord</span></div>
+    </div>
+    <div class="when">
+      <span><b>When:</b> Tue–Sat 07:00 Israel (00:00 ET), grading the previous session's settled close.</span>
+      <span><b>Weekly:</b> Sunday 18:00, the week's signals onto the risk/reward plane.</span>
+      <span><b>Record:</b> every signal and verdict archived to <code>output/history/signals.csv</code>.</span>
+    </div>
+  </section>
+
+  <section>
+    <div class="head"><h2>Capabilities</h2>
+      <p>The nightly pipeline, the tools you run on demand, and the measurement that grades both.</p></div>
+    <div class="grid3">
+      <div class="card">
+        <h3>Technical screens</h3>
+        <ul>
+          <li><b>Breakout</b> from a tight multi-month range on volume, with a strong green candle.</li>
+          <li><b>Pullback</b> to a rising 150-day SMA after a year-long uptrend.</li>
+          <li><b>Reclaim</b> of a long-term SMA after a long downtrend, gap-up aware.</li>
+          <li><b>Trend</b>: the day a near-linear 10-month uptrend first qualifies.</li>
+        </ul>
+        <p class="muted">Partial setups are alerted too, with the failing condition named.</p>
+      </div>
+      <div class="card">
+        <h3>Quality registry</h3>
+        <ul>
+          <li><b>⭐ Badge:</b> passes every quality gate (P/E, D/E, margins, ROIC, FCF…).</li>
+          <li><b>🚫 Veto:</b> visibly failing (Altman Z, Beneish M, going concern, restatement…). A label, never hidden.</li>
+          <li><b>Plane:</b> separate reward and risk axes, quadrants buy / speculative / dull / avoid.</li>
+          <li><b>Sector-relative</b> scoring against sector peers, so utilities are not penalized for being utilities.</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>Virtual portfolio</h3>
+        <ul>
+          <li>Buys every recorded signal; nothing is filtered out, so every attribute can be compared.</li>
+          <li>Double-top exit flags a position without closing it, so two exit methods can be compared.</li>
+          <li><code>analyze</code> ranks which screen, rule, veto, verdict or research judgment predicted returns, using Benjamini–Hochberg q-values.</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>Risk/reward plane</h3>
+        <ul>
+          <li>Grades all 903 stocks (or the week's signals) on both axes.</li>
+          <li>Writes a table, a scatter chart and an interactive page, and rebuilds the sector peer distributions.</li>
+        </ul>
+        <span class="k">universe_scan.py</span>
+      </div>
+      <div class="card">
+        <h3>Industry valuation</h3>
+        <ul>
+          <li>Splits each industry's price move into multiple change and earnings change.</li>
+          <li>Flags <b>cheap</b> (multiple low while earnings grew) and <b>rich</b> (multiple high and expanding).</li>
+        </ul>
+        <span class="k">industry_valuation.py</span>
+      </div>
+      <div class="card">
+        <h3>Research and reports</h3>
+        <ul>
+          <li><b>Theme screen:</b> companies that benefit from a dated real-world event, from news and SEC filings.</li>
+          <li><b>Enrich:</b> qualitative research recorded as categories the portfolio can grade.</li>
+          <li><b>Dossier:</b> one page per ticker with everything graded and researched.</li>
+          <li><b>Backtests</b> per ticker and across the universe, plus a threshold tuner.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="head"><h2>Where AI fits</h2>
+      <p>The analyzer never runs a model; a test fails if any code path could start one.</p></div>
+    <div class="boundary">
+      <div class="py">
+        <span class="eyebrow">Python decides</span>
+        <p>Every screen, gate, veto, score, tier, verdict sentence and portfolio statistic. Each figure can be traced to <code>config.json</code> and recomputed.</p>
+      </div>
+      <div class="ai">
+        <span class="eyebrow">Claude researches, from a session</span>
+        <p>The <code>enrich</code> and <code>theme-screen</code> skills add qualitative research and name candidates. Their output is recorded beside the data, cannot carry a score, and is graded by the portfolio like any other hypothesis.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="head"><h2>Optional integration: Interactive Brokers MCP</h2>
+      <p>The two research skills can use the Interactive Brokers connector in Claude for company and theme data no free API offers. The nightly analyzer never needs it.</p></div>
+    <div class="grid3">
+      <div class="card">
+        <h3><code>enrich</code> skill: the moat graph</h3>
+        <ul>
+          <li><span class="k">search_contracts</span> resolves the ticker to its US contract.</li>
+          <li><span class="k">get_company_connections</span> gives products and revenue mix, ranked competitors and how they compete, and geography, each with evidence.</li>
+          <li><span class="k">get_company_themes</span> · <span class="k">get_theme_details</span> give secular exposure and ranked peers.</li>
+          <li><span class="k">get_option_data</span> gives the implied move when a catalyst is near.</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3><code>theme-screen</code> skill: finding names</h3>
+        <ul>
+          <li><span class="k">search_investment_topics</span> → <span class="k">get_theme_details</span> ranks companies by relevance to a theme. Query with short singular nouns: <code>grid</code>, <code>semiconductor</code>.</li>
+          <li><span class="k">get_company_connections</span> maps the supplier and competitor graph behind a name.</li>
+          <li><span class="k">search_contracts</span> confirms a US listing; foreign listings are refused when recorded.</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>Setup and limits</h3>
+        <ul>
+          <li>Connect <b>Interactive Brokers</b> under Connectors in Claude and sign in. If an <code>enrich</code> report's moat section comes back empty, the login has expired; renew it.</li>
+          <li>Without it, both skills still run on the analyzer's tools and web search, and the report says which sections are thin.</li>
+          <li><b>Research only.</b> Account tools (<code>get_account_*</code>, <code>get_pa_*</code>) are never called, and holdings are never mentioned.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="head"><h2>Managing it from Claude (MCP)</h2>
+      <p><code>mcp_server.py</code> exposes the whole system as tools. Long runs return a <code>job_id</code> immediately; poll it with <code>job_status</code>.</p></div>
+    <div class="mcp">
+      <div class="install">
+        <div class="step">
+          <h3>Claude Code</h3>
+          <ol>
+            <li>Open Claude Code in the repo folder. <code>.mcp.json</code> is already there.</li>
+            <li>Approve the <code>stock_analyzer</code> server once.</li>
+            <li>Run <code>/mcp</code> to confirm it shows connected.</li>
+          </ol>
+          <p class="muted">The skills (<code>enrich</code>, <code>theme-screen</code>, <code>tune-thresholds</code>, <code>universe-backtest</code>) load automatically.</p>
+        </div>
+        <div class="step">
+          <h3>Claude Desktop</h3>
+          <p class="muted">Settings → Developer → Edit Config, add the server with absolute paths, then restart the app.</p>
+<pre>"stock_analyzer": {
+  "command": "C:\\path\\to\\python.exe",
+  "args": ["C:\\path\\to\\stock_analyzer\\mcp_server.py"],
+  "env": { "PYTHONUTF8": "1" }
+}</pre>
+        </div>
+        <div class="step">
+          <h3>After editing code</h3>
+          <p class="muted">The server keeps the code it started with. Run <code>/mcp</code> → reconnect (or restart Desktop). Check offline with <code>python mcp_server.py --selftest</code>.</p>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Area</th><th>Tools</th><th class="p">Approval</th></tr></thead>
+          <tbody>
+            <tr><td>Nightly scan</td><td class="tools">run_nightly_scan · scan_status · scan_tickers</td><td class="p"><span class="chip or">scan prompts</span></td></tr>
+            <tr><td>Verdict</td><td class="tools">deepdive_candidates · deepdive_context · risk_research</td><td class="p"><span class="chip gr">auto</span></td></tr>
+            <tr><td>Plane</td><td class="tools">universe_scan · universe_quadrant</td><td class="p"><span class="chip gr">auto</span></td></tr>
+            <tr><td>Industries</td><td class="tools">valuation_scan · valuation_read · valuation_record</td><td class="p"><span class="chip or">record prompts</span></td></tr>
+            <tr><td>Themes</td><td class="tools">theme_research · theme_read · theme_record</td><td class="p"><span class="chip or">record prompts</span></td></tr>
+            <tr><td>Research</td><td class="tools">enrichment_read · enrichment_record · combined_report</td><td class="p"><span class="chip gr">auto</span></td></tr>
+            <tr><td>Portfolio</td><td class="tools">portfolio_status · positions · open · mark · analyze · exit_scan</td><td class="p"><span class="chip or">exit_scan prompts</span></td></tr>
+            <tr><td>Backtests</td><td class="tools">backtest_universe · backtest_ticker · tune_screen</td><td class="p"><span class="chip gr">auto</span></td></tr>
+            <tr><td>Config</td><td class="tools">params_list · config_get · config_set · config_edit · config_delete</td><td class="p"><span class="chip or">writers prompt</span></td></tr>
+            <tr><td>Jobs</td><td class="tools">job_status · job_result · list_jobs</td><td class="p"><span class="chip gr">auto</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div class="rules">
+      <div class="warn"><h3>Safe by default</h3>
+        <p>A tool prompts if it can post to Discord, change <code>config.json</code>, or write into the signal table. Discord tools default to <code>send=False</code>; config writers preview a diff until <code>confirm=True</code>.</p></div>
+      <div><h3>Tuning from a session</h3>
+        <p><code>params_list("quality")</code> shows every parameter, including disabled ones. <code>config_set(path, value, confirm=True)</code> changes one value, validates it, and backs up the file.</p></div>
+      <div><h3>Reading results</h3>
+        <p>Reports, logs and CSVs live under <code>output/</code> and are read as ordinary files. There are no file-reading tools to maintain.</p></div>
+    </div>
+  </section>
+
+  <footer>
+    <div><h3>Where files go</h3><p><code>output/history</code> signals and verdicts · <code>reports</code> facts, charts, dossiers · <code>portfolio</code> ledger and findings · <code>logs</code> one line per step.</p></div>
+    <div><h3>Configuration</h3><p>Every threshold and label is in <code>config.json</code>. Secrets (Discord webhook, SEC contact) go in <code>.env</code>, never in config.</p></div>
+    <div><h3>Checks</h3><p><code>python tests/run_all.py</code>, about 4 minutes, offline. Research and measurement only; not investment advice.</p></div>
+  </footer>
+
+</div>
+</body>
+</html>

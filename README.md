@@ -597,6 +597,8 @@ requests, so check that your use fits each provider's terms:
 
 Companion documents:
 
+- [`docs/overview.html`](docs/overview.html): a one-page visual overview of the
+  pipeline, the capabilities and MCP management (download and open in a browser).
 - [`RESEARCH_DATA.md`](RESEARCH_DATA.md): what each data source can supply.
 - [`DETERMINISTIC_GAPS.md`](DETERMINISTIC_GAPS.md): metrics not computed yet.
 - [`AI_ROLE.md`](AI_ROLE.md): where AI is and is not used.
