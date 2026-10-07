@@ -612,6 +612,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). In short:
 - every number stays computed in Python;
 - `python tests/run_all.py` must pass.
 
+Found a security issue? Report it privately; see [SECURITY.md](SECURITY.md).
+
 ## License
 
 [MIT](LICENSE). Read the warranty disclaimer, and the investment-advice note at
