@@ -12,3 +12,6 @@ output/
 
 # Local Claude Code settings: machine-specific paths, per-clone by design.
 .claude/settings.local.json
+
+# Editor settings: per-machine preferences.
+.vscode/
