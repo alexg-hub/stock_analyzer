@@ -467,8 +467,8 @@ lists every question with how much data it still needs.
 
 ## Backtesting and tuning
 
-**`backtest_universe.py`** runs every screen over the whole universe and three
-years of history, using the production condition code, and trades each signal on
+**`backtest_universe.py`** runs every screen over the whole universe and
+`backtest.years` (4) of history, using the production condition code, and trades each signal on
 a grid of **wait** (`entry_delay_days`) × **hold** (`holding_days`). It compares
 each cohort with a random-entry baseline and with SPY. Outputs are under
 `output/`: a trades CSV, a summary CSV, a bar chart and a wait × hold heatmap.

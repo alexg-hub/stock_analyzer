@@ -80,7 +80,7 @@
         "dpi": 120
     },
     "backtest": {
-        "years": 3,
+        "years": 4,
         "holding_days": [10, 30, 60],
         "entry_delay_days": [0, 1, 2, 3, 4, 5],
         "entry": "next_open",
@@ -744,7 +744,7 @@
                 "score": null
             },
             "dilution_veto": {
-                "enabled": true,
+                "enabled": false,
                 "label": "Dilution veto",
                 "source": "yahoo_deep.buyback_2y",
                 "group": "risk",
