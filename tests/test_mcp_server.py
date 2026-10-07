@@ -166,7 +166,7 @@ _us.load_cache = lambda _cfg: {"ZZZTEST": {"values": {}}}
 _us.build_table = lambda _cfg, _view, sectors: _seen.setdefault("frame", sectors)
 _peers.sector_of = lambda _t, _cfg: "Utilities"
 try:
-    universe._table(config())
+    universe._table(config(), tickers=["ZZZTEST"])
 finally:
     _us.load_cache, _us.build_table, _peers.sector_of = _saved
 _frame = _seen.get("frame")

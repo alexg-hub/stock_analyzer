@@ -32,8 +32,6 @@ def _table(cfg: dict, tickers: list[str] | None = None):
         return None, pd.DataFrame()
     import peers
 
-    wanted = [t.upper() for t in tickers] if tickers else list(cache)
-    view = {t: cache[t] for t in wanted if t in cache}
     # Regrading needs each ticker's sector, or every `sector_relative`
     # parameter silently falls back to absolute anchors and the quadrants
     # disagree with the published plane (294 of 903 did). Offline sources only:
@@ -44,6 +42,16 @@ def _table(cfg: dict, tickers: list[str] | None = None):
     if latest:
         table = pd.read_csv(latest[-1])
         meta = table[[c for c in meta.columns if c in table.columns]]
+
+    # The whole-index view is the current membership: the cache also keeps
+    # tickers that have since left the index, frozen at their last fetch.
+    if tickers:
+        wanted = [t.upper() for t in tickers]
+    elif not meta.empty:
+        wanted = meta["ticker"].tolist()
+    else:
+        wanted = list(cache)
+    view = {t: cache[t] for t in wanted if t in cache}
     sectors = (pd.DataFrame({"ticker": list(view)})
                .merge(meta, on="ticker", how="left")
                .reindex(columns=["ticker", "sector", "sub_industry", "index_name"])
