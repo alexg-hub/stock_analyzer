@@ -32,7 +32,7 @@ import io
 import json
 import sys
 import tempfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -353,9 +353,15 @@ c.ok("a fully unsettled bar is dropped",
      drop_unsettled_bars(with_unsettled(panel)).index.equals(panel.index))
 c.ok("several unsettled bars are all dropped",
      drop_unsettled_bars(with_unsettled(panel, bars=3)).index.equals(panel.index))
+# The synthetic bar is dated the day after the panel's last one, which is in
+# the future whenever the cache was refreshed today -- and a session that has
+# not closed yet is dropped by design. Grade it from a clock well after it.
+_settled = (panel.index[-1] + pd.Timedelta(days=10)).to_pydatetime().replace(
+    hour=12, tzinfo=timezone.utc)
 c.ok("a few missing tickers do not discard the bar",
      len(drop_unsettled_bars(
-         with_unsettled(panel, missing=max(1, len(all_tickers) // 10)))
+         with_unsettled(panel, missing=max(1, len(all_tickers) // 10)),
+         now=_settled)
      ) == len(panel) + 1,
      "per-ticker download failures are normal and must not lose the day")
 
